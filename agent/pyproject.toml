@@ -1,0 +1,25 @@
+[project]
+name = "coding-agent"
+version = "0.1.0"
+description = "The AgentCore Runtime container: plan -> code -> verify -> review"
+requires-python = ">=3.11"
+
+# Upper bounds at the next major on every line (invariant 29). `claude-agent-sdk`'s
+# range is narrower on purpose: 0.2.x is what keeps `"Task"` accepted in
+# ALLOWED_TOOLS after the upstream `Task` -> `Agent` rename. `botocore` is floored at
+# 1.43.0 because `bedrock-agentcore` needs a newer botocore than the Lambda runtime
+# ships (invariant 20).
+dependencies = [
+    "langgraph>=1.0,<2",
+    "claude-agent-sdk>=0.2.0,<0.3.0",
+    "bedrock-agentcore>=1.0,<2",
+    "boto3>=1.43.0,<2",
+    "botocore>=1.43.0,<2",
+]
+
+[build-system]
+requires = ["setuptools>=68,<81"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

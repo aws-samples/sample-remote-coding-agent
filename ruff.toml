@@ -1,0 +1,60 @@
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = [
+    "E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF", "ARG", "PTH", "T20", "C901",
+    "FURB", "PLR0402", "A002", "PLR0911", "PLR0912",
+]
+ignore = ["E501"]  # line-length is reported by the formatter's own rules; long URLs in comments are fine
+
+# What the second line of `select` buys, measured on this tree rather than assumed:
+# `FURB` finds 11, nearly all mechanical -- eight `FURB167` regex-flag aliases (`re.M`,
+# `re.I`) in `nodes/checkout.py` and `nodes/review.py`, plus one `FURB110`, one `FURB157` and
+# one `FURB162` whose `.replace("Z", "+00:00")` was redundant from 3.11 on. `PLR0402` finds 7
+# `import stacks.x as x` lines that `from stacks import x` says shorter. `A002` finds 9
+# arguments shadowing a builtin -- four hook callbacks taking `input` and five CDK constructs
+# taking `id` -- and every one is fixed by renaming, not by a per-file ignore: `infra/` is
+# where new constructs land, so switching the rule off there switches it off exactly where it
+# would do work.
+#
+# What is deliberately NOT selected, with the count that decided it, so none of this is
+# relitigated. These are not oversights and each was run:
+# `S101` (2,815) is tests asserting. `PLR2004` (229) and `SLF001` (205) are tests comparing
+# literals and exercising private functions, which is how this whole suite is written.
+# `INP001` (58) would flag the namespace packages `CLAUDE.md` documents as load-bearing:
+# `mcp/` deliberately has no `__init__.py` so the real MCP SDK is not shadowed, and
+# `infra/stacks/` has none so `stacks` resolves as a namespace package. `TRY003`, `EM101` and
+# `EM102` (127 together) all fight the long, human-readable exception messages this
+# repository is built on. `ERA001` (4) is four false positives -- an arithmetic comment in
+# `graph.py`, two numbered `FOLLOW-UP` notes in `state.py`, and a quoted phrase in
+# `tests/test_docs.py`. `S105`/`S106` (15) are every one a test-fixture token. `PLR0913` (13)
+# is the paragraph below.
+
+# 12, which is neither ruff's default 10 nor the 16 the worst function in the tree scores.
+# `make lint` covers `tests/` as well as the four source directories, and across all of it
+# six functions sit at 11 or 12 -- `hooks.build_hooks`, `subagents._collect`,
+# `provisioner._delete` and three test helpers -- and exactly one sits above:
+# `api_stack._apply_grants` at 16, which carries a `# noqa: C901` at its own def because its
+# branch count IS the size of the `_CAPABILITIES` vocabulary it dispatches on. Nothing at all
+# occupies 13, 14 or 15, so a ceiling of 16 would license a band the repository does not use;
+# 12 is the shape the code actually has, and it refuses new complexity everywhere, including
+# in the rest of `api_stack.py`. `RUF100` is selected, so if `_apply_grants` is ever
+# simplified the stale suppression fails the lint rather than quietly staying loose.
+#
+# `PLR0911` and `PLR0912` are selected and every one of their three findings is suppressed at
+# its own def, which is the point rather than a failure: the rules exist to catch the NEXT
+# function that grows a tenth return or an eighteenth branch, and `RUF100` makes each of the
+# three suppressions fail the lint the moment the function it names is simplified.
+# `PLR0913` (too-many-arguments) is deliberately NOT selected: it finds nine functions in
+# source and four more in `tests/`, almost all CDK constructs and `subagents.build_options`,
+# where a wide keyword surface is the idiom and a parameter object would hide the surface
+# rather than shrink it.
+[lint.mccabe]
+max-complexity = 12
+
+[lint.per-file-ignores]
+# A test that takes `aws` purely for its side effect has an unused argument by design.
+"tests/*" = ["ARG001"]
+# CDK keyword arguments are camelCase because CloudFormation is.
+"infra/*" = ["N803", "N815"]

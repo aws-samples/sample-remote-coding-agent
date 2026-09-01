@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+cdk.out/
+.claude/settings.local.json
+
+# Written by the CDK CLI on any `synth`/`deploy`, and it must not be committed: it caches
+# context lookups keyed by *account and region*, so the file that lands names whichever
+# account happened to run the command. Committing it pins every later checkout's lookups to
+# that account -- and pins them stale, which is worse than not caching, because a stale entry
+# is used in preference to asking. `make deploy` already keeps its own outputs file out of the
+# tree for the same reason; this is the one the CDK CLI writes behind it.
+infra/cdk.context.json
+
+# The remote coding agent's own working directory, and the name it quarantines a
+# repository-provided one to. `.agent/` is where a run's own specification, review and
+# memory live, and `nodes/checkout.py::_quarantine_repo_agent_dir` renames a
+# clone-provided `.agent/` to `.agent.repo/` so repository content is not read as this
+# task's specification and memory. Both are per-run scratch, so neither belongs in a
+# commit -- and a committed `.agent.repo/` would additionally make that function's
+# already-moved guard (`destination.exists()`) true before anything had been moved,
+# leaving a repository's own `.agent/` in place to be read as this task's state.
+.agent/
+.agent.repo/

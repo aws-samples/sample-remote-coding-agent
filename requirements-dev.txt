@@ -1,0 +1,17 @@
+# The repository's own test toolchain. The suite imports across all four package
+# directories, so it belongs to the repository rather than to any one of them --
+# putting it in `agent/pyproject.toml`'s dev extra would make that manifest lie
+# about what `agent` needs.
+#
+# Every bound is an upper bound at the next major (invariant 29), and neither
+# incident behind it is theoretical: `pytest>=8.0` resolves to 9.1.1 on PyPI today
+# and turned a green checkout red, and `mcp>=1.2.0` resolves to 2.0.0, which
+# removed a method.
+pytest>=8.0,<9
+pytest-asyncio>=1.0,<2
+pytest-xdist>=3.5,<4
+moto[cloudformation,dynamodb,sqs]>=5.0,<6
+ruff>=0.6,<1
+# The type checker. Configured by `mypy.ini` -- which also records the adoption baseline --
+# and run by `make lint` as its last command, so a new finding is a red lint and not a note.
+mypy>=1.11,<2

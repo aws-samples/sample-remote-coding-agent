@@ -1,0 +1,5 @@
+{
+  "name": "rca-agent-skills",
+  "version": "0.1.0",
+  "description": "The two static skills every remote coding agent role receives as a local plugin root: repository conventions and review rigor."
+}

@@ -1,0 +1,27 @@
+{
+  "name": "sample-rca",
+  "version": "0.3.1",
+  "description": "Dispatch a coding task to a remote agent running in your own AWS account, and get a pull request back.",
+  "homepage": "https://github.com/aws-samples/sample-remote-coding-agent",
+  "repository": "https://github.com/aws-samples/sample-remote-coding-agent",
+  "userConfig": {
+    "api_url": {
+      "type": "string",
+      "title": "Control-plane API URL",
+      "required": false,
+      "description": "Optional override for the control plane's URL. Leave it empty: the server reads the ApiUrl output of the SampleCodingAgentApi stack itself and caches it, which is what makes this install one step with nothing to paste. Setting it exports RCA_API_URL, which **takes precedence over the ~/.rca/endpoint.json endpoint document `make deploy` writes** — so a value left here from an earlier deployment keeps pointing every tool at that older deployment even after a fresh deploy into another region. Set it only to point a second checkout at a second deployment, and read the `endpoint used:` line every tool now prints to confirm which deployment a call reached."
+    },
+    "aws_region": {
+      "type": "string",
+      "title": "AWS region",
+      "required": false,
+      "description": "Optional override for the region the deployment lives in. Leave it empty to use the region your AWS credentials already resolve to. Setting it exports AWS_REGION, which pins the region and so takes precedence over the region named in the ~/.rca/endpoint.json endpoint document `make deploy` writes — an unpinned region would otherwise follow that document into whichever region was deployed to last. Set it only if you deploy into more than one region; every tool prints the region it used on its `endpoint used:` line."
+    },
+    "stack_name": {
+      "type": "string",
+      "title": "CloudFormation stack name",
+      "required": false,
+      "description": "Optional override for the CloudFormation stack the endpoint is discovered from. Leave it empty for the default, SampleCodingAgentApi. Setting it exports RCA_STACK_NAME, which also pins the region and so takes precedence over the ~/.rca/endpoint.json endpoint document `make deploy` writes. Set it only if you renamed the stack or run two of them; every tool prints the endpoint and region it used on its `endpoint used:` line."
+    }
+  }
+}

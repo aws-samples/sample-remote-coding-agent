@@ -1,0 +1,4 @@
+# Written by `make deploy` from the stack outputs, never committed: it is not a secret,
+# but it names one live deployment and a committed copy points every checkout at it.
+# The rule lives here rather than in the root .gitignore so this directory owns it.
+config.js

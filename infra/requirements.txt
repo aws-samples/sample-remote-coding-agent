@@ -1,0 +1,5 @@
+# The CDK app's dependencies. No `infra/pyproject.toml`: this directory is run by
+# the `cdk` CLI, not installed as a wheel. Upper bounds at the next major
+# (invariant 29) -- CDK v3 will not be source-compatible with v2.
+aws-cdk-lib>=2.150.0,<3
+constructs>=10.0.0,<11

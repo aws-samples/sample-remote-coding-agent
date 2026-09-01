@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Remote coding agent</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#view">Skip to the board</a>
+    <aside id="sidebar" aria-label="Repositories"></aside>
+    <main id="view" tabindex="-1"></main>
+    <!-- One live region for the whole console, so a toast, an armed button's prompt and
+         a refusal's reason are all announced without a view owning any of it. -->
+    <div id="toasts" role="status" aria-live="polite"></div>
+    <!-- `config.js` is a separate, classic script and is gitignored: it is written by
+         `make deploy` from the deployed stack's outputs and names one live deployment
+         (user pool, app client, hosted-UI domain). Not a secret, but a committed copy
+         points every checkout at one account and goes stale silently. When it is
+         missing, `js/app.js` renders a panel naming this file and that command instead
+         of a blank page. Nothing here is inline: the CloudFront response-headers policy
+         allows `script-src 'self'` with no inline allowance. -->
+    <script src="./config.js"></script>
+    <script type="module" src="./js/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,1163 @@
+/*
+ * One stylesheet, no build step, no framework.
+ *
+ * Structure, in order: tokens, reset, layout, sidebar, board, card, chip and tone,
+ * buttons and refusal, forms, tables, panels and banners, toasts, empty states, focus,
+ * reduced motion, dark scheme.
+ *
+ * Two rules here are load-bearing rather than cosmetic, and both are asserted by
+ * `tests/`:
+ *
+ * 1. `--tone-good` and `--tone-warn` are different colours, and `.tone-warn` does not
+ *    resolve to `var(--tone-good)`. `SUCCEEDED_UNVERIFIED` means "a draft nobody
+ *    verified", the verification veto is one-way (invariant 6), and a stylesheet that
+ *    paints a draft green undoes the whole thing without touching a line of JS.
+ * 2. `[aria-disabled="true"]` dims the control and changes its cursor, and must NOT set
+ *    `pointer-events: none`. A refused control still has to receive its click, because
+ *    the click is what toasts the reason -- a reason carried only in a tooltip is
+ *    unreachable by touch and by keyboard alike. Hover is not an affordance.
+ *
+ * Nothing conveys state by colour alone anywhere: every chip, dot and accent has its
+ * label written next to it.
+ */
+
+/* -- tokens ------------------------------------------------------------------------ */
+
+:root {
+  color-scheme: light dark;
+
+  /* Surfaces, from the page backwards to the raised card. */
+  --surface-sunken: #eef0f4;
+  --surface: #f7f8fa;
+  --surface-raised: #ffffff;
+  --surface-rail: #ffffff;
+  --surface-hover: #f0f2f6;
+
+  /* Ink, from body text to the faintest caption. */
+  --ink: #16191f;
+  --ink-muted: #5b6472;
+  --ink-faint: #858e9c;
+  --ink-inverse: #ffffff;
+
+  --line: #d9dee6;
+  --line-strong: #b9c1cd;
+
+  --accent: #2a5bd7;
+  --accent-hover: #1f47ad;
+  --accent-soft: #e8eeff;
+
+  --danger: #b3261e;
+  --danger-hover: #8e1e17;
+  --danger-soft: #fdecea;
+
+  /* The five tones, and the only owner of the palette. `good` and `warn` are a green
+     and an amber and are deliberately far apart in hue *and* in lightness, so they are
+     still distinguishable in a screenshot, on a projector, and to a red/green
+     colour-blind reader. */
+  --tone-idle: #6b7484;
+  --tone-live: #2a5bd7;
+  --tone-good: #1b7f4b;
+  --tone-warn: #a8620a;
+  --tone-bad: #b3261e;
+
+  /* The wash behind a chip of each tone. */
+  --tone-idle-soft: #eef0f4;
+  --tone-live-soft: #e8eeff;
+  --tone-good-soft: #e6f4ec;
+  --tone-warn-soft: #fdf1e2;
+  --tone-bad-soft: #fdecea;
+
+  /* An 8 px spacing scale, with a 4 px half-step for the inside of small controls. */
+  --s-half: 4px;
+  --s-1: 8px;
+  --s-2: 12px;
+  --s-3: 16px;
+  --s-4: 24px;
+  --s-5: 32px;
+
+  --radius: 6px;
+  --radius-pill: 999px;
+  --rail-width: 240px;
+
+  --shadow-card: 0 1px 2px rgb(16 25 40 / 6%);
+  --shadow-raised: 0 4px 12px rgb(16 25 40 / 12%);
+
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    monospace;
+}
+
+/* -- reset ------------------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  min-height: 100vh;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+p,
+ul,
+ol,
+figure {
+  margin: 0;
+}
+
+ul,
+ol {
+  padding: 0;
+  list-style: none;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+code,
+kbd,
+pre,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+pre {
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* The first thing in the document and the first thing in the tab order: a console whose
+   sidebar is thirty repositories long is otherwise thirty tabs deep before the board. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: var(--s-1) var(--s-2);
+  background: var(--surface-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.skip-link:focus {
+  left: var(--s-1);
+  top: var(--s-1);
+}
+
+/* -- layout ----------------------------------------------------------------------- */
+
+#sidebar {
+  flex: 0 0 var(--rail-width);
+  width: var(--rail-width);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-2);
+  background: var(--surface-rail);
+  border-right: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+#view {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--s-3) var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+#view:focus {
+  outline: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  flex-wrap: wrap;
+}
+
+.row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.muted {
+  color: var(--ink-muted);
+}
+
+.faint {
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+
+.rel {
+  color: var(--ink-faint);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -- sidebar ---------------------------------------------------------------------- */
+
+.sidebar-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.brand {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.sidebar-nav {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.repo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.repo-link {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: var(--s-1);
+  border-radius: var(--radius);
+  color: var(--ink);
+  min-width: 0;
+}
+
+.repo-link:hover {
+  background: var(--surface-hover);
+  text-decoration: none;
+}
+
+.repo-row.is-current .repo-link {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  font-weight: 600;
+}
+
+.repo-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-status {
+  margin-left: auto;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.repo-empty {
+  padding: var(--s-1);
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+
+.sidebar-account {
+  border-top: 1px solid var(--line);
+  padding-top: var(--s-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.account-email {
+  color: var(--ink-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -- the board -------------------------------------------------------------------- */
+
+.board-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.board-title {
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--s-2);
+  align-items: start;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  /* The top border is where a live column announces itself; 2 px of transparent here so
+     switching it on does not move the cards down by two pixels. */
+  border-top: 2px solid transparent;
+}
+
+.column.is-live {
+  border-top-color: var(--tone-live);
+}
+
+.column.is-over {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.column-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: var(--s-1) var(--s-2);
+  background: var(--surface-sunken);
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius) var(--radius) 0 0;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.column-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--ink-faint);
+}
+
+.column-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-1);
+  min-height: 120px;
+}
+
+.column-empty {
+  padding: var(--s-2);
+  color: var(--ink-faint);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* A card the board is drawing outside the five columns, rather than dropping. A card
+   must never silently vanish, so this strip is loud on purpose. */
+.unplaced {
+  border: 1px dashed var(--tone-warn);
+  background: var(--tone-warn-soft);
+  border-radius: var(--radius);
+  padding: var(--s-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.unplaced-title {
+  font-weight: 650;
+  color: var(--tone-warn);
+}
+
+/* -- a card ----------------------------------------------------------------------- */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-1) var(--s-2);
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+}
+
+.card:hover {
+  border-color: var(--line-strong);
+}
+
+.card[draggable="true"] {
+  cursor: grab;
+}
+
+.card.is-dragging {
+  opacity: 0.5;
+}
+
+/* An optimistic placement: drawn where it was dropped, before the server has agreed. */
+.card[data-pending="true"] {
+  border-style: dashed;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.card-title {
+  font-weight: 600;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.card-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  flex-wrap: wrap;
+}
+
+.card-actions {
+  display: flex;
+  gap: var(--s-half);
+  flex-wrap: wrap;
+}
+
+.card-note {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+/* -- chips, dots and the five tones ----------------------------------------------- */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-half);
+  padding: 1px var(--s-1);
+  border: 1px solid currentcolor;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+/* One rule per tone, and each sets `color` so `currentcolor` carries it to a chip's
+   border and a dot's fill. `.tone-warn` is its own colour and not `var(--tone-good)`:
+   see the header comment. */
+.tone-idle {
+  color: var(--tone-idle);
+}
+
+.tone-live {
+  color: var(--tone-live);
+}
+
+.tone-good {
+  color: var(--tone-good);
+}
+
+.tone-warn {
+  color: var(--tone-warn);
+}
+
+.tone-bad {
+  color: var(--tone-bad);
+}
+
+.chip.tone-idle {
+  background: var(--tone-idle-soft);
+}
+
+.chip.tone-live {
+  background: var(--tone-live-soft);
+}
+
+.chip.tone-good {
+  background: var(--tone-good-soft);
+}
+
+.chip.tone-warn {
+  background: var(--tone-warn-soft);
+}
+
+.chip.tone-bad {
+  background: var(--tone-bad-soft);
+}
+
+/* The live column's header dot breathes. Wrapped in a no-preference query, so a reader
+   who asked for less motion simply gets a solid dot. */
+@media (prefers-reduced-motion: no-preference) {
+  .column.is-live .dot {
+    animation: pulse 2s ease-in-out infinite;
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.45;
+    transform: scale(0.8);
+  }
+}
+
+/* -- buttons, and refusal --------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-half);
+  padding: var(--s-half) var(--s-1);
+  min-height: 28px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 550;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  background: var(--surface-hover);
+  text-decoration: none;
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--ink-inverse);
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-secondary {
+  background: var(--accent-soft);
+  border-color: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
+.btn-secondary:hover {
+  border-color: var(--accent);
+}
+
+.btn-quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-muted);
+}
+
+.btn-quiet:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+.btn-danger {
+  background: var(--surface-raised);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.btn-danger:hover {
+  background: var(--danger-soft);
+}
+
+/* Armed: one click has happened, the label now names what the next click will do, and
+   the button looks like the commitment it is. */
+.btn[data-armed="true"] {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--ink-inverse);
+  font-weight: 700;
+}
+
+.btn[data-armed="true"]:hover {
+  background: var(--danger-hover);
+}
+
+.btn-block {
+  width: 100%;
+}
+
+.btn-small {
+  min-height: 24px;
+  padding: 0 var(--s-1);
+  font-size: 12px;
+}
+
+/*
+ * A refused control: dimmed, with a cursor that says so, and STILL CLICKABLE.
+ *
+ * `pointer-events: none` is deliberately absent and must stay absent. The click is what
+ * calls `ui.toast(reason)`; swallowing it leaves the reason reachable only by hovering a
+ * tooltip, which is nothing on a touch screen and nothing to a screen reader. This is
+ * also why nothing under `web/js/` uses the `disabled` property: it fires no click and
+ * takes no focus.
+ */
+[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+[aria-disabled="true"]:active {
+  transform: none;
+}
+
+/* -- forms ------------------------------------------------------------------------ */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  max-width: 640px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-half);
+}
+
+.field-label {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ink-muted);
+}
+
+.field-hint {
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+/* The registration form's optional settings, folded away so the two fields that are
+   actually required are the two a first-time operator sees. A native `<details>`, so the
+   disclosure needs no script and cannot desynchronise from `ui.setRefusal`. */
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+}
+
+/* Collapsed, the summary is the whole control, so it carries no bottom gap of its own --
+   `gap` above only applies once the group is open and has siblings to space. */
+.field-group:not([open]) {
+  gap: 0;
+}
+
+.field-group > summary {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.field-group > summary:hover {
+  color: var(--ink);
+}
+
+input[type="text"],
+input[type="password"],
+input[type="url"],
+textarea,
+select {
+  padding: var(--s-1);
+  background: var(--surface-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  width: 100%;
+}
+
+textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+input:hover,
+textarea:hover {
+  border-color: var(--ink-faint);
+}
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-half);
+  padding: var(--s-1);
+  background: var(--surface-raised);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.composer textarea {
+  min-height: 52px;
+  border-color: var(--line);
+}
+
+.composer-hint {
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+/* -- tables: the activity feed ---------------------------------------------------- */
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  padding: var(--s-half) var(--s-1);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-sunken);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+tbody tr:hover {
+  background: var(--surface-hover);
+}
+
+.activity-when {
+  white-space: nowrap;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-kind {
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+
+.activity-detail {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.activity-row.is-error .activity-detail {
+  color: var(--tone-bad);
+}
+
+/* -- panels, banners, timelines --------------------------------------------------- */
+
+.panel {
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--s-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  max-width: 900px;
+}
+
+.panel-title {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.banner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-2);
+  border: 1px solid currentcolor;
+  border-left-width: 3px;
+  border-radius: var(--radius);
+}
+
+.banner-message {
+  color: var(--ink);
+}
+
+.banner.tone-bad {
+  background: var(--tone-bad-soft);
+}
+
+.banner.tone-warn {
+  background: var(--tone-warn-soft);
+}
+
+.banner.tone-good {
+  background: var(--tone-good-soft);
+}
+
+.banner.tone-live,
+.banner.tone-idle {
+  background: var(--tone-idle-soft);
+}
+
+/* Key/value pairs: a run's prompt, its verify command, its exit code. */
+.kv {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: var(--s-half) var(--s-2);
+  align-items: baseline;
+}
+
+.kv-key {
+  color: var(--ink-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.kv-value {
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* The `steps` timeline of a run. */
+.timeline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  align-items: center;
+}
+
+.timeline-step {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-half);
+  padding: 2px var(--s-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  font-size: 12px;
+}
+
+.timeline-step.is-current {
+  border-color: var(--tone-live);
+  color: var(--tone-live);
+  font-weight: 650;
+}
+
+.timeline-step.is-failed {
+  border-color: var(--tone-bad);
+  color: var(--tone-bad);
+}
+
+.timeline-step.is-skipped {
+  color: var(--ink-faint);
+}
+
+/* A destructive confirmation. Child order comes from `ui.CONFIRM_ORDER`, so the prompt
+   is read first and Cancel is reached before the danger button. */
+.confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  align-items: flex-start;
+  padding: var(--s-2);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-soft);
+}
+
+.confirm-prompt {
+  color: var(--ink);
+  font-weight: 550;
+}
+
+/* -- toasts ---------------------------------------------------------------------- */
+
+#toasts {
+  position: fixed;
+  right: var(--s-3);
+  bottom: var(--s-3);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  max-width: min(420px, calc(100vw - var(--s-4)));
+}
+
+.toast {
+  padding: var(--s-1) var(--s-2);
+  background: var(--surface-raised);
+  border: 1px solid currentcolor;
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-raised);
+  color: var(--ink);
+}
+
+.toast.tone-bad {
+  border-color: var(--tone-bad);
+  background: var(--tone-bad-soft);
+}
+
+.toast.tone-warn {
+  border-color: var(--tone-warn);
+  background: var(--tone-warn-soft);
+}
+
+.toast.tone-good {
+  border-color: var(--tone-good);
+  background: var(--tone-good-soft);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .toast {
+    animation: toast-in 140ms ease-out;
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* -- empty states ---------------------------------------------------------------- */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  align-items: flex-start;
+  padding: var(--s-4);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  color: var(--ink-muted);
+  text-align: left;
+}
+
+/* -- focus ----------------------------------------------------------------------- */
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
+
+/* A refused control is still focusable, and its focus ring says which one it is. */
+[aria-disabled="true"]:focus-visible {
+  outline-color: var(--tone-warn);
+}
+
+/* -- narrow screens -------------------------------------------------------------- */
+
+@media (width <= 1100px) {
+  .board {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (width <= 720px) {
+  body {
+    flex-direction: column;
+  }
+
+  #sidebar {
+    position: static;
+    width: 100%;
+    flex: 0 0 auto;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  #view {
+    padding: var(--s-2);
+  }
+
+  .board {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* -- reduced motion -------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .btn:active {
+    transform: none;
+  }
+}
+
+/* -- dark scheme: the tokens only ------------------------------------------------ */
+
+/*
+ * Nothing below changes a layout, a border width or a font size -- it only rebinds the
+ * custom properties. That is what keeps the palette owned in one place, and it is what
+ * makes the "warn is not good" rule hold in both schemes: the two stay a green and an
+ * amber, both lifted for contrast against a dark surface.
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-sunken: #14171c;
+    --surface: #1a1e24;
+    --surface-raised: #22272e;
+    --surface-rail: #1d2126;
+    --surface-hover: #2a3038;
+
+    --ink: #e8ebf0;
+    --ink-muted: #a8b1bf;
+    --ink-faint: #7d8794;
+    --ink-inverse: #10131a;
+
+    --line: #333a44;
+    --line-strong: #4a525e;
+
+    --accent: #7ea2ff;
+    --accent-hover: #a3bcff;
+    --accent-soft: #1e2a44;
+
+    --danger: #ff8b81;
+    --danger-hover: #ffaba3;
+    --danger-soft: #3a1f1d;
+
+    --tone-idle: #9aa3b2;
+    --tone-live: #7ea2ff;
+    --tone-good: #57d18d;
+    --tone-warn: #f0b357;
+    --tone-bad: #ff8b81;
+
+    --tone-idle-soft: #262b33;
+    --tone-live-soft: #1e2a44;
+    --tone-good-soft: #17301f;
+    --tone-warn-soft: #33260f;
+    --tone-bad-soft: #3a1f1d;
+
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 40%);
+    --shadow-raised: 0 4px 12px rgb(0 0 0 / 50%);
+  }
+}

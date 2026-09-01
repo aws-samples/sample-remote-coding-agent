@@ -1,0 +1,14 @@
+{
+  "name": "sample-remote-coding-agent",
+  "owner": {
+    "name": "aws-samples",
+    "url": "https://github.com/aws-samples"
+  },
+  "plugins": [
+    {
+      "name": "sample-rca",
+      "source": "./plugins/sample-rca",
+      "description": "Dispatch a coding task to a remote agent running in your own AWS account, and get a pull request back."
+    }
+  ]
+}

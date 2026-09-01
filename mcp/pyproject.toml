@@ -1,0 +1,33 @@
+[project]
+name = "rca-mcp"
+version = "0.1.0"
+description = "The stdio MCP server Claude Code talks to, and its SigV4 client"
+requires-python = ">=3.11"
+
+# `mcp>=1.2.0,<2` is invariant 29's first incident written down: 2.0.0 is live on
+# PyPI today and removed a method this server calls, and an unbounded floor resolves
+# straight to it. The other bounds stop at the next major for the same reason.
+dependencies = [
+    "mcp>=1.2.0,<2",
+    "boto3>=1.43.0,<2",
+    # `client.py` imports `botocore.auth` and `botocore.awsrequest` directly, so it is
+    # declared rather than relied on through boto3's own pin.
+    "botocore>=1.43,<2",
+    "httpx>=0.27,<1",
+]
+
+# `uvx --from git+https://github.com/...#subdirectory=mcp rca-mcp` needs a command to
+# run, and so does `uv run --directory mcp rca-mcp`. Without this table both `.mcp.json`
+# files name a server that cannot start.
+[project.scripts]
+rca-mcp = "rca_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68,<81"]
+build-backend = "setuptools.build_meta"
+
+# `src/` layout, and there is deliberately no `mcp/__init__.py` beside this file: a
+# regular top-level `mcp` package sits at `sys.path[0]` under `python -m pytest` and
+# beats the installed SDK outright, so every `import mcp.server` would fail.
+[tool.setuptools.packages.find]
+where = ["src"]

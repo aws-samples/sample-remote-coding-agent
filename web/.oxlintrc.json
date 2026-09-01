@@ -1,0 +1,25 @@
+{
+  // `web/js` is hand-written ES modules with no build step, so there is no bundler config
+  // and no `package.json` for a linter to read an environment out of. This file is the whole
+  // of it, and it lives here rather than at the repository root for the reason
+  // `web/.gitignore` does: this directory owns the rules about its own contents.
+  //
+  // `env` is not optional decoration. `no-undef` is the rule that catches a `respones.ok`
+  // typo, and without a declared environment it also reports `window`, `document`, `fetch`,
+  // `URL`, `setTimeout` and `clearTimeout` -- 50 findings in eight files, which is how a
+  // useful rule gets turned off. The console runs in a browser and nowhere else.
+  "env": { "browser": true, "es2024": true },
+  "rules": {
+    // Both are OFF in oxlint's default `correctness` set and both are the entire reason this
+    // gate exists: `tests/test_web_console.py::test_every_module_parses_as_an_es_module`
+    // already proves every module PARSES, and a misspelled identifier or a left-behind
+    // import parses perfectly. Denied rather than warned, because oxlint exits 0 on warnings.
+    "no-undef": "error",
+    "no-unused-vars": "error",
+    // A false positive on `api.js`'s one `fetch(`: the call passes
+    // `body: body === undefined ? undefined : JSON.stringify(body)`, so a GET sends no body,
+    // and the rule reads the KEY being present as the body being set. Off rather than
+    // restructured -- the ternary is what keeps one `request()` for all five methods.
+    "unicorn/no-invalid-fetch-options": "off"
+  }
+}

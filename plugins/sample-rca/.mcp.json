@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "remote-coding-agent": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/aws-samples/sample-remote-coding-agent@v0.3.1#subdirectory=mcp",
+        "rca-mcp"
+      ],
+      "env": {
+        "RCA_API_URL": "${user_config.api_url}",
+        "AWS_REGION": "${user_config.aws_region}",
+        "RCA_STACK_NAME": "${user_config.stack_name}"
+      }
+    }
+  }
+}

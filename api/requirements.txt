@@ -1,0 +1,9 @@
+# The control-plane Lambda bundle. There is deliberately no `api/pyproject.toml`:
+# phase 5 `pip install -r`s this file into a CDK asset, so the bundle is a
+# directory of dependencies rather than a wheel.
+#
+# `bedrock-agentcore` needs a newer boto3/botocore than the Lambda runtime ships
+# with, so the bundle carries its own and floors botocore at 1.43.0 (invariant 20).
+# Both bounds stop at the next major (invariant 29).
+boto3>=1.43.0,<2
+botocore>=1.43.0,<2
