@@ -22,6 +22,7 @@ because half of what is being checked is git's own behaviour rather than ours.
 
 from __future__ import annotations
 
+import importlib
 import os
 import stat
 import subprocess
@@ -643,3 +644,63 @@ def test_a_commit_carries_the_exported_identity(tmp_path: Path) -> None:
     )
     assert shown.stdout.splitlines()[0] == "agentcore-coding-agent <agent@localhost>"
     assert git_ops.changed_paths(repo) == [], "commit stages everything"
+
+
+@pytest.mark.parametrize(
+    ("name", "email", "expected"),
+    [
+        # The case this exists for. `agent@localhost` resolves to no GitHub account, so
+        # GitHub reports no author for the commit and a check gating on commit attribution
+        # blocks the pull request -- observed as a Vercel preview answering `Deployment was
+        # blocked`, which reads as a build failure and is not one.
+        (
+            "release-bot",
+            "1234+release-bot@users.noreply.github.com",
+            "release-bot <1234+release-bot@users.noreply.github.com>",
+        ),
+        # Empty is what a Lambda forwards when the context key was never set, and it has to
+        # mean "use the default" rather than "commit with an empty identity" -- git rejects
+        # the latter with `empty ident name not allowed`, which would fail every submit.
+        ("", "", "agentcore-coding-agent <agent@localhost>"),
+        # One set and one not: they fall back independently, so a deployment can override
+        # just the address and keep the name that says a machine wrote this.
+        (
+            "",
+            "1234+bot@users.noreply.github.com",
+            "agentcore-coding-agent <1234+bot@users.noreply.github.com>",
+        ),
+        # Surrounding whitespace is not an identity. Stripped, so a stray space in a CDK
+        # context value does not become part of the committer's name.
+        ("  spaced  ", "  bot@example.com  ", "spaced <bot@example.com>"),
+    ],
+)
+def test_the_commit_identity_comes_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, email: str, expected: str
+) -> None:
+    """`AGENT_GIT_AUTHOR_NAME`/`_EMAIL` are fleet policy, read at import into the config
+    group, so a reload is how a test sees a different one. The group -- not `-c user.email`
+    on the commit -- is still what carries it, so a subagent's own `git` agrees.
+    """
+    monkeypatch.setenv("AGENT_GIT_AUTHOR_NAME", name)
+    monkeypatch.setenv("AGENT_GIT_AUTHOR_EMAIL", email)
+    reloaded = importlib.reload(git_ops)
+    try:
+        repo = make_git_repo(tmp_path / "repo")
+        write(repo / "src.py", "x = 1\n")
+        sha = reloaded.commit(repo, "the change")
+        shown = subprocess.run(
+            ["git", "show", "--no-patch", "--format=%an <%ae>", sha],
+            cwd=str(repo),
+            env=os.environ | reloaded.git_config_env(),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert shown.stdout.strip() == expected
+    finally:
+        # Every other test in this file uses the module-level default, and the reload above
+        # is process-wide. `--dist loadfile` keeps this file on one xdist worker, so leaving
+        # a rebound module behind would corrupt its neighbours rather than only this test.
+        monkeypatch.delenv("AGENT_GIT_AUTHOR_NAME", raising=False)
+        monkeypatch.delenv("AGENT_GIT_AUTHOR_EMAIL", raising=False)
+        importlib.reload(git_ops)
