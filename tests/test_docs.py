@@ -53,8 +53,8 @@ CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 # fail the suite but a section does.
 _README_MAX_LINES = 200
 
-# The two `##` headings, in order. The executive summary sits under the title with no heading of
-# its own, which is why the README has three parts and this list has two entries.
+# The two `##` headings this repository owns, in order. The executive summary sits under the title
+# with no heading of its own, which is why the README has three parts and this list has two entries.
 #
 # There was a third, `## Known gaps`. It was removed once it reached thirteen bullets, most of
 # them some form of "this is unmeasured": at that length a list of specifics reads as a blanket
@@ -62,6 +62,16 @@ _README_MAX_LINES = 200
 # Every claim survives in `CLAUDE.md` -- what went is the prominence, not the
 # admission. A new gap belongs next to the mechanism it qualifies, not in a register at the end.
 _README_HEADINGS = ["## Architecture", "## From nothing to nothing"]
+
+# The trailing sections the `aws-samples` publication requires, in the order its scaffolding writes
+# them. They are **not** this repository's to delete: the `amazon-ospo-app` bot's initial commit
+# added them, so a checkout that removes them fails the org's own review rather than this suite.
+#
+# They are allowed here and nowhere else in the guard, which is the distinction that matters: the
+# rule below still refuses an *arbitrary* new `##` section, because the failure it exists to stop is
+# a README growing back into a reference manual. A required licence notice is not that, and hard-
+# coding these two by name is what keeps the refusal narrow enough to stay true.
+_README_TRAILING_HEADINGS = ["## Security", "## License"]
 
 # The two CDK enum classes `infra/stacks/agent_stack.py` names its endpoints through. Read out of
 # the source as an AST walk and not as a regex, because `BEDROCK_AGENTCORE_GATEWAY` appears there
@@ -525,12 +535,18 @@ def test_the_readme_holds_exactly_the_three_parts() -> None:
     # subsections are free to be renamed, split or reordered, and only the top-level parts
     # are the contract.
     headings = [line.rstrip() for line in README.read_text().splitlines() if line.startswith("## ")]
-    assert headings == _README_HEADINGS, (
+    expected = _README_HEADINGS + _README_TRAILING_HEADINGS
+    assert headings == expected, (
         "README.md must hold exactly three parts in order -- the executive summary under "
-        f"the title, then {', '.join(_README_HEADINGS)}. Got {headings}. A new `##` "
+        f"the title, then {', '.join(_README_HEADINGS)} -- followed by the "
+        f"`aws-samples` scaffolding's {' and '.join(_README_TRAILING_HEADINGS)}. "
+        f"Got {headings}. A new `##` "
         "section is how a README becomes a reference manual again: an API surface or a "
         "routing table added here is a section `CLAUDE.md` should own, and a part "
-        "removed here is a reader who cannot get from nothing to nothing."
+        "removed here is a reader who cannot get from nothing to nothing. The two "
+        "trailing sections are the exception and the only one: they arrived with the "
+        "`amazon-ospo-app` bot's initial commit and the org requires them, so deleting "
+        "them to satisfy this assertion trades a green suite for a failed publication."
     )
 
 
