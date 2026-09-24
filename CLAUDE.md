@@ -347,6 +347,27 @@ reintroduced one. Each gets a comment and a regression test.
 4. **The PAT never enters the container env, the `origin` URL, or a command
    line** — all network git through `_run_authenticated` / `_askpass`;
    `_base_env()` omits the token. Every coding subagent has `Bash`.
+4b. **The commit identity is configurable, and the default is known to fail a
+   real check** — `git_ops`' default is `agentcore-coding-agent
+   <agent@localhost>`, and `agent@localhost` matches no GitHub account, so
+   GitHub resolves **no author** for the commit (`.author` is `null` in the
+   commits API). Anything gating on commit attribution then refuses the pull
+   request: a Vercel preview answers `Deployment was blocked` and never builds,
+   and a DCO or signed-commit policy fails the same way. It is expensive because
+   the pull request goes red on a *deployment* error while the diff is perfect —
+   the cause is the author of the commit, not anything in it, and no test in
+   this repository can see it. The override is the deploy-time context pair
+   `-c gitAuthorName=` / `-c gitAuthorEmail=`, forwarded as `AGENT_GIT_AUTHOR_NAME`
+   / `AGENT_GIT_AUTHOR_EMAIL`. It is **fleet policy**, so a runtime provisioned
+   before it existed converges on the next update (invariant 24), and both keys
+   are always sent — `""` included — because a key omitted from that group is
+   *carried forward*, so sending the empty string is the only thing that makes
+   clearing the context key actually restore the default. Not git's own
+   `GIT_AUTHOR_*`: those are read directly by every git process and would
+   outrank the exported config group, so the two could disagree with the
+   environment silently winning. A **dedicated bot account** is the right value
+   rather than a human's address — the commits were not written by a person and
+   the audit trail should not say they were.
 5. **Nothing under `.agent/` counts as work** — `has_changes()` is
    unconditionally true once the plan node writes a spec. Keep the two-way split
    in `code` (nothing outside `.agent/` raises; nothing beyond

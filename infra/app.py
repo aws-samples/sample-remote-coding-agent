@@ -265,6 +265,19 @@ def main() -> None:
         # threaded, rather than a second `_flag_context` call here -- two reads of one key is
         # how the image and the runtime spec come to disagree.
         otel_metrics_enabled=otel_metrics_enabled,
+        # The identity every run's commit carries, and the reason it is a context key rather
+        # than a constant: the container's default, `agent@localhost`, matches no GitHub
+        # account, so GitHub resolves no author and any check that gates on commit
+        # attribution refuses the pull request -- a Vercel preview answers `Deployment was
+        # blocked` and never builds. Set both to an address GitHub can resolve, e.g.
+        #   make deploy EMAIL=... CDK_CONTEXT='-c gitAuthorEmail=<id>+<user>@users.noreply.github.com'
+        # A dedicated bot account is the honest choice over a human's address: the commits
+        # were not written by a person, and the audit trail should not claim they were.
+        # Empty is passed through deliberately -- `git_ops._identity` reads "" as unset and
+        # uses its own default, so clearing the key restores the default rather than setting
+        # an empty identity git would reject.
+        git_author_name=_context(app, "gitAuthorName", ""),
+        git_author_email=_context(app, "gitAuthorEmail", ""),
         env=env,
     )
 

@@ -36,13 +36,41 @@ log = logging.getLogger(__name__)
 # consuming the session until AgentCore reaps it with nothing in the log.
 _GIT_TIMEOUT = 600
 
+# The commit identity, and it has to be configurable rather than hardcoded, because no
+# single value is right everywhere. `agent@localhost` is the default and matches no GitHub
+# account, so GitHub resolves *no author* for the commit -- `.author` is `null` in the
+# commits API -- and any check that gates on commit attribution then refuses the pull
+# request. A Vercel preview reports `Deployment was blocked` and never builds; a repository
+# with a DCO or signed-commit policy fails the same way. That failure is expensive to read:
+# the pull request goes red with a deployment error and nothing in the diff explains it,
+# because the cause is the author of the commit rather than anything in it.
+#
+# Fleet policy (`provisioner._fleet_environment`), not per-configuration: it is one
+# deployment-wide identity, so a runtime provisioned before this existed converges onto it
+# on the next update instead of keeping what it was born with (invariant 24).
+#
+# Deliberately NOT git's own `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`: those are read directly
+# by every git process and would take precedence over this config group, so the two could
+# disagree with the environment silently winning. `AGENT_` prefixed, they cannot.
+_DEFAULT_AUTHOR_NAME = "agentcore-coding-agent"
+_DEFAULT_AUTHOR_EMAIL = "agent@localhost"
+
 # The process-wide config group, in `GIT_CONFIG_KEY_<n>` order. Seeded with an identity
 # because `submit` commits and a container has no `~/.gitconfig`, and with
 # `advice.detachedHead=false` because that advice is six lines of noise in every log.
 # `trust_directory` appends `safe.directory` entries to it; nothing is ever removed.
+#
+# The two reads are spelled out here rather than pulled into a helper so the variable names
+# are *literals* at the read site: `tests/test_env_contract.py`'s scan recovers names
+# statically and can only prove a variable is forwarded when it can see one, so a helper
+# taking the name as an argument would have to be excused in
+# `CONTAINER_DYNAMIC_SITES` instead of checked. `or` on a stripped value because a
+# Lambda-forwarded variable arrives as `""` rather than absent when nothing set it, so
+# empty has to mean "use the default" and not "commit with an empty identity", which git
+# rejects outright.
 _CONFIG_ENTRIES: list[tuple[str, str]] = [
-    ("user.name", "agentcore-coding-agent"),
-    ("user.email", "agent@localhost"),
+    ("user.name", os.environ.get("AGENT_GIT_AUTHOR_NAME", "").strip() or _DEFAULT_AUTHOR_NAME),
+    ("user.email", os.environ.get("AGENT_GIT_AUTHOR_EMAIL", "").strip() or _DEFAULT_AUTHOR_EMAIL),
     ("advice.detachedHead", "false"),
 ]
 

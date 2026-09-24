@@ -202,6 +202,16 @@ OTEL_METRICS_ENABLED = (
     else "0"
 )
 
+# The commit identity every run's pull request carries, forwarded raw rather than
+# normalised: unlike the two flags above these are free text, and `git_ops._identity`
+# already treats "" as unset and falls back to its own default. Fleet policy because there
+# is one identity per deployment -- see `agent/src/coding_agent/git_ops.py`, which explains
+# what the default costs: `agent@localhost` resolves to no GitHub account, so GitHub reports
+# no author and a check gating on commit attribution (a Vercel preview, a DCO policy) blocks
+# the pull request with nothing in the diff to explain it.
+AGENT_GIT_AUTHOR_NAME = os.environ.get("AGENT_GIT_AUTHOR_NAME", "").strip()
+AGENT_GIT_AUTHOR_EMAIL = os.environ.get("AGENT_GIT_AUTHOR_EMAIL", "").strip()
+
 
 def enqueue(
     config_id: str, phase: str, *, attempt: int = 0, delay: int = 0, deadline: int | None = None
@@ -771,6 +781,14 @@ def _fleet_environment() -> dict[str, str]:
         # turns the loop off once, for the fleet, rather than by hand-editing a live
         # runtime.
         "CODE_GOAL_ENABLED": CODE_GOAL_ENABLED,
+        # The commit identity, fleet policy so one deployment-wide value converges onto
+        # every live runtime (invariant 24). Both are always sent, empty included: an empty
+        # value means "use the container's default", and *omitting* the key instead would
+        # leave a runtime that was born with a real identity carrying it forever, since
+        # anything not named in this group is carried forward. Sending "" is what makes
+        # clearing the context key actually clear the identity.
+        "AGENT_GIT_AUTHOR_NAME": AGENT_GIT_AUTHOR_NAME,
+        "AGENT_GIT_AUTHOR_EMAIL": AGENT_GIT_AUTHOR_EMAIL,
         # The CLI's suppression group, whose names and values are pinned in
         # `tests/test_env_contract.CLI_SUPPRESSIONS` -- that test is the count, not this
         # sentence. The reason it is fleet policy rather than a per-configuration default:

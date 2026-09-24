@@ -203,6 +203,8 @@ def _provisioner_environment(
     fallback_model_id: str,
     goal_enabled: bool,
     otel_metrics_enabled: bool,
+    git_author_name: str,
+    git_author_email: str,
 ) -> dict[str, str]:
     """The provisioner Lambda's own environment, as a value a test can read.
 
@@ -238,6 +240,13 @@ def _provisioner_environment(
         # `AgentStack` reads the same flag for the image's build arg and the permissions
         # boundary, so all four move on one `-c otelMetricsEnabled=true`.
         "OTEL_METRICS_ENABLED": "1" if otel_metrics_enabled else "0",
+        # The `gitAuthorName`/`gitAuthorEmail` context keys, forwarded as free text rather
+        # than normalised: `git_ops._identity` in the container treats "" as unset and falls
+        # back to its own default, so "" is a meaningful value here and not a missing one.
+        # Both reach exactly one place inside the provisioner -- the fleet group -- so a
+        # deploy converges the identity onto every live runtime (invariant 24).
+        "AGENT_GIT_AUTHOR_NAME": git_author_name,
+        "AGENT_GIT_AUTHOR_EMAIL": git_author_email,
     }
 
 
@@ -395,6 +404,11 @@ class ApiStack(cdk.Stack):
         # takes, and the two stacks reading one value is what stops the image and the fleet
         # environment disagreeing about whether a collector exists.
         otel_metrics_enabled: bool,
+        # The commit identity, keyword-only and required like every other value here. The
+        # default lives in the container (`git_ops._DEFAULT_AUTHOR_EMAIL`) and not in a
+        # default argument, so there is exactly one place that says what it is.
+        git_author_name: str,
+        git_author_email: str,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -443,6 +457,8 @@ class ApiStack(cdk.Stack):
                 fallback_model_id=fallback_model_id,
                 goal_enabled=goal_enabled,
                 otel_metrics_enabled=otel_metrics_enabled,
+                git_author_name=git_author_name,
+                git_author_email=git_author_email,
             ),
         }
 
