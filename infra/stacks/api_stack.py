@@ -203,6 +203,7 @@ def _provisioner_environment(
     fallback_model_id: str,
     goal_enabled: bool,
     otel_metrics_enabled: bool,
+    platform_version: str,
 ) -> dict[str, str]:
     """The provisioner Lambda's own environment, as a value a test can read.
 
@@ -223,6 +224,11 @@ def _provisioner_environment(
         "EXECUTION_ROLE_BOUNDARY_ARN": boundary_arn,
         "AGENT_SUBNET_IDS": ",".join(subnet_ids),
         "AGENT_SECURITY_GROUP_IDS": ",".join(security_group_ids),
+        # `V1` or `V2`, fleet policy, and carried here rather than baked into the
+        # provisioner because it is a deploy-time decision *and* a regional one: V2 exists
+        # in us-east-1, us-east-2, us-west-2, eu-west-1 and ap-northeast-1 only, and
+        # `CreateAgentRuntime` elsewhere does not reject it. `make preflight` is the check.
+        "AGENT_PLATFORM_VERSION": platform_version,
         "PLAN_MODEL_ID": plan_model_id,
         "CODE_MODEL_ID": code_model_id,
         "HAIKU_MODEL_ID": haiku_model_id,
@@ -395,6 +401,9 @@ class ApiStack(cdk.Stack):
         # takes, and the two stacks reading one value is what stops the image and the fleet
         # environment disagreeing about whether a collector exists.
         otel_metrics_enabled: bool,
+        # `V1` or `V2`. No default, like every other knob here: a forgotten value should be
+        # a `TypeError` the signature test catches rather than a platform nobody chose.
+        platform_version: str,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -443,6 +452,7 @@ class ApiStack(cdk.Stack):
                 fallback_model_id=fallback_model_id,
                 goal_enabled=goal_enabled,
                 otel_metrics_enabled=otel_metrics_enabled,
+                platform_version=platform_version,
             ),
         }
 

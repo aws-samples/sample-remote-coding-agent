@@ -1434,6 +1434,11 @@ def test_the_idempotence_guard_covers_the_converged_fields_not_the_image_alone(
     live["environmentVariables"] = provisioner._desired_runtime(live, config)[
         "environmentVariables"
     ]
+    # `platformVersion` is an intent key too, and this assertion compares `_INTENT_KEYS`
+    # raw rather than through `_matches_intent` -- which is the function that treats an
+    # absent value as the service's `V1` default. Spelling it here keeps the drift set
+    # exactly the two fields this test is about.
+    live["platformVersion"] = "V1"
     desired = provisioner._desired_runtime(live, config)
 
     assert provisioner._container_uri(live) == provisioner._container_uri(desired), (
@@ -1715,3 +1720,131 @@ def test_the_entry_point_is_not_an_http_route(aws: Any, monkeypatch: pytest.Monk
     assert not hasattr(provisioner.lambda_handler, "__api_handler__")
     assert not hasattr(provisioner, "ROUTES")
     assert provisioner.PHASES == ("CREATE", "CHECK", "DELETE", "UPDATE")
+
+
+# -- platform version (AgentCore Runtime V2) --------------------------------------------
+
+
+def test_the_platform_version_defaults_to_v1_so_an_unmodified_deploy_changes_nothing(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `AGENT_PLATFORM_VERSION` set means `V1`, which is also the service's own default.
+
+    The point of asserting the default rather than only the override: this member is sent on
+    every create and update, so getting the default wrong would move every runtime in every
+    existing deploy onto a different platform on the next reconcile.
+    """
+    _fleet(monkeypatch)
+    _common, provisioner = _load("provisioner")
+    assert provisioner.PLATFORM_VERSION == "V1"
+    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    assert provisioner._desired_runtime(None, config)["platformVersion"] == "V1"
+
+
+def test_the_platform_version_is_fleet_policy_and_is_sent_on_create_and_update(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2` reaches both calls, and reaches an update **even when the live runtime is V1**.
+
+    Sent always rather than only when it differs, because the service's omission semantics
+    are asymmetric: omitted on create means `V1`, but omitted on *update* means "keep the
+    current platform version". A conditional send would therefore be one-way -- a fleet that
+    reached V2 could never be brought back, and clearing the deploy-time key would pin
+    whatever each runtime happened to have rather than restoring the default.
+    """
+    _fleet(monkeypatch, AGENT_PLATFORM_VERSION="V2")
+    _common, provisioner = _load("provisioner")
+    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+
+    assert provisioner._desired_runtime(None, config)["platformVersion"] == "V2"
+
+    live = runtime(agentRuntimeId=_RUNTIME_ID)
+    live["platformVersion"] = "V1"
+    assert provisioner._desired_runtime(live, config)["platformVersion"] == "V2"
+    assert provisioner._matches_intent(live, provisioner._desired_runtime(live, config)) is False, (
+        "a V1 runtime under a V2 fleet is drift, or the fleet never converges"
+    )
+
+
+def test_a_runtime_that_reports_no_platform_version_is_not_drift_against_v1(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measured, not assumed: every runtime in the live fleet answered `GetAgentRuntime`
+    with `platformVersion` **absent**, because they predate the member.
+
+    Absence is the service's default, `V1`. Treating it as a difference would take one
+    update per existing runtime for no change at all -- and under V2 an update is a snapshot
+    rebuild of several minutes, not an idle API call.
+    """
+    _fleet(monkeypatch)
+    _common, provisioner = _load("provisioner")
+    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+
+    live = runtime(agentRuntimeId=_RUNTIME_ID)
+    live.pop("platformVersion", None)
+    live["environmentVariables"] = provisioner._desired_runtime(live, config)[
+        "environmentVariables"
+    ]
+    assert "platformVersion" not in live
+    assert provisioner._matches_intent(live, provisioner._desired_runtime(live, config)) is True
+
+
+def test_a_vendor_only_network_member_is_not_drift(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`requireServiceS3Endpoint` comes back on every VPC runtime and can never be sent.
+
+    This is the shape read off a live runtime. `_fleet_network` does not emit that member --
+    it is a `ValidationException` on `CreateAgentRuntime`, and on `UpdateAgentRuntime` for
+    any runtime created after the May 2026 rollout -- so whole-object equality on
+    `networkConfiguration` could never match and every reconcile issued an update. Under V2
+    each of those is a snapshot rebuild, so this is the difference between a converged fleet
+    and one that rebuilds itself on every redelivery.
+    """
+    subnets = "subnet-0aaa,subnet-0bbb"
+    _fleet(monkeypatch, AGENT_SUBNET_IDS=subnets, AGENT_SECURITY_GROUP_IDS="sg-0ccc")
+    _common, provisioner = _load("provisioner")
+    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+
+    live = runtime(agentRuntimeId=_RUNTIME_ID)
+    live["networkConfiguration"] = {
+        "networkMode": "VPC",
+        "networkModeConfig": {
+            "subnets": ["subnet-0aaa", "subnet-0bbb"],
+            "securityGroups": ["sg-0ccc"],
+            "requireServiceS3Endpoint": False,
+        },
+    }
+    live["environmentVariables"] = provisioner._desired_runtime(live, config)[
+        "environmentVariables"
+    ]
+    desired = provisioner._desired_runtime(live, config)
+    assert "requireServiceS3Endpoint" not in desired["networkConfiguration"]["networkModeConfig"]
+    assert provisioner._matches_intent(live, desired) is True, (
+        "a member only the service may set must not read as drift"
+    )
+
+
+def test_a_stale_member_this_code_wants_removed_is_still_drift(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the previous test, and the reason it enumerates one member rather
+    than ignoring everything `desired` omits.
+
+    A blanket "keys `desired` does not state are not a difference" rule would also stop
+    seeing a member this code wants *gone*. `networkModeConfig` on a `PUBLIC` runtime is
+    exactly that, and it stays visible.
+    """
+    _fleet(monkeypatch)
+    _common, provisioner = _load("provisioner")
+    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+
+    live = runtime(agentRuntimeId=_RUNTIME_ID)
+    live["networkConfiguration"] = {
+        "networkMode": "PUBLIC",
+        "networkModeConfig": {"subnets": []},
+    }
+    live["environmentVariables"] = provisioner._desired_runtime(live, config)[
+        "environmentVariables"
+    ]
+    assert provisioner._matches_intent(live, provisioner._desired_runtime(live, config)) is False

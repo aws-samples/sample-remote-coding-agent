@@ -68,6 +68,31 @@ WORK_ROOT = "/mnt/workspace/work"
 
 SERVER_PROTOCOL = "HTTP"
 
+# `V1` or `V2`, and **fleet policy** (invariant 24): a runtime provisioned before this
+# existed converges on the next update rather than keeping what it was born with. The
+# default is `V1`, which is also the service's default, so an unmodified deploy of this
+# tree changes nothing.
+#
+# It is sent on **every** create and update rather than only when non-default, because the
+# service's omission semantics differ between the two calls and only one of them is
+# harmless: omitting it on create means V1, but omitting it on *update* means "keep the
+# current platform version". So a runtime that reached V2 could never be brought back, and
+# clearing the deploy-time context key would silently pin whatever each runtime happened to
+# have. Sending it always is what makes the context key authoritative in both directions.
+#
+# V2 starts the agent from a snapshot instead of initialising on each cold start -- AWS
+# measured P75 1.9-2.0s against 5.4-30s on V1 for images from 200 MB to 2 GB, which is the
+# range this ~1.3 GB image sits in. Three things travel with it, and none is optional:
+# create and update take *minutes* rather than seconds; the container must answer `/ping`
+# healthy within **120 seconds**, because the snapshot is taken on the first healthy ping;
+# and an update or delete issued before the runtime reaches a terminal state raises
+# `ConflictException` (see `_TRANSIENT_CREATE_FAILURES`).
+#
+# V2 exists in **us-east-1, us-east-2, us-west-2, eu-west-1 and ap-northeast-1 only**, and
+# `CreateAgentRuntime` in another region does not reject it -- so a wrong region is a
+# deploy that appears to work. `make preflight` is where that is caught.
+PLATFORM_VERSION = (os.environ.get("AGENT_PLATFORM_VERSION") or "V1").strip() or "V1"
+
 # Every role this Lambda mints lives under one path, which is one of the three fences
 # on its own `iam:CreateRole` grant (invariant 17: path, boundary, and a `PassRole`
 # limited to `bedrock-agentcore.amazonaws.com`).
@@ -831,6 +856,7 @@ def _desired_runtime(live: Mapping[str, Any] | None, config: Mapping[str, Any]) 
     | `environmentVariables` -- fleet keys      | **fleet**    | `_fleet_environment`      |
     | `environmentVariables` -- everything else | carry forward| from `live`               |
     | `roleArn`, `protocolConfiguration`, `description` | carry forward | from `live`      |
+    | `platformVersion`                         | **fleet**    | `PLATFORM_VERSION`, always sent |
 
     The `desired` dict below is the authority and that table is a reading aid: a member
     added to one and not the other is a carry-forward/converge misclassification
@@ -868,6 +894,9 @@ def _desired_runtime(live: Mapping[str, Any] | None, config: Mapping[str, Any]) 
         },
         "filesystemConfigurations": [{"sessionStorage": {"mountPath": MOUNT_PATH}}],
         "environmentVariables": environment,
+        # Fleet, and always sent -- omitting it on an update means "keep what you have",
+        # which would make the deploy-time key one-way. See `PLATFORM_VERSION`.
+        "platformVersion": PLATFORM_VERSION,
     }
     # The identifying member is the one thing that differs between the two calls this
     # dict feeds: `CreateAgentRuntime` names the runtime, `UpdateAgentRuntime` names it
@@ -890,7 +919,50 @@ _INTENT_KEYS = (
     "roleArn",
     "description",
     "environmentVariables",
+    # Fleet policy, so it belongs here: without it a fleet moved from V1 to V2 would
+    # never converge, because nothing else in this tuple changes when the key does.
+    # `GetAgentRuntime` echoes `platformVersion` back, which is what makes it comparable
+    # at all -- `CreateAgentRuntime` and `UpdateAgentRuntime` do **not** return it.
+    "platformVersion",
 )
+
+
+# Members `GetAgentRuntime` returns that this code can never send, so they must not count
+# as a difference. Keyed by the enclosing member, and enumerated rather than handled by a
+# general "ignore keys `desired` omits" rule: that rule also stops seeing a stale member
+# this code wants *removed*, which is real drift and a test already pins it.
+#
+# `requireServiceS3Endpoint` is the one that forced this. AWS added it inside
+# `networkModeConfig` in May 2026 and returns it on every VPC-mode runtime, including ones
+# created today -- but it is a `ValidationException` on `CreateAgentRuntime`, and on
+# `UpdateAgentRuntime` for any runtime created after that rollout. So `_fleet_network`
+# cannot send it, whole-object equality on `networkConfiguration` could never match again,
+# and `_matches_intent` answered `False` on every single call. On V1 that cost one wasted
+# `UpdateAgentRuntime` per reconcile; on V2 each one prepares a fresh snapshot, runs for
+# minutes, and leaves the superseded snapshot pending deletion for up to the 8-hour session
+# maximum, with a `ConflictException` for anything that lands meanwhile.
+#
+# The next member the vendor adds will fail the same way. That is deliberate: it surfaces as
+# a test going red and one line added here, rather than as a guard that quietly stopped
+# comparing.
+_VENDOR_ONLY_MEMBERS: dict[str, frozenset[str]] = {
+    "networkModeConfig": frozenset({"requireServiceS3Endpoint"}),
+}
+
+
+def _comparable(value: Any, member: str | None = None) -> Any:
+    """`value` with the members only the service may set removed, recursively.
+
+    Applied to **both** sides so the comparison stays exact everywhere else: a key `live`
+    carries and `desired` does not is still a difference, which is what keeps a stale
+    `networkModeConfig` on a `PUBLIC` runtime visible as drift.
+    """
+    if isinstance(value, Mapping):
+        drop = _VENDOR_ONLY_MEMBERS.get(member or "", frozenset())
+        return {k: _comparable(v, k) for k, v in value.items() if k not in drop}
+    if isinstance(value, list):
+        return [_comparable(v, member) for v in value]
+    return value
 
 
 def _matches_intent(live: Mapping[str, Any], desired: Mapping[str, Any]) -> bool:
@@ -904,7 +976,17 @@ def _matches_intent(live: Mapping[str, Any], desired: Mapping[str, Any]) -> bool
     """
     if _container_uri(live) != _container_uri(desired):
         return False
-    return all(live.get(key) == desired.get(key) for key in _INTENT_KEYS)
+    # A runtime created before `platformVersion` existed reports **no value** for it --
+    # measured, not assumed: every runtime in the live fleet answered `GetAgentRuntime` with
+    # it absent. Absence is the service's default, which is `V1`, so normalising it here is
+    # what stops a `V1` fleet reading as drift against a desired `V1`. Without this every
+    # existing runtime would take one needless update, and under V2 an update is a snapshot
+    # rebuild of several minutes rather than an idle API call.
+    live_view = {**live, "platformVersion": str(live.get("platformVersion") or "V1")}
+    return all(
+        _comparable(live_view.get(key), key) == _comparable(desired.get(key), key)
+        for key in _INTENT_KEYS
+    )
 
 
 # -- the four phases --------------------------------------------------------------

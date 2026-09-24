@@ -5,5 +5,9 @@
 # `bedrock-agentcore` needs a newer boto3/botocore than the Lambda runtime ships
 # with, so the bundle carries its own and floors botocore at 1.43.0 (invariant 20).
 # Both bounds stop at the next major (invariant 29).
-boto3>=1.43.0,<2
-botocore>=1.43.0,<2
+# Floored at 1.43.95 rather than 1.43.0 because that is the release that added
+# `platformVersion` to CreateAgentRuntime and UpdateAgentRuntime -- 1.43.94 does not
+# have it, and without it the parameter is a client-side ParamValidationError rather
+# than anything the service ever sees (invariants 20 and 29).
+boto3>=1.43.95,<2
+botocore>=1.43.95,<2

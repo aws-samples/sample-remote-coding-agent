@@ -13,8 +13,10 @@ dependencies = [
     "langgraph>=1.0,<2",
     "claude-agent-sdk>=0.2.0,<0.3.0",
     "bedrock-agentcore>=1.0,<2",
-    "boto3>=1.43.0,<2",
-    "botocore>=1.43.0,<2",
+    # 1.43.95 is the release that added `platformVersion` to the AgentCore
+    # control-plane calls; 1.43.94 does not have it (invariants 20 and 29).
+    "boto3>=1.43.95,<2",
+    "botocore>=1.43.95,<2",
 ]
 
 [build-system]

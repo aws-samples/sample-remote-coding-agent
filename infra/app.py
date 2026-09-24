@@ -265,6 +265,21 @@ def main() -> None:
         # threaded, rather than a second `_flag_context` call here -- two reads of one key is
         # how the image and the runtime spec come to disagree.
         otel_metrics_enabled=otel_metrics_enabled,
+        # `V1` (the service default, and this repository's) or `V2`, which starts the agent
+        # from a snapshot: AWS measured P75 1.9-2.0s cold starts against 5.4-30s on V1 for
+        # images between 200 MB and 2 GB, and this one is ~1.3 GB.
+        #
+        # A *region* decision as much as a version one. V2 exists in us-east-1, us-east-2,
+        # us-west-2, eu-west-1 and ap-northeast-1 only, and `CreateAgentRuntime` in another
+        # region does **not** reject it -- so a wrong region is a deploy that looks like it
+        # worked. `make preflight` refuses it there rather than leaving that to a runtime.
+        #
+        # Two more things travel with V2 and neither is optional: create and update take
+        # minutes rather than seconds, and the container must answer `/ping` healthy within
+        # 120 seconds because the snapshot is taken on the first healthy ping. A container
+        # that is slow to start fails *provisioning* on V2 where V1 reached `READY` and
+        # failed later.
+        platform_version=_context(app, "platformVersion", "V1"),
         env=env,
     )
 
