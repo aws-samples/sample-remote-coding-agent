@@ -68,30 +68,44 @@ WORK_ROOT = "/mnt/workspace/work"
 
 SERVER_PROTOCOL = "HTTP"
 
-# `V1` or `V2`, and **fleet policy** (invariant 24): a runtime provisioned before this
-# existed converges on the next update rather than keeping what it was born with. The
-# default is `V1`, which is also the service's default, so an unmodified deploy of this
-# tree changes nothing.
+# This deployment is V2 only, and that is a constant rather than a knob on purpose. A
+# platform version is not a per-deployment taste: V1 and V2 differ in how a container is
+# *started*, so supporting both would mean the 120-second health requirement below holds on
+# one path and not the other, and every failure report would have to say which.
 #
-# It is sent on **every** create and update rather than only when non-default, because the
-# service's omission semantics differ between the two calls and only one of them is
-# harmless: omitting it on create means V1, but omitting it on *update* means "keep the
-# current platform version". So a runtime that reached V2 could never be brought back, and
-# clearing the deploy-time context key would silently pin whatever each runtime happened to
-# have. Sending it always is what makes the context key authoritative in both directions.
+# V2 starts the agent from a snapshot instead of initialising on each cold start. AWS
+# measured P75 1.9-2.0s against 5.4-30s on V1 for images from 200 MB to 2 GB, and this
+# image is ~1.3 GB, so cold start -- paid on every dispatched task -- is most of what this
+# buys.
 #
-# V2 starts the agent from a snapshot instead of initialising on each cold start -- AWS
-# measured P75 1.9-2.0s against 5.4-30s on V1 for images from 200 MB to 2 GB, which is the
-# range this ~1.3 GB image sits in. Three things travel with it, and none is optional:
-# create and update take *minutes* rather than seconds; the container must answer `/ping`
-# healthy within **120 seconds**, because the snapshot is taken on the first healthy ping;
-# and an update or delete issued before the runtime reaches a terminal state raises
-# `ConflictException` (see `_TRANSIENT_CREATE_FAILURES`).
+# Sent on **every** create and update, never conditionally, because the service's omission
+# semantics are asymmetric: omitted on create means V1, and omitted on *update* means "keep
+# whatever this runtime has". A runtime created before this constant existed therefore
+# reports no value at all, which is V1, and converges here on its next update
+# (invariant 24) -- see `_matches_intent`, which is where absence is read as V1 so that the
+# convergence happens exactly once per runtime rather than never.
 #
-# V2 exists in **us-east-1, us-east-2, us-west-2, eu-west-1 and ap-northeast-1 only**, and
-# `CreateAgentRuntime` in another region does not reject it -- so a wrong region is a
-# deploy that appears to work. `make preflight` is where that is caught.
-PLATFORM_VERSION = (os.environ.get("AGENT_PLATFORM_VERSION") or "V1").strip() or "V1"
+# Three consequences, none optional, and the first two are why this needed measuring rather
+# than assuming:
+#
+# * The container must answer `/ping` healthy within **120 seconds**, because the snapshot
+#   is taken on the first healthy ping. **Measured**: the real agent image, in VPC mode with
+#   the fleet's own environment, reached `READY` in 508s of snapshot preparation with no
+#   failure -- so the ping lands well inside the window. A dummy image that never pings
+#   fails at ~102s instead, which is what the earlier probes did.
+# * Create and update take *minutes*, not seconds. `_check` polls, so that is already the
+#   shape this code expects.
+# * An update or delete issued before a runtime reaches a terminal state raises
+#   `ConflictException`. `_update` lets it raise, so the SQS redelivery is the retry --
+#   deliberately not the `_TRANSIENT_CREATE_FAILURES` budget, which speaks only for
+#   `CreateAgentRuntime` (`_TRANSIENT_OPERATION`).
+#
+# **V2 exists in us-east-1, us-east-2, us-west-2, eu-west-1 and ap-northeast-1 only**, so
+# this deployment does too. `CreateAgentRuntime` in another region does not reject the
+# parameter -- it accepts it and gives you a V1 runtime -- so nothing at run time would say
+# the region was wrong. `make preflight` refuses it, unconditionally, because there is no
+# longer a configuration under which a non-V2 region is acceptable.
+PLATFORM_VERSION = "V2"
 
 # Every role this Lambda mints lives under one path, which is one of the three fences
 # on its own `iam:CreateRole` grant (invariant 17: path, boundary, and a `PassRole`

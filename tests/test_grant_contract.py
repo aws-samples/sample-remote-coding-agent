@@ -176,7 +176,6 @@ def test_provisioner_environment_names_every_variable_the_handler_reads() -> Non
         fallback_model_id="global.anthropic.claude-sonnet-4-5-20250929-v1:0",
         goal_enabled=True,
         otel_metrics_enabled=False,
-        platform_version="V1",
     )
     assert environment == {
         "AGENT_IMAGE_URI": "123456789012.dkr.ecr.ap-southeast-1.amazonaws.com/agent:abc",
@@ -195,11 +194,6 @@ def test_provisioner_environment_names_every_variable_the_handler_reads() -> Non
         # `CLAUDE_CODE_ENABLE_TELEMETRY`, and a `GetAgentRuntime` diff showing "0" says
         # something where an absent variable says nothing.
         "OTEL_METRICS_ENABLED": "0",
-        # Forwarded even at the default, for the same reason as the flag above and one more:
-        # `provisioner.PLATFORM_VERSION` is sent on every create *and* update, because
-        # omitting it on an update means "keep the current platform version" rather than
-        # "use the default". An absent variable here would make the deploy-time key one-way.
-        "AGENT_PLATFORM_VERSION": "V1",
     }
 
     # The names are the contract, and the two halves are written in different
@@ -231,7 +225,6 @@ def test_the_goal_flag_is_normalised_rather_than_forwarded_as_a_bool() -> None:
         fallback_model_id="f",
         goal_enabled=False,
         otel_metrics_enabled=False,
-        platform_version="V1",
     )
     assert off["CODE_GOAL_ENABLED"] == "0"
 
@@ -249,7 +242,6 @@ def _metrics_environment(*, otel_metrics_enabled: bool) -> dict[str, str]:
         fallback_model_id="f",
         goal_enabled=True,
         otel_metrics_enabled=otel_metrics_enabled,
-        platform_version="V1",
     )
 
 

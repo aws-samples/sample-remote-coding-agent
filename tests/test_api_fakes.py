@@ -104,6 +104,10 @@ def runtime(**overrides: Any) -> dict[str, Any]:
         "lifecycleConfiguration": {"maxLifetime": 28800, "idleRuntimeSessionTimeout": 900},
         "filesystemConfigurations": [{"sessionStorage": {"mountPath": "/mnt/workspace"}}],
         "environmentVariables": {},
+        # A converged runtime in a V2-only deployment reports V2. A runtime that reports
+        # nothing here is a *pre-V2* one, which is drift -- there is a test for that, and it
+        # pops this key rather than relying on the default.
+        "platformVersion": "V2",
         "agentRuntimeArtifact": {
             "containerConfiguration": {
                 "containerUri": "123456789012.dkr.ecr.ap-southeast-1.amazonaws.com/rca:latest"

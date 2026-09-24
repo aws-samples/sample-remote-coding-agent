@@ -128,19 +128,22 @@ NODE_MINIMUM ?= 20
 #
 # BOOTSTRAP_STACK stays unprefixed: `CDKToolkit` is the CDK CLI's own stack, not one of ours.
 STACK_PREFIX ?= SampleCodingAgent
-# AgentCore Runtime V2 exists in five regions, and `CreateAgentRuntime` in any other one
-# accepts `platformVersion: V2` **without rejecting it** -- so a wrong region is not an
-# error, it is a deploy that appears to have worked while every runtime it provisions is
-# V1. Nothing at run time says so either: `GetAgentRuntime` reports what it got.
+# The regions this deployment can exist in, because `provisioner.PLATFORM_VERSION` is V2
+# and V2 is offered in exactly these five. Not a knob: there is no configuration under
+# which a non-V2 region is acceptable, so this check is unconditional.
 #
-# So this is checked against a literal list rather than by asking the service, for the same
-# reason the note above exists: no read-only call distinguishes "V2 is offered here" from
-# "V2 is not", and preflight may not make a mutating one. A hard-coded list goes stale when
-# AWS adds a region, and that failure is the safe direction -- it refuses a deploy that
-# would have worked, loudly, rather than accepting one that silently will not.
+# It matters more than it looks. `CreateAgentRuntime` in another region does **not** reject
+# `platformVersion: V2` -- it accepts the parameter and hands back a V1 runtime -- so a
+# wrong region produces no error at deploy time, none at run time, and a `GetAgentRuntime`
+# that truthfully reports V1. The deploy succeeds and the only thing it was for did not
+# happen. That is strictly worse than the two failures preflight already catches, both of
+# which eventually say something.
 #
-# Only checked when the deploy actually asks for V2: `CDK_CONTEXT='-c platformVersion=V2'`.
-# `infra/app.py` defaults the key to V1, so an unmodified deploy never reaches this.
+# Checked against a literal list rather than by asking the service, for the same reason the
+# note above this one exists: no read-only call distinguishes "V2 is offered here" from "V2
+# is not", and preflight may not make a mutating one. The list goes stale when AWS adds a
+# region, and that is the safe direction -- it refuses a deploy that would have worked,
+# loudly, rather than accepting one that silently will not.
 V2_REGIONS = us-east-1 us-east-2 us-west-2 eu-west-1 ap-northeast-1
 
 BOOTSTRAP_STACK ?= CDKToolkit
@@ -569,25 +572,22 @@ preflight:
 	  "preflight: note    read-only call can tell the two apart and preflight may not make a" \
 	  "preflight: note    mutating one, so this check does not claim it."
 	@set -eu; \
-	case "$(CDK_CONTEXT)" in \
-	  *platformVersion=V2*) \
-	    region=$${AWS_REGION:-$${AWS_DEFAULT_REGION:-$$(aws configure get region 2>/dev/null || true)}}; \
-	    for offered in $(V2_REGIONS); do \
-	      if [ "$$offered" = "$$region" ]; then \
-	        printf 'preflight: ok      AgentCore Runtime V2 is offered in %s\n' "$$region"; \
-	        exit 0; \
-	      fi; \
-	    done; \
-	    printf '%s\n' \
-	      "preflight: FAILED -- this deploy asks for platformVersion=V2 and AgentCore Runtime" \
-	      "                     V2 is not offered in $$region." \
-	      "  fix: deploy to one of $(V2_REGIONS), or drop" \
-	      "       '-c platformVersion=V2' to stay on V1. CreateAgentRuntime does NOT reject" \
-	      "       V2 in a region that does not offer it -- it accepts the parameter and gives" \
-	      "       you V1 runtimes -- so without this check the deploy succeeds and the thing" \
-	      "       it was for silently did not happen." >&2; \
-	    exit 1 ;; \
-	esac
+	region=$${AWS_REGION:-$${AWS_DEFAULT_REGION:-$$(aws configure get region 2>/dev/null || true)}}; \
+	for offered in $(V2_REGIONS); do \
+	  if [ "$$offered" = "$$region" ]; then \
+	    printf 'preflight: ok      AgentCore Runtime V2 is offered in %s\n' "$$region"; \
+	    exit 0; \
+	  fi; \
+	done; \
+	printf '%s\n' \
+	  "preflight: FAILED -- AgentCore Runtime V2 is not offered in $$region, and this" \
+	  "                     deployment runs on V2 only." \
+	  "  fix: export AWS_REGION to one of $(V2_REGIONS)" \
+	  "       and re-run 'make preflight'. CreateAgentRuntime does NOT reject V2 in a region" \
+	  "       that does not offer it -- it accepts the parameter and gives you V1 runtimes --" \
+	  "       so without this check the deploy succeeds, every cold start is the slow one it" \
+	  "       was meant to fix, and nothing anywhere reports it." >&2; \
+	exit 1
 	@set -eu; \
 	region=$${AWS_REGION:-$${AWS_DEFAULT_REGION:-$$(aws configure get region 2>/dev/null || true)}}; \
 	profiles=$$(aws bedrock list-inference-profiles --region "$$region" \

@@ -1435,10 +1435,10 @@ def test_the_idempotence_guard_covers_the_converged_fields_not_the_image_alone(
         "environmentVariables"
     ]
     # `platformVersion` is an intent key too, and this assertion compares `_INTENT_KEYS`
-    # raw rather than through `_matches_intent` -- which is the function that treats an
-    # absent value as the service's `V1` default. Spelling it here keeps the drift set
-    # exactly the two fields this test is about.
-    live["platformVersion"] = "V1"
+    # raw rather than through `_matches_intent`. This deployment is V2 only, so a converged
+    # runtime reports V2 -- spelling it keeps the drift set exactly the two fields this test
+    # is about rather than three.
+    live["platformVersion"] = "V2"
     desired = provisioner._desired_runtime(live, config)
 
     assert provisioner._container_uri(live) == provisioner._container_uri(desired), (
@@ -1725,26 +1725,33 @@ def test_the_entry_point_is_not_an_http_route(aws: Any, monkeypatch: pytest.Monk
 # -- platform version (AgentCore Runtime V2) --------------------------------------------
 
 
-def test_the_platform_version_defaults_to_v1_so_an_unmodified_deploy_changes_nothing(
+def test_this_deployment_is_v2_only_and_says_so_without_an_environment_variable(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No `AGENT_PLATFORM_VERSION` set means `V1`, which is also the service's own default.
+    """`PLATFORM_VERSION` is a constant, not a knob, and `V2` reaches both calls.
 
-    The point of asserting the default rather than only the override: this member is sent on
-    every create and update, so getting the default wrong would move every runtime in every
-    existing deploy onto a different platform on the next reconcile.
+    Asserted as a constant deliberately: a platform version is not a per-deployment taste.
+    V1 and V2 differ in how a container is *started*, so offering both would mean the
+    120-second health requirement holds on one path and not the other, and every failure
+    report would have to say which path produced it. There is also no environment variable
+    to set -- if one reappears, this test is where that shows up.
     """
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    assert provisioner.PLATFORM_VERSION == "V1"
+    assert provisioner.PLATFORM_VERSION == "V2"
     config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
-    assert provisioner._desired_runtime(None, config)["platformVersion"] == "V1"
+    assert provisioner._desired_runtime(None, config)["platformVersion"] == "V2"
+
+    # And it cannot be talked out of it from the environment.
+    monkeypatch.setenv("AGENT_PLATFORM_VERSION", "V1")
+    _common, reloaded = _load("provisioner")
+    assert reloaded.PLATFORM_VERSION == "V2"
 
 
 def test_the_platform_version_is_fleet_policy_and_is_sent_on_create_and_update(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`V2` reaches both calls, and reaches an update **even when the live runtime is V1**.
+    """`V2` reaches an update **even when the live runtime reports V1**.
 
     Sent always rather than only when it differs, because the service's omission semantics
     are asymmetric: omitted on create means `V1`, but omitted on *update* means "keep the
@@ -1752,7 +1759,7 @@ def test_the_platform_version_is_fleet_policy_and_is_sent_on_create_and_update(
     reached V2 could never be brought back, and clearing the deploy-time key would pin
     whatever each runtime happened to have rather than restoring the default.
     """
-    _fleet(monkeypatch, AGENT_PLATFORM_VERSION="V2")
+    _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
     config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
 
@@ -1766,27 +1773,39 @@ def test_the_platform_version_is_fleet_policy_and_is_sent_on_create_and_update(
     )
 
 
-def test_a_runtime_that_reports_no_platform_version_is_not_drift_against_v1(
+def test_a_runtime_that_reports_no_platform_version_is_drift_and_converges_once(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Measured, not assumed: every runtime in the live fleet answered `GetAgentRuntime`
     with `platformVersion` **absent**, because they predate the member.
 
-    Absence is the service's default, `V1`. Treating it as a difference would take one
-    update per existing runtime for no change at all -- and under V2 an update is a snapshot
-    rebuild of several minutes, not an idle API call.
+    Absence is the service's default, which is V1, so in a V2-only deployment such a runtime
+    is drift and one update moves it -- the same convergence any other fleet field gets
+    (invariant 24). The reason `_matches_intent` normalises absence to `V1` rather than
+    treating it as "unknown" is that it makes the convergence happen **exactly once**: after
+    the update the runtime reports V2 and matches, instead of being updated on every
+    reconcile forever, which under V2 would be a snapshot rebuild each time.
     """
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
     config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
 
-    live = runtime(agentRuntimeId=_RUNTIME_ID)
-    live.pop("platformVersion", None)
-    live["environmentVariables"] = provisioner._desired_runtime(live, config)[
+    pre_v2 = runtime(agentRuntimeId=_RUNTIME_ID)
+    pre_v2.pop("platformVersion")
+    pre_v2["environmentVariables"] = provisioner._desired_runtime(pre_v2, config)[
         "environmentVariables"
     ]
-    assert "platformVersion" not in live
-    assert provisioner._matches_intent(live, provisioner._desired_runtime(live, config)) is True
+    assert "platformVersion" not in pre_v2
+    assert (
+        provisioner._matches_intent(pre_v2, provisioner._desired_runtime(pre_v2, config)) is False
+    )
+
+    # What the update writes, and that it then settles.
+    converged = {**pre_v2, "platformVersion": "V2"}
+    assert (
+        provisioner._matches_intent(converged, provisioner._desired_runtime(converged, config))
+        is True
+    )
 
 
 def test_a_vendor_only_network_member_is_not_drift(
