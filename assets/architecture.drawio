@@ -160,13 +160,13 @@
         <mxCell id="api-handlers" value="" edge="1" parent="1" source="api" target="lambda" style="edgeStyle=none;rounded=0;curved=0;html=1;endArrow=block;endSize=8;strokeWidth=1.5;strokeColor=#545B64;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
           <mxGeometry as="geometry" relative="1" />
         </mxCell>
-        <mxCell id="enqueue" value="2 · queue" edge="1" parent="1" source="lambda" target="sqs" style="edgeStyle=none;rounded=0;curved=0;html=1;endArrow=block;endSize=8;strokeWidth=1.5;strokeColor=#545B64;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
+        <mxCell id="enqueue" value="Enqueue" edge="1" parent="1" source="lambda" target="sqs" style="edgeStyle=none;rounded=0;curved=0;html=1;endArrow=block;endSize=8;strokeWidth=1.5;strokeColor=#545B64;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
           <mxGeometry as="geometry" relative="1" />
         </mxCell>
         <mxCell id="dispatch" value="" edge="1" parent="1" source="sqs" target="dispatcher" style="edgeStyle=none;rounded=0;curved=0;html=1;endArrow=block;endSize=8;strokeWidth=1.5;strokeColor=#545B64;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
           <mxGeometry as="geometry" relative="1" />
         </mxCell>
-        <mxCell id="invoke" value="3 · invoke" edge="1" parent="1" source="dispatcher" target="runtime" style="edgeStyle=none;rounded=0;curved=0;html=1;endArrow=block;endSize=8;strokeWidth=1.5;strokeColor=#545B64;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.7717391304347826;entryY=0;">
+        <mxCell id="invoke" value="Invoke runtime" edge="1" parent="1" source="dispatcher" target="runtime" style="edgeStyle=none;rounded=0;curved=0;html=1;endArrow=block;endSize=8;strokeWidth=1.5;strokeColor=#545B64;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.7717391304347826;entryY=0;">
           <mxGeometry as="geometry" relative="1" />
         </mxCell>
         <mxCell id="browser-console" value="HTTPS" edge="1" parent="1" source="browser" target="console" style="edgeStyle=none;rounded=0;curved=0;html=1;endArrow=block;endSize=8;strokeWidth=1.5;strokeColor=#545B64;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
@@ -181,7 +181,7 @@
         <mxCell id="dependencies" value="" edge="1" parent="1" source="runtime" target="endpoints" style="edgeStyle=none;rounded=0;curved=0;html=1;endArrow=block;endSize=8;strokeWidth=1.5;strokeColor=#545B64;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.75;entryX=1;entryY=0.41;">
           <mxGeometry as="geometry" relative="1" />
         </mxCell>
-        <mxCell id="publish" value="4 · PR" edge="1" parent="1" source="runtime" target="github" style="edgeStyle=none;rounded=0;curved=0;html=1;endArrow=block;endSize=8;strokeWidth=1.5;strokeColor=#545B64;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.21195652173913043;exitY=1;entryX=0.5;entryY=0;">
+        <mxCell id="publish" value="Open PR" edge="1" parent="1" source="runtime" target="github" style="edgeStyle=none;rounded=0;curved=0;html=1;endArrow=block;endSize=8;strokeWidth=1.5;strokeColor=#545B64;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.21195652173913043;exitY=1;entryX=0.5;entryY=0;">
           <mxGeometry as="geometry" relative="1" />
         </mxCell>
       </root>

@@ -17,9 +17,14 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-TITLE = "Test empty input"
-PROMPT = TITLE + "\nAdd an empty-input regression test.\nUse the existing test runner."
-CONFIG = {"configId": "cfg_preview", "repository": "example/utility-tests", "status": "READY"}
+TITLE = "Add CSV export"
+PROMPT = TITLE + (
+    "\nAdd a Download CSV button to Expenses."
+    "\nExport date, category, and amount."
+    "\nTest CSV escaping and empty exports."
+)
+CONFIG = {"configId": "cfg_preview", "repository": "example/expense-tracker", "status": "READY"}
+RESULT = "Synthetic example: CSV escaping and empty-export tests pass."
 STAGES = ["PLANNING", "CODING", "VERIFYING", "REVIEWING", "SUBMITTING", "SUCCEEDED"]
 COLUMNS = ["PLANNING", "CODING", "VERIFYING", "VERIFYING", "VERIFYING", "DONE"]
 STEPS = ["checkout", "plan", "code", "verify", "review", "submit"]
@@ -154,7 +159,7 @@ def capture():  # noqa: C901 - Keep the bounded fixture and its linear capture s
             page.mouse.move(bounds["x"] + bounds["width"] - 3, bounds["y"] + bounds["height"] - 3)
             page.mouse.down()
             page.mouse.move(
-                bounds["x"] + bounds["width"] - 3, bounds["y"] + bounds["height"] + 90, steps=8
+                bounds["x"] + bounds["width"] - 3, bounds["y"] + bounds["height"] + 170, steps=8
             )
             page.mouse.up()
             composer.focus()
@@ -193,13 +198,13 @@ def capture():  # noqa: C901 - Keep the bounded fixture and its linear capture s
                 "command": "npm test",
                 "exitCode": 0,
                 "verified": True,
-                "summary": "Synthetic example: regression test passes.",
+                "summary": RESULT,
                 "vetoed": False,
             }
             # A reserved example domain prevents a fixture from implying an actual published PR.
             task["prUrl"] = "https://example.com/preview/pull/1"
             page.goto(origin + "/#/tasks/cfg_preview/task_preview")
-            page.get_by_text("Synthetic example: regression test passes.", exact=True).wait_for()
+            page.get_by_text(RESULT, exact=True).wait_for()
             assert (
                 page.get_by_role("link", name="Open pull request").get_attribute("href")
                 == task["prUrl"]

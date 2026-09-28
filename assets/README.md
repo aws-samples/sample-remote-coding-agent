@@ -26,8 +26,9 @@ uv run --with playwright==1.58.0 assets/capture-preview.py
 The capture script asserts typed content, the Add card request, the created title,
 rendered stages, the board-column mapping, and the result link.
 It blocks external browser requests and fails on JavaScript errors or unexpected API calls.
-The fixture is one bounded test addition using the repository's existing test runner;
-its illustrative verification command is `npm test`. `console-preview.png` is the static fallback.
+The fixture is **Add CSV export** in `example/expense-tracker`: add a Download CSV button
+to Expenses, export date/category/amount, and test CSV escaping and empty exports.
+Its illustrative verification command is `npm test`. `console-preview.png` is the static fallback.
 UI source baseline: `72e8b3f` (2026-09-28). Refresh when the UI or status vocabulary changes.
 
 ### Live recording still required
