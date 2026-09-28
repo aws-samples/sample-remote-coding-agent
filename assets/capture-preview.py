@@ -111,13 +111,6 @@ def capture():  # noqa: C901 - Keep the bounded fixture and its linear capture s
             page.add_init_script("""
                 sessionStorage.setItem('rca.idToken', 'preview.' + btoa(JSON.stringify({email:'preview@example.com'})) + '.unsigned');
                 sessionStorage.setItem('rca.expiresAt', '9999999999999');
-                document.addEventListener('DOMContentLoaded', () => {
-                    const label = document.createElement('div');
-                    label.id = 'preview-label';
-                    label.textContent = 'UI PREVIEW · SYNTHETIC DATA · NOT A LIVE AWS RUN';
-                    label.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:9999;background:#232f3e;color:white;padding:12px;text-align:center;font:16px Arial';
-                    document.body.append(label);
-                });
             """)
             page.goto(origin + "/#/boards/cfg_preview")
             composer = page.get_by_role("textbox", name="New card", exact=True)
@@ -139,7 +132,7 @@ def capture():  # noqa: C901 - Keep the bounded fixture and its linear capture s
                     """({title, detail}) => {
                     const cover = document.createElement('div');
                     cover.id = 'preview-slate';
-                    cover.style.cssText = 'position:fixed;inset:0 0 42px;z-index:9998;background:#f6f7fa;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#232f3e;font:24px Arial';
+                    cover.style.cssText = 'position:fixed;inset:0;z-index:9998;background:#f6f7fa;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#232f3e;font:24px Arial';
                     const heading = document.createElement('h1');
                     heading.textContent = title;
                     const text = document.createElement('p');
@@ -150,7 +143,7 @@ def capture():  # noqa: C901 - Keep the bounded fixture and its linear capture s
                     {"title": title, "detail": detail},
                 )
 
-            slate("Create a coding task", "Type the title and description · Add card · Start run")
+            slate("Sample run — simulated", "Add CSV export · Type a task · Add card · Start run")
             frame(2)
             page.locator("#preview-slate").evaluate("(node) => node.remove()")
             frame(1)

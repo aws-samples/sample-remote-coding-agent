@@ -1,31 +1,35 @@
 # Remote coding agent on Amazon Bedrock AgentCore
 
-Submit a coding task from Claude Code or the web console, follow its progress,
-and get a GitHub pull request with verification evidence. The agent runs remotely
-on Amazon Bedrock AgentCore Runtime, so your terminal does not need to stay open.
+**Turn a coding task into a pull request. Keep your laptop free.**
+
+[![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue)](LICENSE)
+[![Tested with Python 3.12](https://img.shields.io/badge/Python-tested_3.12-blue)](#before-you-start)
+[![Status: AWS sample](https://img.shields.io/badge/Status-AWS_sample-orange)](#who-is-this-for)
+
+Submit from Claude Code or the web UI. Follow the remote agent's progress and get a
+GitHub pull request with verification evidence, powered by Amazon Bedrock AgentCore Runtime.
 
 ![Real console with synthetic fixture data: a task progresses from Backlog through Planning, Coding and Verifying to Done, then shows verification details.](assets/console-preview.gif)
 
-**UI preview, not a live AWS run.** This recording uses the actual console with synthetic
-API responses and shortened stages. It demonstrates the interface, not agent output or
-execution speed. [Static preview](assets/console-preview.png) ·
-[Capture details and live-demo checklist](assets/README.md#console-preview)
+*Sample run — simulated: add CSV export to an expense tracker.*
 
-[Quick start](#quick-start) · [Architecture](#architecture) ·
+[Quick start](#quick-start) · [Web UI](#option-a-web-ui) · [Claude Code](#option-b-claude-code) · [Architecture](#architecture) ·
 [Costs and cleanup](#costs-and-cleanup) · [Contributing](#contributing)
 
-## Why try it?
+## Who is this for?
 
-- Delegate a bounded bug fix, test addition, or small feature while you keep working.
-- Follow the same task in Claude Code or a live-polled board with run activity and test evidence.
-- Run Claude Code with Bedrock model access and a separate Runtime and AgentCore Memory per repository.
+For **developers** delegating scoped features, bug fixes, and tests, and **platform engineers**
+exploring AWS-hosted coding agents with repository-scoped execution and a shared task console.
 
-**A run that did not verify green opens a draft pull request and says so.**
-`verified` means a real verification command ran and a review judged it green.
+## Why use it?
 
-**This is a sample for trusted repositories in a dedicated AWS account.** It executes
-repository setup and test commands. It does not make untrusted code safe or replace
-human review. A runtime or publishing failure may produce no PR.
+- **Keep working while the agent runs.** Submit a task and let remote execution handle the loop.
+- **See what happened.** Follow planning, coding, verification, and review from one board.
+- **Review the result in GitHub.** Get a PR with verification evidence and an explicit draft outcome when checks do not pass.
+- **Own the deployment.** Each repository gets its own AgentCore Runtime and Memory in your AWS account.
+
+**Use trusted repositories in a dedicated AWS account.** This sample executes repository code;
+it does not make untrusted code safe. A runtime or publishing failure may produce no PR.
 
 ## Quick start
 
@@ -34,7 +38,7 @@ human review. A runtime or publishing failure may produce no PR.
 | You need | Why |
 |---|---|
 | Docker running | the ~1.3 GB ARM64 agent image is built on *this* machine. No build service stands in. |
-| Python ≥ 3.12, `uv` on `PATH`, Node ≥ 20, AWS CLI and credentials | Node is for the pinned CDK CLI; select your intended profile and region |
+| Python ≥ 3.11 (tested with 3.12), `uv`, Node ≥ 20, AWS CLI and credentials | Node is for the pinned CDK CLI; select your intended profile and region |
 | AgentCore availability and active Bedrock inference profiles in your region | Preflight checks the configured services and models |
 | Claude Code with plugin support (optional) | Required for terminal submission; the console can submit tasks without it |
 | `cdk bootstrap`, once per account and region | `make preflight` prints the exact command and never runs it for you |
@@ -57,60 +61,69 @@ human review. A runtime or publishing failure may produce no PR.
    deploy starts spending without confirmation. Allow **15–25 min**, mostly the local image build.
    On completion it prints the console URL, API URL, and region. Check known issues if it stalls.
 
-2. **Install the optional Claude Code plugin, then restart Claude Code.**
+2. **Sign in at the console URL.** Cognito emails a temporary password to `EMAIL`; check spam and change it on first sign-in.
 
-   ```
+3. **Register a disposable repository** with **+ Add repository**. Enter its URL and PAT;
+   leave Advanced folded. Wait **2–5 min** for `READY`; starting sooner returns `409 ConfigurationNotReady`.
+
+   The agent pushes branches and opens PRs. Start with a small repository whose tests already
+   pass. Declare setup/test entry points so verification can run:
+   [command detection details](CLAUDE.md#why-the-makefile-targets-are-named-that-way).
+
+### Choose how to submit tasks
+
+**One deployment, two entry points.** Both queue the same remote agent pipeline and produce
+cards on the same board. Registration is done once in the console, whichever path you use.
+
+| Entry point | Best when | What you need |
+|---|---|---|
+| [Web UI](#option-a-web-ui) | You want to compose tasks and watch them on a board | Console sign-in; no local Claude Code installation |
+| [Claude Code](#option-b-claude-code) | You want to delegate without leaving your terminal | Plugin and AWS credentials for the deployed fleet |
+
+### Option A: Web UI
+
+Open your repository's board. Type the title on the first line and the description below it.
+For an existing expense-tracker app, try:
+
+```text
+Add CSV export
+Add a Download CSV button to Expenses.
+Export date, category, and amount.
+Test CSV escaping and empty exports using the existing test runner.
+```
+
+Click **Add card**, then **Start run** (or drag Backlog → Planning). **Add and start** does
+both at once. Watch **Planning → Coding → Verifying → Done** and click the status for details.
+
+### Option B: Claude Code
+
+4. **Install the plugin, then restart Claude Code.** Web-only users can skip this step.
+
+   ```text
    /plugin marketplace add aws-samples/sample-remote-coding-agent
    /plugin install sample-rca@sample-remote-coding-agent
    ```
 
-   **Leave all three config fields empty** — a value in `RCA_API_URL`, `AWS_REGION` or
-   `RCA_STACK_NAME` **outranks** what the deploy just wrote. The restart is what loads the
-   plugin's MCP server; until then `/sample-rca:remote` has no tools.
+   Leave the config fields empty for discovery. `RCA_API_URL`, `AWS_REGION`, and
+   `RCA_STACK_NAME` overrides **outrank** discovery and may select another fleet.
+   Check the `endpoint used:` line. Restarting loads the plugin's MCP tools.
 
-### Use it
+Submit a task and check its status from Claude Code:
 
-3. **Sign in to the console**, at the URL the deploy printed. Cognito emails a temporary password
-   to the `EMAIL=` address; **check spam**, and the hosted UI makes you change it on first sign-in.
+```text
+/sample-rca:remote Add a Download CSV button to Expenses. Export date, category, and amount. Test CSV escaping and empty exports with the existing test runner.
+/sample-rca:remote status
+```
 
-4. **Register a repository in the console.** A first sign-in lands on the register form; later it
-   is **+ Add repository**. Two fields — the repository URL and the PAT — so leave **Advanced**
-   folded. **2-5 min** to `READY`; a task started sooner gets `409 ConfigurationNotReady`.
+The task also appears in the web UI. For an empty repository, `/sample-rca:scaffold` can
+prepare a local project first; push the scaffold and tests before dispatching a remote task.
 
-   **Register a throwaway repository, not one you care about**: the agent pushes branches and
-   opens pull requests against whatever you register. Start with a small repository whose tests
-   already pass. For an empty repository, run the scaffold locally and push it before dispatch:
+### Review the result
 
-   ```
-   /sample-rca:scaffold
-   ```
-
-5. **Run a task**, or drag a card from **Backlog** to **Planning** — the same path.
-
-   ```
-   /sample-rca:remote Add a regression test for one uncovered edge case in an existing
-   utility function. Keep the change small, use the existing test runner, and run its tests.
-   Explain the chosen case and verification command in the pull request.
-   ```
-
-   Or paste the prompt into the console, choose **Add card**, then start it from Backlog.
-   The call returns **in seconds**, once queued; a run can take **tens of minutes**.
-   These are planning estimates, not guarantees. Declare setup/test entry points so verification
-   can run: [command detection details](CLAUDE.md#why-the-makefile-targets-are-named-that-way).
-
-6. **Watch it**, or the board: Backlog → Planning → Coding → Verifying → Done, live-polled.
-
-   ```
-   /sample-rca:remote status
-   ```
-
-7. **Read the result** — a pull request, **draft if it did not verify green**, with the reason in
-   the body. `SUCCEEDED` means a verification command really ran *and* a review judged it green.
-
-   Click the card's status for the run timeline, activity, and verification command/result.
-   **Reviewing** and **Submitting** appear within Verifying, not as separate board columns.
-   Done means the run ended; “Draft, not verified” and “Failed verification” are not green.
-   Follow **Open pull request** and inspect the diff and evidence before merging.
+Queue acknowledgment takes seconds; execution can take tens of minutes. Unverified runs open **draft PRs**. **Reviewing** and
+**Submitting** are statuses within Verifying, not separate board columns. Done alone is not
+proof of success: `SUCCEEDED` means a verification command ran and review judged it green.
+Follow **Open pull request**, inspect the diff and evidence, and merge only after human review.
 
 ## Architecture
 
@@ -118,15 +131,14 @@ human review. A runtime or publishing failure may produce no PR.
 
 [Editable draw.io source](assets/architecture.drawio) · [Asset sources](assets/README.md#architecture)
 
-The local MCP server signs requests to an IAM-authorized HTTP API. The browser uses
-CloudFront/S3 and a separate Cognito-authorized HTTP API. Both reach shared Lambda
-handlers and the SQS dispatcher. Each repository owns a Runtime; tasks run in isolated
-sessions with a clone and checkpoint under `/mnt/workspace`.
+The local MCP server uses an IAM-authorized API; the browser uses CloudFront/S3 and a
+Cognito-authorized API. Both reach Lambda and SQS. Each repository owns a Runtime;
+tasks run in isolated sessions with a clone and checkpoint under `/mnt/workspace`.
 
-The agent runs **checkout → plan → code → verify → review → submit**, with bounded
-re-planning or re-verification. It writes status/activity to DynamoDB; the console polls
-through the API. Each repository's AgentCore Memory is created at registration and deleted
-at deregistration. Later tasks can retrieve earlier lessons; a repository without memory runs without it.
+The agent runs **checkout → plan → code → verify → review → submit**, with bounded rework.
+It writes status/activity to DynamoDB; the console polls through the API. AgentCore Memory
+is created at registration and deleted at deregistration. Tasks can retrieve earlier lessons;
+a repository without memory runs without it.
 
 VPC endpoints connect runtime traffic to **Bedrock, AgentCore, Secrets Manager,
 DynamoDB, ECR API/Docker, S3, and CloudWatch Logs**. Lambda runs outside the agent VPC.
@@ -137,10 +149,9 @@ blocks named vendor domains only. [Boundary details](CLAUDE.md#the-boundary-clai
 
 ## Costs and cleanup
 
-Deployment incurs charges even between tasks: NAT gateways, interface VPC endpoints,
-WAF, images, logs, and stored data can all cost money. Tasks add AgentCore Runtime,
-Bedrock, memory, and supporting-service usage. No measured whole-stack monthly or per-task
-cost estimate is published yet.
+NAT gateways, interface VPC endpoints, WAF, images, logs, and stored data can cost money
+even between tasks. Tasks add Runtime, Bedrock, and memory usage. No measured whole-stack
+monthly or per-task cost estimate is published yet.
 
 The default **$200 monthly Bedrock budget sends email notifications**, not a hard spending
 cap, and does not cover every service. Monitor your actual account charges.
@@ -157,25 +168,17 @@ before deleting them; some are the only history of your runs.
 ## Troubleshooting
 
 - **A tool recommends `/sample-rca:setup`.** That command is gone; run `make deploy EMAIL=you@example.com` from a checkout.
-- **The console URL answers `<Error><Code>AccessDenied</Code></Error>`.** The bucket has no
-  `index.html`. Re-run the deploy above; it is not an OAC or IAM problem.
-- **The temporary password is lost or expired.** Redeployment does not resend it. Use Cognito's
-  resend action with the pool ID from the console stack; see [operator notes](CLAUDE.md#what-the-walkthrough-touches-and-where-it-lives).
-- **Every tool reports success but the console lists no repository.** A leftover `RCA_API_URL` is
-  aiming the tools at another deployment; every tool's answer ends with an `endpoint used:` line.
+- **Console returns AccessDenied XML.** Check that deployment uploaded `index.html` before changing IAM.
+- **Temporary password expired.** Redeployment does not resend it; see [operator recovery notes](CLAUDE.md#what-the-walkthrough-touches-and-where-it-lives).
+- **Tools succeed but the board is empty.** Check `endpoint used:` and stale API overrides for another deployment.
 - **Another `/remote` command answers.** Use `/sample-rca:remote`; other plugin namespaces are unrelated.
 
-Known onboarding issues: [VPC quota preflight](https://github.com/aws-samples/sample-remote-coding-agent/issues/2),
-[Cognito domain collisions](https://github.com/aws-samples/sample-remote-coding-agent/issues/3),
-[deploy completion](https://github.com/aws-samples/sample-remote-coding-agent/issues/5),
-[wrong-account 403 handling](https://github.com/aws-samples/sample-remote-coding-agent/issues/7), and
-[account selection](https://github.com/aws-samples/sample-remote-coding-agent/issues/8).
-Check their current status before deploying.
+Check current setup issues before deploying: [VPC quota](https://github.com/aws-samples/sample-remote-coding-agent/issues/2), [Cognito domain](https://github.com/aws-samples/sample-remote-coding-agent/issues/3),
+[deployment](https://github.com/aws-samples/sample-remote-coding-agent/issues/5), [wrong-account handling](https://github.com/aws-samples/sample-remote-coding-agent/issues/7), [account selection](https://github.com/aws-samples/sample-remote-coding-agent/issues/8).
 
 ## Contributing
 
-Run `make setup`, `make test`, and `make lint` from a checkout before proposing a change.
-Local tests use fake AWS services; they do not prove a deployed fleet works.
+Run `make setup`, `make test`, and `make lint`. Local tests use fake AWS services, not a deployed fleet.
 See [contribution guidelines](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md),
 and [maintainer reference](CLAUDE.md). Keep diagrams and previews in sync with UI changes.
 
@@ -185,9 +188,8 @@ Use a fine-grained PAT for one trusted repository and protect its default branch
 The account boundary does not stop repository code from making outbound HTTPS requests.
 [Remaining exposure](CLAUDE.md#what-remains-exposed)
 
-Model-data handling, stored logs/memory, and regional residency are separate questions.
-Bedrock invocation logging is a retention choice; default `global.` inference profiles
-can serve outside your deployment region. Review the
+Bedrock invocation logging is a retention choice; default `global.` inference profiles can
+serve outside your deployment region. Review the
 [logging qualification](CLAUDE.md#qualification-1--model-invocation-logging-is-a-retention-choice)
 and [data residency](CLAUDE.md#data-residency) before sending sensitive code.
 
@@ -195,5 +197,4 @@ See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more inform
 
 ## License
 
-This sample is licensed under the [MIT-0 License](LICENSE). Third-party visual assets retain
-their respective rights; see [asset attribution](assets/README.md#architecture).
+This sample uses the [MIT-0 License](LICENSE). See [attribution](assets/README.md#architecture) for third-party artwork rights.

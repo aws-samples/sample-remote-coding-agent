@@ -4,7 +4,7 @@
 
 `console-preview.gif` is a **synthetic UI preview**, not a recording of an AWS agent run.
 It captures the unmodified console from this branch using browser-intercepted API responses.
-The persistent on-screen label makes the distinction visible even when the GIF is shared alone.
+The opening title and README caption say “Sample run — simulated”; there is no bottom overlay.
 The example repository, task, verification evidence, and PR URL are fixtures. No AWS or GitHub
 requests are made. There is no measured task duration. Typing plays at 10 frames per second,
 stages pause for four seconds, and the ending holds for five seconds before replaying.
@@ -28,7 +28,7 @@ rendered stages, the board-column mapping, and the result link.
 It blocks external browser requests and fails on JavaScript errors or unexpected API calls.
 The fixture is **Add CSV export** in `example/expense-tracker`: add a Download CSV button
 to Expenses, export date/category/amount, and test CSV escaping and empty exports.
-Its illustrative verification command is `npm test`. `console-preview.png` is the static fallback.
+Its illustrative verification command is `npm test`. [Static preview](console-preview.png).
 UI source baseline: `72e8b3f` (2026-09-28). Refresh when the UI or status vocabulary changes.
 
 ### Live recording still required

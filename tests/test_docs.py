@@ -511,7 +511,9 @@ def test_the_readme_has_navigation_and_media() -> None:
     headings = [line for line in text.splitlines() if line.startswith("## ")]
     assert all(heading in headings for heading in _README_HEADINGS + _README_TRAILING_HEADINGS)
     assert text.index("assets/console-preview.gif") < text.index("## Quick start")
-    assert "not a live AWS run" in text
+    assert "Sample run — simulated" in text
+    assert "## Who is this for?" in text
+    assert "### Option A: Web UI" in text and "### Option B: Claude Code" in text
     assert "not an enforced domain allowlist" in text
     for path in (
         "assets/architecture.drawio",
@@ -519,7 +521,7 @@ def test_the_readme_has_navigation_and_media() -> None:
         "assets/console-preview.gif",
         "assets/console-preview.png",
     ):
-        assert path in text
+        assert path in text or Path(path).name in (REPO_ROOT / "assets/README.md").read_text()
         assert (REPO_ROOT / path).is_file()
     assert headings[-2:] == _README_TRAILING_HEADINGS
     cleanup = _section(text, "## Costs and cleanup")
