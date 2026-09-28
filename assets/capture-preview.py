@@ -7,6 +7,7 @@ Requires Chrome and ffmpeg. No production code or credentials are modified.
 import functools
 import http.server
 import json
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -16,14 +17,15 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-PROMPT = "Add a regression test for an uncovered edge case in an existing utility."
+TITLE = "Test empty input"
+PROMPT = TITLE + "\nAdd an empty-input regression test.\nUse the existing test runner."
 CONFIG = {"configId": "cfg_preview", "repository": "example/utility-tests", "status": "READY"}
 STAGES = ["PLANNING", "CODING", "VERIFYING", "REVIEWING", "SUBMITTING", "SUCCEEDED"]
 COLUMNS = ["PLANNING", "CODING", "VERIFYING", "VERIFYING", "VERIFYING", "DONE"]
 STEPS = ["checkout", "plan", "code", "verify", "review", "submit"]
 
 
-def capture():
+def capture():  # noqa: C901 - Keep the bounded fixture and its linear capture sequence together.
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=ROOT / "web")
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -31,7 +33,7 @@ def capture():
     card = {
         "cardId": "card_preview",
         "configId": CONFIG["configId"],
-        "title": PROMPT,
+        "title": TITLE,
         "description": PROMPT,
         "storedColumn": "BACKLOG",
         "column": "BACKLOG",
@@ -46,8 +48,10 @@ def capture():
         "steps": [],
     }
     errors = []
+    created = False
 
     def route_request(route):
+        nonlocal created
         url = route.request.url
         if not url.startswith(origin + "/"):
             errors.append("Unexpected external request: " + url)
@@ -62,7 +66,16 @@ def capture():
         if path == "/api/configurations":
             payload = {"items": [CONFIG]}
         elif path == "/api/cards":
-            payload = {"cards": [card]}
+            if route.request.method == "POST":
+                assert not created
+                assert route.request.post_data_json == {
+                    "configId": CONFIG["configId"],
+                    "description": PROMPT,
+                }
+                created = True
+                payload = card
+            else:
+                payload = {"cards": [card] if created else []}
         elif path.endswith("/move"):
             assert route.request.method == "POST"
             assert route.request.post_data_json == {"column": "PLANNING"}
@@ -95,21 +108,66 @@ def capture():
                 sessionStorage.setItem('rca.expiresAt', '9999999999999');
                 document.addEventListener('DOMContentLoaded', () => {
                     const label = document.createElement('div');
+                    label.id = 'preview-label';
                     label.textContent = 'UI PREVIEW · SYNTHETIC DATA · NOT A LIVE AWS RUN';
                     label.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:9999;background:#232f3e;color:white;padding:12px;text-align:center;font:16px Arial';
                     document.body.append(label);
                 });
             """)
             page.goto(origin + "/#/boards/cfg_preview")
-            page.get_by_role("button", name="Start run", exact=True).wait_for()
+            composer = page.get_by_role("textbox", name="New card", exact=True)
+            composer.wait_for()
+            assert page.locator(".card").count() == 0
             frames = []
 
-            def frame():
+            def frame(seconds=4):
                 dest = Path(tmp) / f"frame-{len(frames):02}.png"
                 page.screenshot(path=str(dest))
                 frames.append(dest)
+                for _ in range(round(seconds * 10) - 1):
+                    duplicate = Path(tmp) / f"frame-{len(frames):02}.png"
+                    shutil.copyfile(dest, duplicate)
+                    frames.append(duplicate)
 
-            frame()
+            def slate(title, detail):
+                page.evaluate(
+                    """({title, detail}) => {
+                    const cover = document.createElement('div');
+                    cover.id = 'preview-slate';
+                    cover.style.cssText = 'position:fixed;inset:0 0 42px;z-index:9998;background:#f6f7fa;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#232f3e;font:24px Arial';
+                    const heading = document.createElement('h1');
+                    heading.textContent = title;
+                    const text = document.createElement('p');
+                    text.textContent = detail;
+                    cover.append(heading, text);
+                    document.body.append(cover);
+                }""",
+                    {"title": title, "detail": detail},
+                )
+
+            slate("Create a coding task", "Type the title and description · Add card · Start run")
+            frame(2)
+            page.locator("#preview-slate").evaluate("(node) => node.remove()")
+            frame(1)
+            # Use the textarea's native resize handle so title and description stay visible.
+            bounds = composer.bounding_box()
+            page.mouse.move(bounds["x"] + bounds["width"] - 3, bounds["y"] + bounds["height"] - 3)
+            page.mouse.down()
+            page.mouse.move(
+                bounds["x"] + bounds["width"] - 3, bounds["y"] + bounds["height"] + 90, steps=8
+            )
+            page.mouse.up()
+            composer.focus()
+            for start in range(0, len(PROMPT), 2):
+                composer.press_sequentially(PROMPT[start : start + 2])
+                frame(0.1)
+            assert composer.input_value() == PROMPT
+            frame(2)
+            page.get_by_role("button", name="Add card", exact=True).click()
+            page.get_by_role("button", name="Start run", exact=True).wait_for()
+            assert created and composer.input_value() == ""
+            assert page.locator(".card-title").inner_text() == TITLE
+            frame(2)
             page.get_by_role("button", name="Start run", exact=True).click()
             for i, (status, column) in enumerate(zip(STAGES, COLUMNS, strict=True)):
                 task.update(
@@ -147,6 +205,12 @@ def capture():
                 == task["prUrl"]
             )
             frame()
+            slate(
+                "Task complete",
+                "The next loop creates a new example. It does not move this task back to Backlog.",
+            )
+            frame(5)
+            page.locator("#preview-slate").evaluate("(node) => node.remove()")
             task.update(status="SUCCEEDED_UNVERIFIED")
             task["verifyResult"].update(
                 verified=False,
@@ -159,7 +223,7 @@ def capture():
             page.get_by_text(
                 "No verification command ran; the pull request stays a draft.", exact=True
             ).wait_for()
-            frame()
+            page.screenshot(path=str(ROOT / "assets/console-draft.png"))
             assert not errors, errors
             browser.close()
             subprocess.run(
@@ -169,7 +233,7 @@ def capture():
                     "-loglevel",
                     "error",
                     "-framerate",
-                    "1/4",
+                    "10",
                     "-i",
                     str(Path(tmp) / "frame-%02d.png"),
                     "-filter_complex",

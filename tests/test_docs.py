@@ -610,8 +610,11 @@ def test_the_readme_diagram_names_every_vpc_endpoint() -> None:
     )
     assert all(_ENDPOINT_DIAGRAM_WORDS[member] in labels for member in members)
     assert all(name in cells for name in ("claude", "github", "runtime"))
+    assert "grIcon=mxgraph.aws4.group_account;" in cells["account"].get("style", "")
     for cell in cells.values():
         if cell.get("edge") == "1":
+            assert "edgeStyle=none;" in cell.get("style", "")
+            assert cell.find("mxGeometry/Array") is None
             assert cell.get("source") in cells and cell.get("target") in cells
             assert cell.find("mxGeometry").get("relative") == "1"
 

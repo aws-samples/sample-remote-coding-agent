@@ -6,11 +6,15 @@
 It captures the unmodified console from this branch using browser-intercepted API responses.
 The persistent on-screen label makes the distinction visible even when the GIF is shared alone.
 The example repository, task, verification evidence, and PR URL are fixtures. No AWS or GitHub
-requests are made. There is no measured task duration; each captured state displays for four seconds.
+requests are made. There is no measured task duration. Typing plays at 10 frames per second,
+stages pause for four seconds, and the ending holds for five seconds before replaying.
 
-The preview shows one task in Backlog, starting through the actual **Start run** control,
-then Planning, Coding, Verifying, Reviewing, Submitting, and Done. The final frames show
-the run details with an illustrative test result and a separate unverified draft example.
+The preview starts on an empty board and types a title followed by its description into the
+actual composer (the first line becomes the title). It clicks **Add card**, then **Start run**,
+and follows Planning, Coding, Verifying, Reviewing, Submitting, and Done. The final frames show
+the run details with an illustrative test result. A “Task complete” screen separates the ending
+from the new-task introduction on replay; it does not depict moving a finished card to Backlog.
+The [unverified draft example](console-draft.png) is separate from this successful sequence.
 Reviewing and Submitting stay in the Verifying column. It does not claim to show a real PR diff.
 
 Recreate it from the repository root with Chrome and ffmpeg installed:
@@ -19,7 +23,8 @@ Recreate it from the repository root with Chrome and ffmpeg installed:
 uv run --with playwright==1.58.0 assets/capture-preview.py
 ```
 
-The capture script asserts rendered stages, the board-column mapping, and the result link.
+The capture script asserts typed content, the Add card request, the created title,
+rendered stages, the board-column mapping, and the result link.
 It blocks external browser requests and fails on JavaScript errors or unexpected API calls.
 The fixture is one bounded test addition using the repository's existing test runner;
 its illustrative verification command is `npm test`. `console-preview.png` is the static fallback.
@@ -47,6 +52,8 @@ Before calling this an end-to-end demo, use an approved disposable AWS account a
 export, suitable for GitHub light and dark themes. Service dependencies share one compact
 endpoint group; connectors describe the main request path, not every IAM or lifecycle operation.
 Lambda is outside the runtime's VPC connectivity boundary. GitHub is outside the AWS account.
+All connectors are straight. The account uses the native AWS Account group border;
+the Claude Code artwork's black background is removed for transparent placement.
 
 AWS service icons use draw.io's AWS4 library. Runtime and Claude Code/GitHub reference assets
 come from slide 10 of the owner-supplied **Coding Agents on Amazon Bedrock AgentCore** deck.
