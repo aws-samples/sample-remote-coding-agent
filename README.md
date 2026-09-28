@@ -35,15 +35,13 @@ it does not make untrusted code safe. A runtime or publishing failure may produc
 
 ### Before you start
 
-| You need | Why |
-|---|---|
-| Docker running | the ~1.3 GB ARM64 agent image is built on *this* machine. No build service stands in. |
-| Python ≥ 3.11 (tested with 3.12), `uv`, Node ≥ 20, AWS CLI and credentials | Node is for the pinned CDK CLI; select your intended profile and region |
-| AgentCore availability and active Bedrock inference profiles in your region | Preflight checks the configured services and models |
-| Claude Code with plugin support (optional) | Required for terminal submission; the console can submit tasks without it |
-| `cdk bootstrap`, once per account and region | `make preflight` prints the exact command and never runs it for you |
-| A **fine-grained** GitHub PAT for one repository: `contents: write`, `pull requests: write` | it bounds what a compromise reaches. A classic PAT is refused with `400 ClassicTokenRejected`. |
-| An AWS account with nothing else in it | this runs an arbitrary repository's own setup and test commands |
+- A dedicated AWS account, with credentials for your intended profile and region.
+- Docker running, Python ≥ 3.11 (tested with 3.12), `uv`, Node ≥ 20, and the AWS CLI.
+- A trusted, disposable repository and a **fine-grained GitHub PAT** scoped to it with
+  `contents: write` and `pull requests: write`. Classic PATs are refused.
+
+Preflight checks AgentCore/model availability and prints any required CDK bootstrap command.
+The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI works without it.
 
 ### Deploy it
 
@@ -83,7 +81,8 @@ cards on the same board. Registration is done once in the console, whichever pat
 ### Option A: Web UI
 
 Open your repository's board. Type the title on the first line and the description below it.
-For an existing expense-tracker app, try:
+**Illustrative example from the GIF:** this task assumes an expense-tracker app, which this
+repository does not include. Write a task that fits your own registered repository.
 
 ```text
 Add CSV export
@@ -108,10 +107,10 @@ both at once. Watch **Planning → Coding → Verifying → Done** and click the
    `RCA_STACK_NAME` overrides **outrank** discovery and may select another fleet.
    Check the `endpoint used:` line. Restarting loads the plugin's MCP tools.
 
-Submit a task and check its status from Claude Code:
+Replace `<your task>` with a change for your registered repository, then check its status:
 
 ```text
-/sample-rca:remote Add a Download CSV button to Expenses. Export date, category, and amount. Test CSV escaping and empty exports with the existing test runner.
+/sample-rca:remote <your task>
 /sample-rca:remote status
 ```
 
