@@ -36,6 +36,7 @@ from __future__ import annotations
 import ast
 import re
 import shutil
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # `infra/app.py` owns the five stack names, and `pytest.ini` puts `infra` on the path, which is
@@ -53,24 +54,8 @@ CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 # fail the suite but a section does.
 _README_MAX_LINES = 200
 
-# The two `##` headings this repository owns, in order. The executive summary sits under the title
-# with no heading of its own, which is why the README has three parts and this list has two entries.
-#
-# There was a third, `## Known gaps`. It was removed once it reached thirteen bullets, most of
-# them some form of "this is unmeasured": at that length a list of specifics reads as a blanket
-# disclaimer, and a reader skips the whole thing rather than the one line that applies to them.
-# Every claim survives in `CLAUDE.md` -- what went is the prominence, not the
-# admission. A new gap belongs next to the mechanism it qualifies, not in a register at the end.
-_README_HEADINGS = ["## Architecture", "## From nothing to nothing"]
-
-# The trailing sections the `aws-samples` publication requires, in the order its scaffolding writes
-# them. They are **not** this repository's to delete: the `amazon-ospo-app` bot's initial commit
-# added them, so a checkout that removes them fails the org's own review rather than this suite.
-#
-# They are allowed here and nowhere else in the guard, which is the distinction that matters: the
-# rule below still refuses an *arbitrary* new `##` section, because the failure it exists to stop is
-# a README growing back into a reference manual. A required licence notice is not that, and hard-
-# coding these two by name is what keeps the refusal narrow enough to stay true.
+# Required navigation, not an exact editorial outline. Keep the entry page short.
+_README_HEADINGS = ["## Quick start", "## Architecture", "## Costs and cleanup"]
 _README_TRAILING_HEADINGS = ["## Security", "## License"]
 
 # The two CDK enum classes `infra/stacks/agent_stack.py` names its endpoints through. Read out of
@@ -180,7 +165,7 @@ _INVARIANT_10C = "10c."
 # deployment in another region because a leftover `RCA_API_URL` outranked discovery, and a
 # teardown step that said `destroy --all` would have deleted a shared account stack out from
 # under a live console in another region.
-_WALKTHROUGH_HEADING = "## From nothing to nothing"
+_WALKTHROUGH_HEADING = "## Quick start"
 
 # The three optional `userConfig` fields of `plugins/sample-rca/.claude-plugin/plugin.json`
 # reach the server as these three variables (`plugins/sample-rca/.mcp.json`), and
@@ -521,33 +506,39 @@ def test_the_readme_stays_short() -> None:
     )
 
 
-def test_the_readme_holds_exactly_the_three_parts() -> None:
-    """The executive summary, `## Architecture`, `## From nothing to nothing`. Nothing else.
-
-    There were four. `## Known gaps` was removed deliberately: it had grown to thirteen
-    bullets, most of them "this is unmeasured", and at that length it stopped being read as a
-    list of specifics and started reading as a disclaimer over the whole system. Every claim
-    in it survives in `CLAUDE.md`, which is where the reference belongs -- so
-    what was lost is the prominence, not the honesty. Do not restore it here; add the
-    admission next to the mechanism it qualifies in `CLAUDE.md` instead.
-    """
-    # A plain `startswith("## ")` scan, deliberately ignoring `###`: the walkthrough's
-    # subsections are free to be renamed, split or reordered, and only the top-level parts
-    # are the contract.
-    headings = [line.rstrip() for line in README.read_text().splitlines() if line.startswith("## ")]
-    expected = _README_HEADINGS + _README_TRAILING_HEADINGS
-    assert headings == expected, (
-        "README.md must hold exactly three parts in order -- the executive summary under "
-        f"the title, then {', '.join(_README_HEADINGS)} -- followed by the "
-        f"`aws-samples` scaffolding's {' and '.join(_README_TRAILING_HEADINGS)}. "
-        f"Got {headings}. A new `##` "
-        "section is how a README becomes a reference manual again: an API surface or a "
-        "routing table added here is a section `CLAUDE.md` should own, and a part "
-        "removed here is a reader who cannot get from nothing to nothing. The two "
-        "trailing sections are the exception and the only one: they arrived with the "
-        "`amazon-ospo-app` bot's initial commit and the org requires them, so deleting "
-        "them to satisfy this assertion trades a green suite for a failed publication."
-    )
+def test_the_readme_has_navigation_and_media() -> None:
+    text = README.read_text()
+    headings = [line for line in text.splitlines() if line.startswith("## ")]
+    assert all(heading in headings for heading in _README_HEADINGS + _README_TRAILING_HEADINGS)
+    assert text.index("assets/console-preview.gif") < text.index("## Quick start")
+    assert "not a live AWS run" in text
+    assert "not an enforced domain allowlist" in text
+    for path in (
+        "assets/architecture.drawio",
+        "assets/architecture.png",
+        "assets/console-preview.gif",
+        "assets/console-preview.png",
+    ):
+        assert path in text
+        assert (REPO_ROOT / path).is_file()
+    assert headings[-2:] == _README_TRAILING_HEADINGS
+    cleanup = _section(text, "## Costs and cleanup")
+    assert cleanup.index("Deregister") < cleanup.index("destroy")
+    assert "draft" in text.lower() and "verification command" in text
+    for document in (README, REPO_ROOT / "assets/README.md"):
+        for target in re.findall(r"\]\(([^)]+)\)", document.read_text()):
+            if "://" in target:
+                continue
+            path, _, anchor = target.partition("#")
+            destination = document.parent / path if path else document
+            assert destination.is_file(), target
+            if anchor:
+                headings = re.findall(r"^#+ (.+)$", destination.read_text(), re.MULTILINE)
+                slugs = {
+                    re.sub(r"[^\w\- ]", "", heading.lower()).replace(" ", "-")
+                    for heading in headings
+                }
+                assert anchor in slugs, target
 
 
 def test_every_document_names_agentcore_memory() -> None:
@@ -608,33 +599,21 @@ def test_the_readme_diagram_names_every_vpc_endpoint() -> None:
         "endpoint the stack creates and the picture omits is exactly the staleness here. Add "
         "the endpoint to `README.md`'s diagram AND its member to `_ENDPOINT_DIAGRAM_WORDS`."
     )
-    # The endpoint region of the fence, not the whole fence: `AgentCore` already appears in it at
-    # "AgentCore Runtime (one per repo)", so a whole-fence search would pass without the endpoint
-    # list ever naming the service.
-    lines = _section(README.read_text(), _README_HEADINGS[0]).splitlines()
-    start = next((index for index, line in enumerate(lines) if "VPC endpoints" in line), None)
-    assert start is not None, (
-        "no line in `README.md`'s `## Architecture` section says `VPC endpoints`, so the "
-        "endpoint list cannot be found. It is the label this check scopes the search to, "
-        "because the word `AgentCore` also appears in the fence as the Runtime's own box."
+    diagram = ET.parse(REPO_ROOT / "assets/architecture.drawio")
+    endpoint_ids = {"bedrock", "memory", "secrets", "dynamodb", "ecr", "s3", "logs"}
+    cells = {cell.get("id"): cell for cell in diagram.findall(".//mxCell")}
+    for name in endpoint_ids:
+        assert cells[name].get("parent") == "endpoints"
+        assert "shape=" in cells[name].get("style", "")
+    labels = " ".join(
+        cell.get("value", "") for cell in cells.values() if cell.get("parent") == "endpoints"
     )
-    end = next((index for index in range(start + 1, len(lines)) if "└" in lines[index]), len(lines))
-    region = "\n".join(lines[start:end])
-    missing = sorted(
-        {
-            _ENDPOINT_DIAGRAM_WORDS[member]
-            for member in members
-            if _ENDPOINT_DIAGRAM_WORDS[member] not in region
-        }
-    )
-    assert not missing, (
-        "`README.md`'s diagram does not list " + ", ".join(missing) + " among its VPC "
-        "endpoints, and `infra/stacks/agent_stack.py` creates all of them. The diagram is the "
-        "only place the egress shape is drawn for a reader, and a missing endpoint reads as "
-        "traffic leaving over the NAT gateway when it does not. Rebalance the two endpoint "
-        "lines rather than appending: they are fixed-width box drawing, 75 characters each "
-        "with `│` at columns 1, 60 and 75, and README has no line to spare."
-    )
+    assert all(_ENDPOINT_DIAGRAM_WORDS[member] in labels for member in members)
+    assert all(name in cells for name in ("claude", "github", "runtime"))
+    for cell in cells.values():
+        if cell.get("edge") == "1":
+            assert cell.get("source") in cells and cell.get("target") in cells
+            assert cell.find("mxGeometry").get("relative") == "1"
 
 
 def test_a_document_admits_what_is_unmeasured_about_memory() -> None:
