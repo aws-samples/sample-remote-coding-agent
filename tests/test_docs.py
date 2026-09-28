@@ -611,6 +611,23 @@ def test_the_readme_diagram_names_every_vpc_endpoint() -> None:
     assert all(_ENDPOINT_DIAGRAM_WORDS[member] in labels for member in members)
     assert all(name in cells for name in ("claude", "github", "runtime"))
     assert "grIcon=mxgraph.aws4.group_account;" in cells["account"].get("style", "")
+    icon_ids = endpoint_ids | {
+        "api-icon",
+        "lambda-icon",
+        "sqs-icon",
+        "dispatcher-icon",
+        "cloudfront",
+        "dynamodb-control",
+    }
+    for name in icon_ids:
+        icon = cells[name].find("mxGeometry")
+        caption = cells[name + "-label"]
+        geometry = caption.find("mxGeometry")
+        assert "align=center;" in caption.get("style", "")
+        assert float(geometry.get("y")) >= float(icon.get("y")) + float(icon.get("height"))
+        assert float(geometry.get("x")) + float(geometry.get("width")) / 2 == (
+            float(icon.get("x")) + float(icon.get("width")) / 2
+        )
     for cell in cells.values():
         if cell.get("edge") == "1":
             assert "edgeStyle=none;" in cell.get("style", "")
