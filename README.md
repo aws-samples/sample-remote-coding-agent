@@ -107,15 +107,16 @@ both at once. Watch **Planning → Coding → Verifying → Done** and click the
    `RCA_STACK_NAME` overrides **outrank** discovery and may select another fleet.
    Check the `endpoint used:` line. Restarting loads the plugin's MCP tools.
 
-Replace `<your task>` with a change for your registered repository, then check its status:
-
 ```text
+# Optional: for an empty repository, prepare a local project first.
+/sample-rca:scaffold
+# Push the scaffold and tests before dispatching a remote task.
+
+# Replace <your task> with a change for your registered repository.
 /sample-rca:remote <your task>
+# Check progress here or in the web UI; the task appears in both.
 /sample-rca:remote status
 ```
-
-The task also appears in the web UI. For an empty repository, `/sample-rca:scaffold` can
-prepare a local project first; push the scaffold and tests before dispatching a remote task.
 
 ### Review the result
 
