@@ -6,8 +6,7 @@
 [![Tested with Python 3.12](https://img.shields.io/badge/Python-tested_3.12-blue)](#before-you-start)
 [![Status: AWS sample](https://img.shields.io/badge/Status-AWS_sample-orange)](#who-is-this-for)
 
-Submit from Claude Code or the web UI. Follow the remote agent's progress and get a
-GitHub pull request with verification evidence, powered by Amazon Bedrock AgentCore Runtime.
+Submit from Claude Code or the web UI, follow the remote agent's progress, and get a PR with verification evidence powered by Amazon Bedrock AgentCore Runtime.
 
 ![Real console with synthetic fixture data: a task progresses from Backlog through Planning, Coding and Verifying to Done, then shows verification details.](assets/console-preview.gif)
 
@@ -108,20 +107,21 @@ both at once. Watch **Planning → Coding → Verifying → Done** and click the
    Check the `endpoint used:` line. Restarting loads the plugin's MCP tools.
 
 ```text
-# Optional: for an empty repository, prepare a local project first.
+# Optional: scaffold an empty repo locally, then push it before dispatch.
 /sample-rca:scaffold
-# Push the scaffold and tests before dispatching a remote task.
-
-# Replace <your task> with a change for your registered repository.
-/sample-rca:remote <your task>
+# Example: build a 2048 game in your registered disposable repository.
+/sample-rca:remote Build a 2048 game as a Vue 3 single-page app. Keep the board and merge
+logic in a plain module with Vitest tests covering spawn, merge, win and game over. Add
+scripts.setup, scripts.test and scripts.dev to package.json, and a README whose first
+section is the exact commands to install it, run it in a browser, and test it.
 # Check progress here or in the web UI; the task appears in both.
 /sample-rca:remote status
 ```
 
 ### Review the result
 
-Queue acknowledgment takes seconds; execution can take tens of minutes. Unverified runs open **draft PRs**. **Reviewing** and
-**Submitting** are statuses within Verifying, not separate board columns. Done alone is not
+Queue acknowledgment takes seconds; execution can take tens of minutes. Unverified runs open **draft PRs**.
+**Reviewing** and **Submitting** are statuses within Verifying. Done alone is not
 proof of success: `SUCCEEDED` means a verification command ran and review judged it green.
 Follow **Open pull request**, inspect the diff and evidence, and merge only after human review.
 
