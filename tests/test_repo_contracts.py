@@ -531,10 +531,24 @@ def test_the_agent_image_gates_the_collector_behind_a_build_arg_defaulting_off()
         "invariant 34: the collector URL must name `${ADOT_COLLECTOR_VERSION}` rather than "
         "spelling a version inline, so the one `ARG` above is the only place a version moves."
     )
-    assert "--version" in downloads[0], (
-        "the collector's `--version` smoke check must close the SAME `RUN` that unpacks it, "
-        "like `claude --version` above: a package whose internal layout moved would otherwise "
-        "build an image whose collector silently never starts."
+    # The *property*, not one spelling of it: a check that the binary is where
+    # `coding_agent/telemetry.py` looks for it must close the SAME `RUN` that unpacks the
+    # package, like `claude --version` above -- a layout that moved would otherwise build an
+    # image whose collector silently never starts, and "no metrics appeared" is a much worse
+    # place to discover that.
+    #
+    # This asserted `--version` until a real `docker build --build-arg
+    # ENABLE_OTEL_COLLECTOR=1` was run for the first time: `aws-otel-collector` has no such
+    # flag. It prints its version banner on start-up, then answers `flag provided but not
+    # defined: -version`, dumps its usage and exits non-zero -- so under `set -eu` every
+    # collector-enabled build failed, with `ADOT Collector version: v0.49.0` two lines above
+    # the error making it look like a download problem. The test passed throughout, because it
+    # pinned the command rather than the guarantee.
+    assert "/opt/aws/aws-otel-collector/bin/aws-otel-collector" in downloads[0], (
+        "a check that the collector binary landed must close the SAME `RUN` that unpacks it, "
+        "like `claude --version` above. Assert the path exists -- `test -x` -- rather than "
+        "invoking the binary: this binary has no `--version` flag and exits non-zero when "
+        f"given one. Got {downloads[0]!r}"
     )
 
     for line in raw.splitlines():

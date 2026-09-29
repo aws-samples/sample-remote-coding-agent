@@ -119,16 +119,31 @@ RUN pip install --no-cache-dir .
 # the collector as its own child process (`coding_agent/telemetry.py`). `dpkg-deb -x` unpacks
 # the data archive and runs none of them.
 #
-# `--version` closes the SAME `RUN`, for the reason the CLI install above gives: a package
-# whose internal layout moved would otherwise produce an image whose collector silently never
-# starts, and "no metrics appeared" is a much worse place to discover that than a failed build.
+# The layout check closes the SAME `RUN`, for the reason the CLI install above gives: a
+# package whose internal layout moved would otherwise produce an image whose collector
+# silently never starts, and "no metrics appeared" is a much worse place to discover that
+# than a failed build.
+#
+# It is `test -x` plus the package's own `VERSION` file and **not** `--version`, which is
+# what this line used to run. `aws-otel-collector` has no such flag: it prints its version
+# banner on start-up and then answers `flag provided but not defined: -version`, dumps its
+# usage and exits non-zero -- so under `set -eu` every build with the collector enabled
+# failed, while the log showed `ADOT Collector version: v0.49.0` two lines above the error
+# and looked like a download problem. Reproduced locally and fixed against a real
+# `docker build --build-arg ENABLE_OTEL_COLLECTOR=1`.
+#
+# `test -x` is also the stronger assertion for what this guard is actually for. The failure
+# it exists to catch is the binary not being where `coding_agent/telemetry.py` looks for it,
+# and that is a path and a mode -- not an exit status. `bin/VERSION` ships in the package, so
+# the build log still records which collector went in without invoking it.
 RUN if [ "${ENABLE_OTEL_COLLECTOR}" = "1" ]; then \
       set -eu; \
       python -c "import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], '/tmp/aoc.deb')" \
         "https://aws-otel-collector.s3.amazonaws.com/debian/arm64/v${ADOT_COLLECTOR_VERSION}/aws-otel-collector.deb"; \
       dpkg-deb -x /tmp/aoc.deb /; \
       rm -f /tmp/aoc.deb; \
-      /opt/aws/aws-otel-collector/bin/aws-otel-collector --version; \
+      test -x /opt/aws/aws-otel-collector/bin/aws-otel-collector; \
+      cat /opt/aws/aws-otel-collector/bin/VERSION; \
     fi
 
 # The two Agent Skills as ONE plugin root. `config.skill_paths()` reads `AGENT_SKILL_PATHS`
