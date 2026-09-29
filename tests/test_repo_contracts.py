@@ -595,3 +595,32 @@ def test_coding_agent_insights_is_on_by_default() -> None:
         "Turning it off is fine, but it takes the container's reachable services from five "
         "back to four, and `CLAUDE.md`'s exposure count has to move with it."
     )
+
+
+def test_the_console_upload_sets_a_cache_directive() -> None:
+    """`make deploy`'s S3 sync must send `Cache-Control`, or a console change can be
+    invisible to the operator who deployed it.
+
+    Without a directive these objects carry none at all: browsers cache heuristically, ES
+    module imports especially so, and `create-invalidation` clears CloudFront's copy and never
+    the browser's. This is not hypothetical -- a register-page change was verified live at the
+    origin (`LastModified`, `ETag`) and at the edge, with the invalidation `Completed`, while
+    the browser still rendered a sentence that existed nowhere server-side.
+
+    The assertion is on the *directive*, not on the value: `no-cache` is the right answer while
+    `web/js` ships unbuilt with stable filenames, and content-hashed assets would want
+    something else entirely. What must not happen is sending nothing.
+    """
+    recipe = (REPO_ROOT / "Makefile").read_text()
+    sync = [
+        line for line in re.sub(r"\\\n\s*", " ", recipe).splitlines() if "aws s3 sync web/" in line
+    ]
+    assert len(sync) == 1, (
+        f"expected exactly one console upload in the Makefile; found {len(sync)}. Two would "
+        "drift, and this test could then pass while the one that runs sends no directive."
+    )
+    assert "--cache-control" in sync[0], (
+        "the console upload must set --cache-control. Without it every object ships with no "
+        "cache directive, so an operator can hard-refresh and still be served the previous "
+        f"JavaScript with nothing to indicate it. Got: {sync[0]!r}"
+    )

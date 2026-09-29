@@ -103,6 +103,23 @@ lint:
 # `tests/test_repo_contracts.py::test_the_makefile_declares_exactly_the_five_targets`
 # pins the target set to exactly five, so a helper target is not available as a hiding place.
 
+# The console upload sets `Cache-Control: no-cache` on every object, and that is not "do not
+# store" -- it is "revalidate before use": the browser keeps the file and asks CloudFront
+# whether its ETag still matches, which is a 304 and a few bytes when nothing moved.
+#
+# Without it these objects carry **no** cache directive at all. Browsers then cache
+# heuristically, ES module imports especially so, and a console change can leave an operator
+# on stale JavaScript for an unbounded time with nothing to say so. `create-invalidation`
+# does not help: it clears CloudFront's copy, never the browser's. Measured rather than
+# reasoned -- a register-page change was confirmed live in S3 (`LastModified`, `ETag`) and at
+# the edge (fetched twice, with and without a query string), and the invalidation showed
+# `Completed`, while the browser still rendered a sentence that no longer existed anywhere
+# server-side. The operator looking at it reasonably concluded the deploy had not worked.
+#
+# One directive for everything rather than long-lived caching for assets and `no-cache` for
+# the entry point, because `web/js` ships exactly as written: there is no build step and no
+# content-hashed filenames to cache forever instead.
+
 # The CDK CLI, pinned. Invariant 34 covers this line as much as it covers the plugin's
 # `.mcp.json`: `npx aws-cdk@latest` would run whatever was published last on an operator's
 # workstation with their own AWS credentials, and it would make every deploy depend on the
@@ -821,6 +838,7 @@ deploy:
 	  "  cognitoDomain: \"$$domain\"," \
 	  "};" > web/config.js; \
 	aws s3 sync web/ "s3://$$bucket/" --region "$$region" --delete \
+	  --cache-control 'no-cache' \
 	  --exclude '.gitignore' --exclude 'config.example.js'; \
 	aws cloudfront create-invalidation --distribution-id "$$distribution" --paths '/*' >/dev/null; \
 	printf 'deploy: wrote web/config.js and uploaded web/ to %s, cache invalidated\n' "$$bucket"; \
