@@ -720,6 +720,25 @@ pre {
   color: var(--ink-faint);
 }
 
+/* The one link inside a form field: the register view's "create a token for owner/repo".
+   It deliberately does NOT reuse `.field-hint` -- a class beats an element selector, so
+   `.field-hint`'s `--ink-faint` overrode `a`'s `--accent` and the anchor rendered as grey
+   12px text nobody could pick out of the paragraph above it. Same size as a hint, because
+   it sits among hints; accent-coloured and underlined, because it is the one thing in that
+   block an operator is meant to click. */
+.field-link {
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: underline;
+  display: block;
+  margin-top: 2px;
+  font-weight: 500;
+}
+
+.field-link:hover {
+  text-decoration: underline;
+}
+
 /* The registration form's optional settings, folded away so the two fields that are
    actually required are the two a first-time operator sees. A native `<details>`, so the
    disclosure needs no script and cannot desynchronise from `ui.setRefusal`. */

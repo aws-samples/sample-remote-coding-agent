@@ -143,8 +143,12 @@ function mountRegister(root) {
   // an operator reaches the token field the target already names their repository -- which is
   // the value they would otherwise have to carry from one tab to the other and re-select from
   // a list.
+  // `field-link`, NOT `field-hint`: a class beats an element in CSS, so `.field-hint`'s
+  // `--ink-faint` overrode `a`'s `--accent` and the anchor rendered as 12px grey text
+  // indistinguishable from the paragraph above it. It was there and nobody could see it,
+  // which for a link is the same as not being there.
   const tokenLink = ui.el("a", {
-    class: "field-hint",
+    class: "field-link",
     href: TOKEN_PAGE,
     target: "_blank",
     // `noopener` because this opens a page where a credential is about to be created.
@@ -261,9 +265,15 @@ function mountRegister(root) {
             "pointing it at something you mind receiving pull requests. The API is the only " +
             "validator, so whichever form it accepts is the form this field accepts.",
         ),
+        // The link comes FIRST, before any prose. It was below a three-line paragraph and
+        // went unseen -- an operator reading top to bottom meets the explanation before the
+        // thing that acts on it, which is the wrong way round for the one control here that
+        // leaves the page.
         ui.el("label", { class: "field" }, [
           ui.el("span", { class: "field-label" }, "GitHub token"),
           tokenField,
+          tokenLink,
+          tokenScope,
           ui.el(
             "span",
             { class: "field-hint" },
@@ -271,8 +281,6 @@ function mountRegister(root) {
               "one goes straight into Secrets Manager and is never readable again, not by this " +
               "console and not by the API.",
           ),
-          tokenLink,
-          tokenScope,
         ]),
         // The three optional fields are folded away, and that is the whole point: they were
         // presented at the same level as the two required ones, so a first-time operator read
