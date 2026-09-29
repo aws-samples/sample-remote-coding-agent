@@ -46,6 +46,26 @@ FAKE_FINE_GRAINED_REPLACEMENT_PAT = "github_pat_22ZYXWVUTSRQPONMLKJI9876543210"
 # token's shape -- `mcp/` logs a method, a path and a status, never a body.
 FAKE_UNLOGGED_PAT = "github_pat_11ABCDEFG_never_echoed"
 
+# The App and OAuth shapes registration REFUSES (`ExpiringTokenRejected`), one per prefix, and
+# the two classic shapes it accepts.
+#
+# The *suffix* is deliberately short and hyphenated, exactly as `FAKE_PAT` above is: a secret
+# scanner matches the token **pattern** -- a real prefix followed by ~36 characters of
+# base62 -- in any string literal, and it does not care what the literal is bound to. Behind a
+# name is enough for Bandit's `B105`/`B106`, which look at the name, and is NOT enough for an
+# artifact scanner that looks at the value. Breaking the shape satisfies both, where a
+# suppression comment would blanket whatever real finding lands on that line next.
+#
+# `_require_supported_token` anchors on the prefix alone (`^gh[osur]_`, `^ghp_`), so these
+# still exercise the branches they are for. `FAKE_CLASSIC_HEX_PAT` is the exception and has to
+# be exactly 40 hex characters, because that regex is `^[0-9a-f]{40}$`.
+FAKE_APP_INSTALLATION_PAT = "ghs_not-a-real-token"
+FAKE_APP_USER_PAT = "ghu_not-a-real-token"
+FAKE_APP_REFRESH_PAT = "ghr_not-a-real-token"
+FAKE_OAUTH_PAT = "gho_not-a-real-token"
+FAKE_CLASSIC_PREFIXED_PAT = "ghp_not-a-real-token"
+FAKE_CLASSIC_HEX_PAT = "0123456789abcdef0123456789abcdef01234567"
+
 # `_aws_env` below puts the same pair in the environment for every test, which is where boto3
 # finds them. This mapping is for the one client built at *module import*, before any fixture has
 # run: `tests/test_api_agentcore_figures.py` needs a service model, not a session. Spelled through

@@ -25,7 +25,17 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
-from conftest import FAKE_FINE_GRAINED_PAT, FAKE_FINE_GRAINED_REPLACEMENT_PAT, api_event
+from conftest import (
+    FAKE_APP_INSTALLATION_PAT,
+    FAKE_APP_REFRESH_PAT,
+    FAKE_APP_USER_PAT,
+    FAKE_CLASSIC_HEX_PAT,
+    FAKE_CLASSIC_PREFIXED_PAT,
+    FAKE_FINE_GRAINED_PAT,
+    FAKE_FINE_GRAINED_REPLACEMENT_PAT,
+    FAKE_OAUTH_PAT,
+    api_event,
+)
 from test_api_fakes import FakeAgentCore, install
 from test_api_fakes import load_handlers as _load
 
@@ -194,9 +204,9 @@ def test_an_unrecognised_repository_url_names_the_accepted_forms(aws: Any, url: 
 @pytest.mark.parametrize(
     "token",
     [
-        "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        FAKE_CLASSIC_PREFIXED_PAT,
         # A pre-2021 classic token: bare 40 hex characters, no prefix at all.
-        "0123456789abcdef0123456789abcdef01234567",
+        FAKE_CLASSIC_HEX_PAT,
     ],
 )
 def test_a_classic_pat_is_accepted(aws: Any, github: _FakeGitHub, token: str) -> None:
@@ -227,10 +237,10 @@ def test_a_classic_pat_is_accepted(aws: Any, github: _FakeGitHub, token: str) ->
         # refused for the same non-security reason: they expire an hour after issue and
         # nothing here refreshes one, so accepting one moves the failure into a container an
         # hour later instead of reporting it now.
-        "ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-        "ghu_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-        "ghr_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-        "gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        FAKE_APP_INSTALLATION_PAT,
+        FAKE_APP_USER_PAT,
+        FAKE_APP_REFRESH_PAT,
+        FAKE_OAUTH_PAT,
     ],
 )
 def test_a_token_that_expires_in_an_hour_is_refused_with_the_reason(
@@ -257,7 +267,7 @@ def test_a_token_that_expires_in_an_hour_is_refused_with_the_reason(
     [
         # An App installation token: refused for its one-hour expiry, which there is no
         # refresh path for.
-        ("ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "ExpiringTokenRejected"),
+        (FAKE_APP_INSTALLATION_PAT, "ExpiringTokenRejected"),
         ("xoxb-slack-not-github-000000", "UnsupportedTokenType"),
         ("glpat-ABCDEFGHIJKLMNOPQRST", "UnsupportedTokenType"),
         ("just-a-string-someone-pasted", "UnsupportedTokenType"),
@@ -1016,7 +1026,7 @@ def test_rotation_refuses_a_token_that_expires_in_an_hour(aws: Any) -> None:
             _CONFIG_ID,
             "PUT",
             "/configurations/{configId}/github-token",
-            body={"githubToken": "ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"},
+            body={"githubToken": FAKE_APP_INSTALLATION_PAT},
         ),
         None,
     )
