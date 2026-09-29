@@ -54,8 +54,7 @@ TERMINAL_STATUSES = frozenset(
     {"SUCCEEDED", "SUCCEEDED_UNVERIFIED", "FAILED_VERIFICATION", "FAILED", "CANCELLED"}
 )
 
-# FOLLOW-UP (phase 2 integration): the other half of the same agreement -- the graph's
-# node names, appended to the task item's `steps` as each node finishes. `cards`
+# The other half of the same agreement -- the graph's node names, appended to the task item's `steps` as each node finishes. `cards`
 # reads them to place a failed run in the column it died in.
 STEPS = ("checkout", "plan", "code", "verify", "review", "submit")
 

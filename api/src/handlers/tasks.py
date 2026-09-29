@@ -371,11 +371,9 @@ def activity(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
     }
 
 
-# FOLLOW-UP (phase 7): `infra/stacks/api_stack.py`'s `ApiStack` should build its
-# `HttpApi` routes and its `lambda_handler` strings from this tuple rather than
-# repeating them, so a new route cannot be reachable in code and unroutable in the API
-# (or the reverse). `tests/test_api_route_contract.py` holds the two halves together
-# until then.
+# The one definition of this module's routes. `infra/stacks/api_stack.py` wires them up and
+# `tests/test_api_route_contract.py` holds the two in agreement, so a route added here and
+# not there fails a test rather than answering 404 the first time a console asks for it.
 ROUTES: tuple[tuple[str, str, str], ...] = (
     ("POST", "/tasks", "create"),
     ("GET", "/tasks", "list_"),

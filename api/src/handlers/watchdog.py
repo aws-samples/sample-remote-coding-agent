@@ -49,8 +49,7 @@ QUIET_THRESHOLD_SECONDS = 2700
 # task, not something more compute fixes, and an unbounded resume is a bill.
 MAX_RESUMES = 3
 
-# FOLLOW-UP (phase 2 integration): pinned duplication of the non-terminal half of
-# `runs.TASK_STATUSES` -- `tests/test_api_agentcore_figures.py` asserts this equals
+# A pinned copy of the non-terminal half of `runs.TASK_STATUSES` -- `tests/test_api_agentcore_figures.py` asserts this equals
 # `set(runs.TASK_STATUSES) - runs.TERMINAL_STATUSES`, so the two vocabularies cannot
 # drift silently. Invariant 13: a new node needs a line here as well as in the graph.
 RESUMABLE_STATUSES = frozenset(
@@ -194,8 +193,7 @@ def _last_seen(task: Mapping[str, Any]) -> datetime | None:
     A resume is itself a liveness signal: the sweep just acted, and the container is owed
     a whole quiet window to answer before another tick acts again.
 
-    FOLLOW-UP (phase 2 integration): `agent/src/coding_agent/activity.py` is the other
-    half of the row shape. This reader is deliberately tolerant -- an unparseable row is
+    `agent/src/coding_agent/activity.py` is the other half of the row shape. This reader is deliberately tolerant -- an unparseable row is
     skipped rather than raised -- so a mismatch degrades the clock to `dispatchedAt`
     instead of taking out the sweep.
     """

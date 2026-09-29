@@ -184,10 +184,10 @@ def _write_cache(url: str, *, stack_name: str, region: str, stack: Mapping[str, 
     The shape is a contract shared with the deploy, not private to this module:
     `{"apiUrl", "stackName", "region", "stackLastUpdated", "writtenBy"}`.
 
-    FOLLOW-UP (phase 8): `make deploy` writes this same file at the end of a deploy, so
-    a running MCP server picks the new endpoint up with no restart. Keep the keys and
-    the spellings identical, or the deploy's file reads as "a different stack" here and
-    every start pays for a `describe_stacks`.
+    `make deploy` writes this same file at the end of a deploy, so a running MCP server
+    picks the new endpoint up with no restart. The keys and spellings must match on both
+    sides, or the deploy's file reads as "a different stack" here and every start pays
+    for a `describe_stacks`.
 
     Written to `endpoint.json.tmp` and `replace`d, because a half-written cache is
     worse than none. `OSError` is a warning and nothing else: a read-only home degrades

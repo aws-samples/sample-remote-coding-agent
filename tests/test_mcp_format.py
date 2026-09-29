@@ -63,17 +63,17 @@ def test_the_repository_url_regex_agrees_with_the_control_plane(name: str) -> No
 
 def test_repository_from_url_accepts_both_clone_forms_and_names_both_on_failure() -> None:
     both = {
-        "https://github.com/lazydragon/sample-remote-coding-agent": (
-            "lazydragon/sample-remote-coding-agent"
+        "https://github.com/example-org/sample-remote-coding-agent": (
+            "example-org/sample-remote-coding-agent"
         ),
-        "https://github.com/lazydragon/sample-remote-coding-agent.git": (
-            "lazydragon/sample-remote-coding-agent"
+        "https://github.com/example-org/sample-remote-coding-agent.git": (
+            "example-org/sample-remote-coding-agent"
         ),
-        "https://github.com/lazydragon/sample-remote-coding-agent/": (
-            "lazydragon/sample-remote-coding-agent"
+        "https://github.com/example-org/sample-remote-coding-agent/": (
+            "example-org/sample-remote-coding-agent"
         ),
-        "git@github.com:lazydragon/sample-remote-coding-agent.git": (
-            "lazydragon/sample-remote-coding-agent"
+        "git@github.com:example-org/sample-remote-coding-agent.git": (
+            "example-org/sample-remote-coding-agent"
         ),
     }
     for url, slug in both.items():
@@ -84,7 +84,7 @@ def test_repository_from_url_accepts_both_clone_forms_and_names_both_on_failure(
     for wrong in (
         "https://gitlab.com/example/repo",
         "github.com/example/repo",
-        "https://github.com/lazydragon",
+        "https://github.com/example-org",
         "",
     ):
         with pytest.raises(ValueError) as raised:
@@ -108,7 +108,7 @@ def test_an_unverified_task_is_reported_as_a_draft_not_working_code(status: str)
             "configId": "cfg_1a2b3c",
             "status": status,
             "prompt": "add a --version flag",
-            "prUrl": "https://github.com/lazydragon/sample-remote-coding-agent/pull/7",
+            "prUrl": "https://github.com/example-org/sample-remote-coding-agent/pull/7",
             "verifyResult": {"verified": False, "passed": False},
         }
     )
@@ -147,7 +147,7 @@ def test_a_provisioning_repository_says_tasks_are_refused() -> None:
         text = fmt.repository(
             {
                 "configId": "cfg_1a2b3c",
-                "repository": "lazydragon/sample-remote-coding-agent",
+                "repository": "example-org/sample-remote-coding-agent",
                 "status": status,
             }
         )
@@ -176,8 +176,8 @@ def test_a_repository_reports_its_memory_or_says_it_has_none() -> None:
     """
     payload = {
         "configId": "cfg_1a2b3c",
-        "repository": "lazydragon/sample-remote-coding-agent",
-        "repositoryUrl": "https://github.com/lazydragon/sample-remote-coding-agent",
+        "repository": "example-org/sample-remote-coding-agent",
+        "repositoryUrl": "https://github.com/example-org/sample-remote-coding-agent",
         "status": "READY",
         "agentRuntimeId": "rt_abc123",
     }
@@ -218,7 +218,7 @@ def test_a_replacement_registration_says_the_failed_one_is_being_cleaned_up() ->
     replacement = fmt.registered(
         {
             "configId": "cfg_9z8y7x",
-            "repository": "lazydragon/sample-remote-coding-agent",
+            "repository": "example-org/sample-remote-coding-agent",
             "status": "PENDING",
             "replacedConfigIds": ["cfg_1a2b3c"],
         }
@@ -234,7 +234,7 @@ def test_a_replacement_registration_says_the_failed_one_is_being_cleaned_up() ->
     first = fmt.registered(
         {
             "configId": "cfg_9z8y7x",
-            "repository": "lazydragon/sample-remote-coding-agent",
+            "repository": "example-org/sample-remote-coding-agent",
             "status": "PENDING",
         }
     )

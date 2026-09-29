@@ -55,8 +55,8 @@ _TASK_ID = "tsk_1700000000000_ab12cd"
 # `activityCount` and its `logs` derived by `observability.log_locations`.
 _CONFIG: dict[str, Any] = {
     "configId": _CONFIG_ID,
-    "repository": "lazydragon/sample-remote-coding-agent",
-    "repositoryUrl": "https://github.com/lazydragon/sample-remote-coding-agent",
+    "repository": "example-org/sample-remote-coding-agent",
+    "repositoryUrl": "https://github.com/example-org/sample-remote-coding-agent",
     "status": "READY",
     "verifyCommand": "make test",
     "setupCommand": "make setup",
@@ -73,7 +73,7 @@ _CONFIG: dict[str, Any] = {
 _TASK: dict[str, Any] = {
     "configId": _CONFIG_ID,
     "taskId": _TASK_ID,
-    "repository": "lazydragon/sample-remote-coding-agent",
+    "repository": "example-org/sample-remote-coding-agent",
     "status": "SUCCEEDED_UNVERIFIED",
     "prompt": "add a --version flag to the CLI",
     "steps": ["checkout", "plan", "code", "verify", "review", "plan", "code", "verify", "submit"],
@@ -84,7 +84,7 @@ _TASK: dict[str, Any] = {
         "summary": "no verify command was declared and none could be detected",
         "warning": "verification never ran",
     },
-    "prUrl": "https://github.com/lazydragon/sample-remote-coding-agent/pull/7",
+    "prUrl": "https://github.com/example-org/sample-remote-coding-agent/pull/7",
     "activityCount": 143,
     "logs": {
         "logGroup": "/aws/bedrock-agentcore/runtimes/coding_agent_cfg_1a2b3c-9Zx-DEFAULT",
@@ -459,7 +459,7 @@ def test_the_list_tasks_filter_names_every_container_status() -> None:
 
     `coding_agent.state.TaskStatus` is the authority and NOT
     `api/src/handlers/runs.py::TASK_STATUSES`, which is missing FAILED_VERIFICATION and
-    CANCELLED today (a FOLLOW-UP another card owns this cycle) -- pinning to that copy
+    CANCELLED -- pinning to that copy
     would pin this description to the drift instead of to the vocabulary. A model that
     never reads FAILED_VERIFICATION here cannot suggest filtering by the very state
     invariant 6's verification veto produces, and nothing fails: the API does not validate

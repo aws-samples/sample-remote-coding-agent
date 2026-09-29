@@ -424,7 +424,7 @@ def test_no_request_body_is_logged(caplog: pytest.LogCaptureFixture) -> None:
         client.post(
             "/configurations",
             {
-                "repositoryUrl": "https://github.com/lazydragon/sample-remote-coding-agent",
+                "repositoryUrl": "https://github.com/example-org/sample-remote-coding-agent",
                 "githubToken": token,
             },
         )

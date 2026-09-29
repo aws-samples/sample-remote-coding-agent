@@ -67,18 +67,17 @@ PLANNING, CODING, VERIFYING = DERIVED_COLUMNS
 # because a projection that lands outside it renders nowhere and the card silently
 # disappears from the board rather than failing.
 #
-# FOLLOW-UP (phase 10): `web/`'s console should build its column list from this tuple's
-# order rather than repeating it -- a column added here and forgotten there is a card that
-# vanishes off the board, which nothing fails on.
+# `web/js/transitions.js` mirrors this tuple's order, and
+# `tests/test_web_status_vocabulary.py` holds the two equal: JavaScript cannot import a
+# Python tuple, so a test is what keeps a column added here from being forgotten there.
 BOARD_COLUMNS = (BACKLOG, PLANNING, CODING, VERIFYING, DONE)
 
 # The only targets `move` accepts: the stored columns an operator owns, plus the one
 # derived column that is a *request* rather than a projection.
 MOVE_TARGETS = (PLANNING, BACKLOG, DONE)
 
-# FOLLOW-UP (phase 2 integration): pinned duplication of the agent's `TaskStatus` and
-# `graph._NODE_STATUS` names, the same agreement `runs.TASK_STATUSES` and `runs.STEPS`
-# hold up from the other side. The two deployment units must not import each other, so
+# A pinned copy of the agent's `TaskStatus` and `graph._NODE_STATUS` names, the same
+# agreement `runs.TASK_STATUSES` and `runs.STEPS` hold up from the other side. The two deployment units must not import each other, so
 # both maps `.get(..., fallback)` rather than indexing.
 _STATUS_COLUMN = {
     "QUEUED": PLANNING,
@@ -158,12 +157,11 @@ def _verified(task: Mapping[str, Any]) -> bool | None:
 def _step_entry(entry: Any) -> tuple[str, str]:
     """One `steps` row as `(step name, outcome)`.
 
-    FOLLOW-UP (phase 2 integration): two shapes on purpose. `store.set_status(state,
-    status, step=name)` appends the bare node name today, so a plain string is the live
-    shape and carries no outcome; a mapping (`{"step": ..., "status": ...}`) is what a
-    per-step outcome would look like when the agent starts writing one. `api/` and the
-    container are separate deployment units and must not import each other, so this reads
-    both rather than assuming the one it was written against.
+    Two shapes are accepted on purpose. `store.set_status(state, status, step=name)`
+    appends the bare node name, so a plain string is the shape the container writes and it
+    carries no outcome; a mapping (`{"step": ..., "status": ...}`) is the shape a per-step
+    outcome takes. `api/` and the container are separate deployment units and must not
+    import each other, so this reads both rather than assuming one.
     """
     if isinstance(entry, Mapping):
         return str(entry.get("step") or ""), str(entry.get("status") or "").strip().upper()
@@ -246,8 +244,6 @@ def derived_view(card: Mapping[str, Any], task: Mapping[str, Any] | None) -> dic
             if status == "FAILED"
             # An unrecognised status degrades to the stored column, which for a projected
             # card is `ACTIVE` -- the one value here that is not a `BOARD_COLUMNS` member.
-            # FOLLOW-UP (phase 10): the console must draw an unrecognised column somewhere
-            # visible rather than dropping the card off the board.
             else _STATUS_COLUMN.get(str(status), stored)
         )
     return view
@@ -686,10 +682,9 @@ def move(event: Mapping[str, Any]) -> tuple[int, dict]:
     return 200, _with_column(updated, task)
 
 
-# FOLLOW-UP (phase 7): `infra/stacks/api_stack.py`'s `ApiStack` should build its
-# `HttpApi` routes and its `lambda_handler` strings from this tuple rather than
-# repeating them -- a route added here and forgotten there is a 404 that nothing fails
-# on until a console tries it.
+# The one definition of this module's routes. `infra/stacks/api_stack.py` wires them up and
+# `tests/test_api_route_contract.py` holds the two in agreement, so a route added here and
+# not there fails a test rather than answering 404 the first time a console asks for it.
 ROUTES: tuple[tuple[str, str, str], ...] = (
     ("POST", "/cards", "create"),
     ("GET", "/cards", "list_"),

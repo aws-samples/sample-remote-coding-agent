@@ -1,10 +1,9 @@
 /**
  * The client's mirror of the board vocabulary, and the honest refusal for a move.
  *
- * The four tuples are `api/src/handlers/cards.py`'s, and that file asks for exactly
- * this ("FOLLOW-UP (phase 10): the console should build its column list from this
- * tuple's order rather than repeating it"). JavaScript cannot import a Python tuple, so
- * the agreement is held by `tests/test_web_status_vocabulary.py`, which reads both.
+ * The four tuples are `api/src/handlers/cards.py`'s. JavaScript cannot import a Python
+ * tuple, so the agreement is held by `tests/test_web_status_vocabulary.py`, which reads
+ * both and requires the same members in the same order.
  *
  * `moveRefusal` decides **nothing**. `cards.move` is the only enforcer -- a client that
  * picks its own column can put a card somewhere no run can follow it. What this

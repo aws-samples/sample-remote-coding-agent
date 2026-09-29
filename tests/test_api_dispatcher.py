@@ -293,9 +293,7 @@ def test_the_payload_is_the_contract_the_agent_reads(
     The key set is asserted against `invoke_payload.FIELDS`, the one definition of the
     shape, and `tests/test_invoke_payload_contract.py` holds the container's half to the
     same module -- so a field renamed here, or added here and read by nothing, fails a test
-    rather than a deployment (invariant 13b). That is what the `FOLLOW-UP` comment this
-    docstring used to point at never did.
-    """
+    rather than a deployment (invariant 13b)."""
     common, dispatcher = _load("dispatcher")
     config = _seed_config(common)
     task = _seed_task(common)

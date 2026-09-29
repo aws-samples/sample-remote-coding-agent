@@ -50,7 +50,7 @@ _JS_ARRAY = re.compile(
 )
 _JS_STRING = re.compile(r'"([^"]*)"')
 
-# The four tuples `cards.py` owns, and the FOLLOW-UP it leaves for this test: JavaScript
+# The four tuples `cards.py` owns. JavaScript
 # cannot import a Python tuple, so the agreement is held from here.
 _COLUMN_TUPLES = ("BOARD_COLUMNS", "STORED_COLUMNS", "DERIVED_COLUMNS", "MOVE_TARGETS")
 
@@ -282,8 +282,8 @@ def test_every_non_terminal_container_status_is_resumable_by_the_watchdog() -> N
 
 @pytest.mark.parametrize("name", _COLUMN_TUPLES)
 def test_the_consoles_column_tuples_are_the_servers(name: str) -> None:
-    """`cards.py` asks for exactly this ("FOLLOW-UP (phase 10)"), and a test is the only
-    way to discharge it: JavaScript cannot import a Python tuple."""
+    """The console's column tuples must match the server's, in the same order. A test is
+    the only way to hold that: JavaScript cannot import a Python tuple."""
     server = _python_names(CARDS_PY)[name]
     client = _js_arrays(TRANSITIONS_JS)[name]
     assert client == list(server), (

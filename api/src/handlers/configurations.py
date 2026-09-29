@@ -735,9 +735,9 @@ def rotate_token(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
     return 200, {"rotated": True, "configId": config_id, "versionId": rotated.get("VersionId")}
 
 
-# FOLLOW-UP (phase 7): `infra/stacks/api_stack.py`'s `ApiStack` should build its
-# `HttpApi` routes and its `lambda_handler` strings from this tuple rather than repeating
-# them -- a route declared in two places is a route that will be added to one of them.
+# The one definition of this module's routes. `infra/stacks/api_stack.py` wires them up and
+# `tests/test_api_route_contract.py` holds the two in agreement, so a route added here and
+# not there fails a test rather than answering 404 the first time a console asks for it.
 ROUTES: tuple[tuple[str, str, str], ...] = (
     ("POST", "/configurations", "create"),
     ("GET", "/configurations", "list_"),

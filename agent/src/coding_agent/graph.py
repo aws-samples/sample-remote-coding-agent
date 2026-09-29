@@ -59,9 +59,6 @@ class NodeFn(Protocol):
 # `watchdog.RESUMABLE_STATUSES` + `cards._STEP_COLUMN` in `api/`, and `web/js/status.js`
 # in the console -- and the console one is parsed line by line by its own test, so its
 # formatting is load-bearing. `review`/`REVIEWING` is the worked example.
-# FOLLOW-UP (phases 5/6): the `api/` and `web/` halves of that list. `api/` belongs to
-# another card this wave, so the statuses this phase introduces are named in the PR
-# description instead of edited in.
 _NODE_STATUS: Mapping[str, TaskStatus] = {
     "checkout": "CHECKING_OUT",
     "plan": "PLANNING",

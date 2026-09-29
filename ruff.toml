@@ -27,7 +27,7 @@ ignore = ["E501"]  # line-length is reported by the formatter's own rules; long 
 # `infra/stacks/` has none so `stacks` resolves as a namespace package. `TRY003`, `EM101` and
 # `EM102` (127 together) all fight the long, human-readable exception messages this
 # repository is built on. `ERA001` (4) is four false positives -- an arithmetic comment in
-# `graph.py`, two numbered `FOLLOW-UP` notes in `state.py`, and a quoted phrase in
+# `graph.py`, two numbered notes in `state.py`, and a quoted phrase in
 # `tests/test_docs.py`. `S105`/`S106` (15) are every one a test-fixture token. `PLR0913` (13)
 # is the paragraph below.
 

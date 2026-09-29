@@ -16,13 +16,10 @@ MAX_ITERATIONS = 3
 # three of them are outside this package:
 #   1. this literal,
 #   2. `graph._NODE_STATUS`, if the status belongs to a node,
-#   3. # FOLLOW-UP (phases 5/6): `watchdog.RESUMABLE_STATUSES` and
-#      `cards._STEP_COLUMN` in `api/` -- another card owns that directory this wave,
-#   4. # FOLLOW-UP (phases 5/6): `web/js/status.js`, which a later phase parses line
-#      by line, so its formatting is load-bearing.
-# `review`/`REVIEWING` is the worked example: one node, four edits. There is no
-# `RESEARCHING` and no `AWAITING_ANSWERS` -- research mode and the question loop are
-# cut from this rewrite.
+#   3. `watchdog.RESUMABLE_STATUSES` and `cards._STEP_COLUMN` in `api/`,
+#   4. `web/js/status.js` in the console, which its own test parses line by line, so the
+#      formatting there is load-bearing.
+# `review`/`REVIEWING` is the worked example: one node, four edits.
 TaskStatus = Literal[
     "QUEUED",
     "DISPATCHED",
