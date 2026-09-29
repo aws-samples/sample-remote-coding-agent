@@ -81,6 +81,35 @@ function kv(key, value) {
   return [ui.el("div", { class: "kv-key" }, key), ui.el("div", { class: "kv-value" }, value)];
 }
 
+// Both forms the API accepts, reduced to `owner/repo`. Deliberately permissive and
+// deliberately NOT a validator: the API is the only validator (see `urlField`), so a value
+// this cannot parse leaves the link pointing at the bare token page rather than refusing
+// anything. A trailing `.git` and a trailing slash are the two shapes a paste actually
+// carries.
+const REPO_SLUG = /^(?:https?:\/\/github\.com\/|git@github\.com:)([^/]+)\/([^/]+?)(?:\.git)?\/?$/;
+
+export function repositorySlug(value) {
+  const match = REPO_SLUG.exec(String(value || "").trim());
+  return match ? `${match[1]}/${match[2]}` : "";
+}
+
+// Where a fine-grained token is made. The page is linked rather than described because the
+// path through Settings -> Developer settings -> Personal access tokens -> Fine-grained is
+// four levels deep and is where the wrong token type gets chosen.
+//
+// Only `description` is passed, and it is **best-effort**: GitHub documents no query
+// parameters for this page -- the long-standing `?scopes=` on the *classic* page is
+// unofficial and there is no fine-grained equivalent -- so the repository and the two
+// permissions cannot be pre-selected from a URL. They are spelled out beside the link
+// instead. If GitHub ignores `description`, nothing breaks; the link still lands on the
+// right page, which is most of what was confusing.
+const TOKEN_PAGE = "https://github.com/settings/personal-access-tokens/new";
+
+export function tokenPageUrl(slug) {
+  if (!slug) return TOKEN_PAGE;
+  return `${TOKEN_PAGE}?description=${encodeURIComponent(`remote coding agent -- ${slug}`)}`;
+}
+
 export function mount(root, { configId }) {
   ui.empty(root);
   // The same module answers both routes, and each half is a plain `{destroy}` so the
@@ -110,6 +139,40 @@ function mountRegister(root) {
     "aria-label": "GitHub token",
     placeholder: "github_pat_...",
   });
+  // The link the token hint used to describe in prose. It tracks `urlField`, so by the time
+  // an operator reaches the token field the target already names their repository -- which is
+  // the value they would otherwise have to carry from one tab to the other and re-select from
+  // a list.
+  const tokenLink = ui.el("a", {
+    class: "field-hint",
+    href: TOKEN_PAGE,
+    target: "_blank",
+    // `noopener` because this opens a page where a credential is about to be created.
+    rel: "noopener noreferrer",
+  });
+  const tokenScope = ui.el("span", { class: "field-hint" });
+
+  function refreshTokenLink() {
+    const slug = repositorySlug(urlField.value);
+    tokenLink.setAttribute("href", tokenPageUrl(slug));
+    tokenLink.textContent = slug
+      ? `Create a fine-grained token for ${slug} on GitHub`
+      : "Create a fine-grained token on GitHub";
+    ui.empty(tokenScope);
+    ui.append(tokenScope, [
+      "On that page: Repository access -> ",
+      ui.el("strong", {}, "Only select repositories"),
+      slug ? ` -> ${slug}. Then Repository permissions -> ` : " -> your repository. Then Repository permissions -> ",
+      ui.el("strong", {}, "Contents: Read and write"),
+      " and ",
+      ui.el("strong", {}, "Pull requests: Read and write"),
+      ". Nothing else. If the owner is an organisation, choose it as Resource owner -- " +
+        "organisations have to enable fine-grained tokens before that appears.",
+    ]);
+  }
+  urlField.addEventListener("input", refreshTokenLink);
+  refreshTokenLink();
+
   const optional = {};
   for (const spec of EDITABLE) {
     optional[spec.name] = ui.el("input", {
@@ -198,17 +261,19 @@ function mountRegister(root) {
             "pointing it at something you mind receiving pull requests. The API is the only " +
             "validator, so whichever form it accepts is the form this field accepts.",
         ),
-        field(
-          "GitHub token",
+        ui.el("label", { class: "field" }, [
+          ui.el("span", { class: "field-label" }, "GitHub token"),
           tokenField,
-          "a fine-grained token (github_pat_...) scoped to that one repository, with " +
-            "contents: write and pull_requests: write and nothing else. Make one at " +
-            "github.com/settings/personal-access-tokens/new: pick Only select repositories, " +
-            "choose the repository above, then set those two under Repository permissions. A " +
-            "classic token is refused -- it cannot be scoped to one repository at all. It " +
-            "goes straight into Secrets Manager and is never readable again, not by this " +
-            "console and not by the API.",
-        ),
+          ui.el(
+            "span",
+            { class: "field-hint" },
+            "A classic token is refused -- it cannot be scoped to one repository at all. This " +
+              "one goes straight into Secrets Manager and is never readable again, not by this " +
+              "console and not by the API.",
+          ),
+          tokenLink,
+          tokenScope,
+        ]),
         // The three optional fields are folded away, and that is the whole point: they were
         // presented at the same level as the two required ones, so a first-time operator read
         // five inputs to fill and hunted for values that are better left empty. `<details>` and
