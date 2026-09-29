@@ -25,6 +25,12 @@ _TASK_ID = "tsk_1700000000_abc"
 _SESSION_ID = "tsk_1700000000_abc-0123456789abcdef0123456789abcdef"
 _RUNTIME_ARN = "arn:aws:bedrock-agentcore:ap-southeast-1:123456789012:runtime/rca_cfg_abc-XYZ"
 
+# A tick that found nothing to do, in both halves. Spelled once because the shape is the
+# whole point of asserting it: `lambda_handler` returns a *flat* count per half rather than
+# only what it acted on, so "the sweep ran and this item is no longer listed" is
+# distinguishable from "the sweep did not look".
+_SWEPT_NOTHING = {"scanned": 0, "configurationsScanned": 0, "configurations": {}}
+
 
 def _ago(seconds: float) -> str:
     """A timestamp `seconds` in the past, in `_common.now_iso`'s format."""
@@ -233,7 +239,7 @@ def test_an_unknown_status_is_left_alone_rather_than_resumed(
 
     summary = watchdog.lambda_handler({}, None)
 
-    assert summary == {"scanned": 0}
+    assert summary == _SWEPT_NOTHING
     assert _stored(common)["status"] == "CLONING"
     assert _dispatches(aws) == []
     assert watchdog._sweep_task(task, datetime.now(tz=UTC)) == "idle"
@@ -260,7 +266,7 @@ def test_a_cancelled_task_is_resolved_to_failed_not_skipped(
 
     # Resolved, not skipped: the next sweep has nothing left to say about this task.
     assert watchdog._scan() == []
-    assert watchdog.lambda_handler({}, None) == {"scanned": 0}
+    assert watchdog.lambda_handler({}, None) == _SWEPT_NOTHING
     assert len(data.calls_to("StopRuntimeSession")) == 1
     assert _dispatches(aws) == []
 
@@ -310,7 +316,7 @@ def test_a_vetoed_run_has_its_session_stopped(aws: Any, monkeypatch: pytest.Monk
     assert stop["qualifier"] == "DEFAULT", "invariant 14: there is never a custom endpoint"
     assert _stored(common)["stoppedAt"]
 
-    assert watchdog.lambda_handler({}, None) == {"scanned": 0}
+    assert watchdog.lambda_handler({}, None) == _SWEPT_NOTHING
     assert len(data.calls_to("StopRuntimeSession")) == 1
 
 
@@ -357,7 +363,7 @@ def test_a_terminal_task_is_stopped_once_and_then_stops_being_listed(
     assert stop["qualifier"] == "DEFAULT", "invariant 14: there is never a custom endpoint"
     assert _stored(common)["stoppedAt"]
 
-    assert watchdog.lambda_handler({}, None) == {"scanned": 0}
+    assert watchdog.lambda_handler({}, None) == _SWEPT_NOTHING
     assert len(data.calls_to("StopRuntimeSession")) == 1
 
 
@@ -449,3 +455,282 @@ def test_the_scan_lists_the_two_halves_and_nothing_else(aws: Any) -> None:
         "tsk_1700000000_bbb",
         "tsk_1700000000_eee",
     ]
+
+
+# -- the configuration half: a provisioning chain whose next message was lost ---------
+
+
+def _seed_config(common: ModuleType, **overrides: Any) -> dict[str, Any]:
+    """A configuration item stalled in `CREATING` for an hour, written straight into the
+    table. An hour clears `CONFIG_STUCK_THRESHOLD_SECONDS` (2700s) without being so old
+    that a test reads as being about age."""
+    config: dict[str, Any] = {
+        "configId": _CONFIG_ID,
+        "repository": "owner/repo",
+        "status": "CREATING",
+        "agentRuntimeId": "rca_cfg_abc-XYZ",
+        "createdAt": _ago(3600),
+        "updatedAt": _ago(3600),
+    }
+    config.update(overrides)
+    common.config_table.put_item(Item=config)
+    return config
+
+
+def _stored_config(common: ModuleType) -> dict[str, Any]:
+    return common.config_table.get_item(Key={"configId": _CONFIG_ID})["Item"]
+
+
+def _provisions(aws: Any) -> list[dict[str, Any]]:
+    """Every message sitting on the *provision* queue, decoded. A nudge landing on the task
+    queue instead would be an AccessDenied in production and silence here, so the two queues
+    are read separately and never folded together."""
+    received = aws.sqs.receive_message(
+        QueueUrl=aws.provision_queue_url, MaxNumberOfMessages=10, VisibilityTimeout=0
+    )
+    return [json.loads(message["Body"]) for message in received.get("Messages", [])]
+
+
+def test_the_config_threshold_is_derived_from_the_provisioners_own_patience(aws: Any) -> None:
+    """The number that must not be guessed. `_check` polls `MAX_CHECK_ATTEMPTS` times
+    `CHECK_DELAY_SECONDS` apart and then writes `FAILED` itself, so a *healthy* chain is
+    never non-terminal for longer than that -- and a threshold below it would nudge a
+    configuration that is merely slow, which is a duplicate message for no reason.
+
+    Asserted as the relation and not as the literal, because the failure this prevents is
+    somebody lowering `MAX_CHECK_ATTEMPTS` and leaving the threshold where it was.
+    """
+    _, watchdog = _load("watchdog")
+    _, provisioner = _load("provisioner")
+
+    ceiling = provisioner.MAX_CHECK_ATTEMPTS * provisioner.CHECK_DELAY_SECONDS
+    assert ceiling < watchdog.CONFIG_STUCK_THRESHOLD_SECONDS, (
+        f"the sweep must wait out the provisioner's own patience ({ceiling}s) before touching "
+        f"a configuration, or it nudges chains that are working"
+    )
+    assert watchdog.CONFIG_STUCK_THRESHOLD_SECONDS - ceiling >= 300, (
+        "at least one tick of slack on top, so a chain that is one poll from finishing is not "
+        "raced by the sweep"
+    )
+
+
+def test_a_stranded_creating_configuration_is_re_driven_with_a_check(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug this half exists for, end to end.
+
+    The provisioner's chain is self-perpetuating, so a lost `CHECK` leaves a configuration in
+    `CREATING` with nothing to redeliver -- observed live as twelve minutes of `CREATING` with
+    an empty DLQ and no Lambda invocation, cleared by injecting one `CHECK` by hand. This is
+    that hand, and the message body has to be the one the chain sends itself.
+    """
+    common, watchdog = _load("watchdog")
+    _data(monkeypatch, common)
+    _seed_config(common)
+
+    summary = watchdog.lambda_handler({}, None)
+
+    assert summary["configurations"] == {"nudged": 1}
+    assert _provisions(aws) == [{"phase": "CHECK", "configId": _CONFIG_ID, "attempt": 0}], (
+        "the nudge goes through `provisioner.enqueue`, the single owner of the provision "
+        "message shape, so it cannot drift from the message the chain sends itself"
+    )
+    stored = _stored_config(common)
+    assert int(stored["provisionNudges"]) == 1
+    assert stored["lastNudgeAt"]
+    assert stored["status"] == "CREATING", "a nudge re-drives the chain; it does not judge it"
+
+
+def test_a_configuration_still_inside_the_window_is_left_alone(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V2 provisioning was measured at ~508s and the threshold is 2700s, so the common case
+    is a chain that is simply working. Nudging it would be a duplicate `GetAgentRuntime` for
+    every configuration being created, on every tick."""
+    common, watchdog = _load("watchdog")
+    _data(monkeypatch, common)
+    _seed_config(common, updatedAt=_ago(600))
+
+    summary = watchdog.lambda_handler({}, None)
+
+    assert summary["configurationsScanned"] == 1, "listed, so the filter is not what excused it"
+    assert summary["configurations"] == {"working": 1}
+    assert _provisions(aws) == []
+    assert "provisionNudges" not in _stored_config(common)
+
+
+def test_a_ready_configuration_is_never_scanned(aws: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`READY` and `FAILED` are terminal: the chain finished, and an old `updatedAt` on a
+    working repository must not look like a stall."""
+    common, watchdog = _load("watchdog")
+    _data(monkeypatch, common)
+    for config_id, status in (("cfg_ready000000", "READY"), ("cfg_failed00000", "FAILED")):
+        common.config_table.put_item(
+            Item={"configId": config_id, "status": status, "updatedAt": _ago(30 * 24 * 3600)}
+        )
+
+    assert watchdog._scan_configurations() == []
+    assert watchdog.lambda_handler({}, None)["configurationsScanned"] == 0
+
+
+def test_a_stalled_deleting_configuration_is_re_driven_with_a_delete(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`DELETING`'s driver is `DELETE`, not `CHECK`, and sending the wrong one is silent:
+    `provisioner._check` returns early for a `DELETING` configuration (invariant 23), so a
+    `CHECK` here would be a message that does nothing forever.
+
+    Re-sending `DELETE` is safe because `provisioner._delete` is idempotent by construction --
+    every removal tolerates an already-gone resource, and it ends with the item itself.
+    """
+    common, watchdog = _load("watchdog")
+    _data(monkeypatch, common)
+    _seed_config(common, status="DELETING")
+
+    summary = watchdog.lambda_handler({}, None)
+
+    assert summary["configurations"] == {"nudged": 1}
+    assert _provisions(aws) == [{"phase": "DELETE", "configId": _CONFIG_ID, "attempt": 0}], (
+        "a CHECK here would be a message `provisioner._check` returns early from, forever"
+    )
+
+
+def test_a_stalled_pending_configuration_is_failed_rather_than_re_created(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one arm that must NOT be re-driven, and the reason is a resource leak.
+
+    `PENDING`'s driver is `CREATE`; `create_agent_runtime` takes no `clientToken`, so a
+    `CREATE` re-sent after a runtime was created but its id never stored would mint a second
+    AgentCore runtime that no configuration item names and nothing tears down -- it would
+    just keep costing money. `FAILED` is the answer instead, because `POST /configurations`
+    retires a `FAILED` item and registers a replacement (invariant 22), where a `PENDING` one
+    has no route out at all.
+    """
+    common, watchdog = _load("watchdog")
+    _data(monkeypatch, common)
+    _seed_config(common, status="PENDING", agentRuntimeId="")
+
+    summary = watchdog.lambda_handler({}, None)
+
+    assert summary["configurations"] == {"failed": 1}
+    assert _provisions(aws) == [], "a CREATE here risks a second runtime nothing owns"
+    stored = _stored_config(common)
+    assert stored["status"] == "FAILED"
+    assert "PENDING" in stored["statusReason"]
+    assert "register" in stored["statusReason"].lower(), "the reason names the operator's way out"
+
+
+def test_the_nudges_are_bounded_and_then_the_configuration_leaves_the_scan(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Convergence, which is the property invariant 28 names for the task half: a branch that
+    only logged would log the same stuck configuration every five minutes forever.
+
+    At the cap the sweep resolves it once, and the count is what takes it out of
+    `_scan_configurations`' filter -- so the tick after that finds nothing, rather than
+    finding it again and declining to act.
+    """
+    common, watchdog = _load("watchdog")
+    _data(monkeypatch, common)
+    _seed_config(common, provisionNudges=watchdog.MAX_CONFIG_NUDGES)
+
+    summary = watchdog.lambda_handler({}, None)
+
+    assert summary["configurations"] == {"exhausted": 1}
+    stored = _stored_config(common)
+    assert stored["status"] == "FAILED"
+    assert str(watchdog.MAX_CONFIG_NUDGES) in stored["statusReason"]
+    assert _provisions(aws) == [], "no message at the cap: the chain has had its chances"
+
+    assert watchdog._scan_configurations() == [], "out of the filter, not logged forever"
+    assert watchdog.lambda_handler({}, None)["configurationsScanned"] == 0
+
+
+def test_an_exhausted_deleting_configuration_keeps_its_status(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The asymmetry in `_fail_config`, and invariant 22 is why: a `FAILED` configuration is
+    retired and replaced by the next registration, so flipping a `DELETING` one to `FAILED`
+    would offer to retire a teardown that is already in flight. It gains a reason an operator
+    can read and keeps its status; the nudge count at its cap is what stops the repetition.
+    """
+    common, watchdog = _load("watchdog")
+    _data(monkeypatch, common)
+    _seed_config(common, status="DELETING", provisionNudges=watchdog.MAX_CONFIG_NUDGES)
+
+    assert watchdog.lambda_handler({}, None)["configurations"] == {"exhausted": 1}
+
+    stored = _stored_config(common)
+    assert stored["status"] == "DELETING", "invariant 22: a teardown in flight is not retired"
+    assert "DELETING" in stored["statusReason"]
+    assert watchdog._scan_configurations() == []
+
+
+def test_two_concurrent_ticks_produce_one_nudge(aws: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same claim shape as `_claim_resume`: both ticks read the same count, both try to
+    write count + 1, and the second one's condition fails -- so one lost message costs one
+    replacement and never two."""
+    common, watchdog = _load("watchdog")
+    _data(monkeypatch, common)
+    _seed_config(common)
+
+    stale = watchdog._scan_configurations()
+    assert len(stale) == 1
+    monkeypatch.setattr(watchdog, "_scan_configurations", lambda: [dict(item) for item in stale])
+
+    first = watchdog.lambda_handler({}, None)
+    second = watchdog.lambda_handler({}, None)
+
+    assert first["configurations"] == {"nudged": 1}
+    assert second["configurations"] == {"raced": 1}
+    assert int(_stored_config(common)["provisionNudges"]) == 1
+    assert len(_provisions(aws)) == 1, "one stall, one replacement message"
+
+
+def test_a_configuration_that_moved_underneath_the_sweep_is_not_nudged(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The status pin in the claim, which is not redundant with the count pin: a chain that
+    reached `READY` between the scan and the write has just proved it is alive, so the nudge
+    is stale and the duplicate message is exactly what the pin exists to avoid."""
+    common, watchdog = _load("watchdog")
+    _data(monkeypatch, common)
+    stale = dict(_seed_config(common))
+    common.config_table.put_item(Item={**stale, "status": "READY", "updatedAt": _ago(0)})
+
+    assert watchdog._sweep_configuration(stale, datetime.now(tz=UTC)) == "raced"
+    assert _provisions(aws) == []
+    assert _stored_config(common)["status"] == "READY"
+
+
+def test_a_configuration_with_no_readable_timestamp_is_not_judged(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Declining to judge, rather than nudging blind: with no clock there is no way to tell a
+    stalled chain from one that started a second ago, and the safe answer for a *mutating*
+    re-drive is to do nothing and say so."""
+    common, watchdog = _load("watchdog")
+    _data(monkeypatch, common)
+    _seed_config(common, createdAt="not a timestamp", updatedAt="")
+
+    assert watchdog.lambda_handler({}, None)["configurations"] == {"unreadable": 1}
+    assert _provisions(aws) == []
+
+
+def test_the_config_sweep_runs_even_when_the_task_sweep_raises(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stranded configuration is what stops any task being started at all, so the half that
+    unsticks it must not be gated on the health of the half that sweeps tasks."""
+    common, watchdog = _load("watchdog")
+    _data(monkeypatch, common)
+    _seed(common, activity=[{"at": _ago(90 * 60)}])
+    _seed_config(common)
+    monkeypatch.setattr(watchdog, "_sweep_task", lambda *_: 1 / 0)
+
+    summary = watchdog.lambda_handler({}, None)
+
+    assert summary["error"] == 1, "the task half reported its own failure"
+    assert summary["configurations"] == {"nudged": 1}, "and the configuration half still ran"
+    assert len(_provisions(aws)) == 1

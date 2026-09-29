@@ -269,7 +269,7 @@ function mountRegister(root) {
       await configs.load().catch(() => []);
       ui.toast(
         `${config.repository} is registered. Its runtime, execution role and secret are ` +
-          "provisioning; that takes a couple of minutes and the sidebar shows the status.",
+          "provisioning; that takes about ten minutes and the sidebar shows the status.",
         "good",
       );
       // Straight to the board, which is where the status is watched from. Registration

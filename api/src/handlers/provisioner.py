@@ -129,7 +129,34 @@ EPISODIC_NAMESPACE = "/rca/{actorId}/episodic"
 SESSION_NAMESPACE = "/rca/{actorId}/session/{sessionId}"
 
 MAX_CHECK_ATTEMPTS = 60
-_CHECK_DELAY_SECONDS = 30
+CHECK_DELAY_SECONDS = 30
+
+# Fleet environment variables this code used to send and now actively **removes** from every
+# runtime it updates. A tombstone list, and it exists because deletion is not the inverse of
+# addition here: `_desired_runtime` merges `{**create-time, **live, **fleet}`, so a key
+# dropped from `_fleet_environment` merely stops being converged and the live value is carried
+# forward forever (invariant 24's carry-forward rule, working exactly as intended and against
+# you). An entry here is the only thing that takes a variable off a runtime that already has
+# it.
+#
+# These five configured the OTLP exporter for CloudWatch Coding Agent Insights, removed with
+# the collector they pointed at (invariant 32b). `CLAUDE_CODE_ENABLE_TELEMETRY` is **not**
+# here: it is still fleet policy, pinned `"0"`, so it converges by being sent rather than by
+# being deleted -- which is also why it was the one telemetry variable that *did* update while
+# these five did not.
+#
+# An entry is safe to delete from this list only once no live runtime can still carry the key,
+# which in practice means never: a runtime created before the retirement outlives the deploy
+# that retired it. Leaving them costs one `pop` each.
+RETIRED_FLEET_KEYS = frozenset(
+    {
+        "OTEL_METRICS_EXPORTER",
+        "OTEL_LOGS_EXPORTER",
+        "OTEL_EXPORTER_OTLP_PROTOCOL",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_METRIC_EXPORT_INTERVAL",
+    }
+)
 
 # The transient-failure budget, in wall-clock seconds: "IAM gets 90 seconds". A count of
 # attempts says nothing about how long an operator waits -- the ten geometric sleeps this
@@ -186,20 +213,6 @@ FALLBACK_MODEL_ID = os.environ.get("FALLBACK_MODEL_ID", "") or CODE_MODEL_ID or 
 # can be read against.
 CODE_GOAL_ENABLED = (
     "0" if os.environ.get("CODE_GOAL_ENABLED", "").strip().lower() in ("0", "false", "no") else "1"
-)
-
-# The metrics switch, and deliberately the INVERSE of the constant above: that one is an
-# opt-out blacklist (anything unrecognised means on), this one is an opt-in whitelist
-# (anything unrecognised means off). The asymmetry is the point. An exporter that comes on
-# by accident is a `cloudwatch:PutMetricData` grant on `*` nobody asked for, a boundary
-# widened to match, and a CloudWatch bill -- where a `/goal` loop that comes on by accident
-# is a feature. So an empty value, a typo and an unset variable all read as "0" here, and
-# only `1`/`true`/`yes` turn it on. Normalised for the same reason `CODE_GOAL_ENABLED` is:
-# a value a `GetAgentRuntime` diff can be read against.
-OTEL_METRICS_ENABLED = (
-    "1"
-    if os.environ.get("OTEL_METRICS_ENABLED", "").strip().lower() in ("1", "true", "yes")
-    else "0"
 )
 
 # The commit identity every run's pull request carries, forwarded raw rather than
@@ -445,32 +458,7 @@ def _execution_role_policy(config: Mapping[str, Any]) -> dict[str, Any]:
         if repository_arn
         else []
     )
-    # The same shape as `image_pull` above, and for the same reason: a grant nobody can use
-    # is surface for free. Gated on the fleet switch rather than on anything per
-    # configuration, because the collector is in the image or it is not -- and `_ensure_role`
-    # rewrites this inline policy on every provision, so flipping `otelMetricsEnabled` and
-    # redeploying converges the grant with no extra code either way.
-    publish_metrics: list[dict[str, Any]] = (
-        [
-            {
-                "Sid": "PublishAgentMetrics",
-                "Effect": "Allow",
-                "Action": ["cloudwatch:PutMetricData"],
-                # `*` is what the action *requires*, not laziness: `cloudwatch:PutMetricData`
-                # supports no resource-level permission at all, so a scoped ARN here matches
-                # no call and every export is denied. It is also **write-only** -- it grants
-                # no `cloudwatch:GetMetricData`, no `ListMetrics`, no read of anybody's
-                # metrics -- so the whole of the new exposure is junk datapoints and a small
-                # bill. The matching ceiling is
-                # `agent_stack.execution_role_boundary_statements`'
-                # `MayPublishAgentMetrics`, gated on the same flag; if either moves, both move.
-                "Resource": "*",
-            }
-        ]
-        if OTEL_METRICS_ENABLED == "1"
-        else []
-    )
-    # The same shape again, gated per configuration rather than per fleet: a configuration
+    # The same shape as `image_pull` above, gated per configuration rather than per fleet: a configuration
     # whose `CreateMemory` failed carries no `memoryId` and gets no statement at all, which
     # is the control-plane half of the container's no-op path -- a memory that could not be
     # made costs the repository its memory and nothing else.
@@ -576,7 +564,6 @@ def _execution_role_policy(config: Mapping[str, Any]) -> dict[str, Any]:
                 "Resource": f"arn:aws:logs:*:*:log-group:{observability.LOG_GROUP_PREFIX}/*:log-stream:*",
             },
             *image_pull,
-            *publish_metrics,
             *use_memory,
         ],
     }
@@ -817,41 +804,29 @@ def _fleet_environment() -> dict[str, str]:
         # the container and AGAIN as a literal in `subagents.build_options`' `env`, which
         # is what holds on a local run and on a runtime that has not converged yet.
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
-        # The OTel exporter group (invariant 32b), which is a SEPARATE group
-        # from the ten suppressions above and does not contradict them: `DISABLE_TELEMETRY`
-        # and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` govern *Anthropic-bound* traffic,
-        # which on Bedrock does not exist, and neither of them affects OTel export at all.
-        # `CLAUDE_CODE_ENABLE_TELEMETRY` is the only thing that turns OTLP on. Invariant 33
-        # is likewise untouched: the endpoint below is the loopback, and the collector's own
-        # destination is an in-account AWS API.
+        # The eleventh variable, and a SEPARATE mechanism from the ten above rather than
+        # more of the same: those ten govern *Anthropic-bound* traffic, which on Bedrock
+        # does not exist, and none of them affects OTel export at all.
+        # `CLAUDE_CODE_ENABLE_TELEMETRY` is the only thing that turns the CLI's OTLP
+        # exporter on, and it is pinned off because this deployment ships no OTLP receiver
+        # for it to reach -- so an exporter left to a future default would retry against a
+        # port nothing is listening on, and any endpoint it *did* reach would be an egress
+        # destination invariant 33 has not sanctioned.
+        #
+        # This is what remains of an in-container ADOT collector that SigV4-signed the
+        # CLI's metrics to CloudWatch for Coding Agent Insights. It was removed: the
+        # dashboards read a Prometheus-compatible store queried by PromQL, AWS documents
+        # only a bearer-token path (which invariant 32b refused, a bearer token being a
+        # long-term IAM-user credential) and a vendor gateway path, and metrics signed this
+        # third way never appeared in any namespace. Restoring an exporter means choosing an
+        # endpoint first; do not reintroduce it as a default.
         #
         # Fleet policy rather than a Dockerfile `ENV` (invariant 26): an `ENV` cannot be
-        # *unset* by a runtime's `environmentVariables`, only overridden, so baking these
-        # into the image would make turning the exporter off an image rebuild. The container
-        # still gets the last word in one direction only -- `telemetry.exporter_env` forces
-        # `CLAUDE_CODE_ENABLE_TELEMETRY` to "0" when the collector binary is not in *this*
-        # image, so a runtime created against a pre-flag-flip image cannot retry-storm
-        # against a port nothing is listening on. It can only turn the exporter off, never on.
-        #
-        # Names and values are pinned in `tests/test_env_contract.OTEL_EXPORT`; a `**splat`
-        # would be invisible to that reader, so these are literal pairs.
-        "CLAUDE_CODE_ENABLE_TELEMETRY": OTEL_METRICS_ENABLED,
-        "OTEL_METRICS_EXPORTER": "otlp",
-        # *Metrics*, and explicitly not logs. Invariant 32b says metrics; the CLI's OTel
-        # **logs** stream carries session and optionally prompt content, and this
-        # repository's compliance claim is that source content stays in the clone. Spelled
-        # out rather than left to a default, because a default is how it comes back on.
-        "OTEL_LOGS_EXPORTER": "none",
-        # The CLI's own default is `grpc` on 4317 and invariant 32b fixes the loopback at
-        # **4318**, which is the HTTP port. Getting this one line wrong is a silent
-        # no-export: nothing fails, no metric ever arrives.
-        "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-        # The *base* endpoint -- the SDK appends `/v1/metrics` itself. Loopback, so the OTLP
-        # receiver is never exposed on the container's VPC interface.
-        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
-        # 10s, against the SDK's 60s default. The CLI subprocess is per-`query()` and a role
-        # can finish inside a minute, so a longer interval loses that role's metrics outright.
-        "OTEL_METRIC_EXPORT_INTERVAL": "10000",
+        # *unset* by a runtime's `environmentVariables`, only overridden. Set here for the
+        # runtime and AGAIN as a literal in `subagents.build_options`' `env`, which is what
+        # holds on a local run and on a runtime that has not converged. Pinned in
+        # `tests/test_env_contract.CLI_SUPPRESSIONS`.
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
         "CONFIG_TABLE": _common.config_table.name,
         "TASKS_TABLE": _common.tasks_table.name,
     }
@@ -910,6 +885,19 @@ def _desired_runtime(live: Mapping[str, Any] | None, config: Mapping[str, Any]) 
         **{str(k): str(v) for k, v in (current.get("environmentVariables") or {}).items()},
         **_fleet_environment(),
     }
+    # Retirement, which the merge above cannot express. `{**create-time, **live, **fleet}`
+    # carries forward every key the fleet group does not name -- deliberately, so a key this
+    # version has never heard of survives -- and the mirror of that is that **deleting a key
+    # from `_fleet_environment` does not remove it from a live runtime**. It stops being
+    # converged, so the live value is carried forward for the rest of the runtime's life.
+    #
+    # Measured, not theorised: removing the five `OTEL_*` exporter variables (invariant 32b)
+    # landed a deploy, a `runtime-update` converged `CLAUDE_CODE_ENABLE_TELEMETRY` from `1` to
+    # `0`, and all five `OTEL_*` names were still on the runtime afterwards -- so the
+    # invariant's own claim that no `OTEL_*` variable is set anywhere was false for every
+    # existing runtime, with nothing failing.
+    for name in RETIRED_FLEET_KEYS:
+        environment.pop(name, None)
     desired: dict[str, Any] = {
         "agentRuntimeArtifact": {"containerConfiguration": {"containerUri": AGENT_IMAGE_URI}},
         "roleArn": current.get("roleArn") or str(config.get("executionRoleArn") or ""),
@@ -1368,7 +1356,7 @@ def _create(config_id: str, attempt: int, deadline: Any = None) -> None:
         memoryId=memory_id,
         containerUri=AGENT_IMAGE_URI,
     )
-    enqueue(config_id, "CHECK", delay=_CHECK_DELAY_SECONDS)
+    enqueue(config_id, "CHECK", delay=CHECK_DELAY_SECONDS)
 
 
 def _check(config_id: str, attempt: int) -> None:
@@ -1403,11 +1391,11 @@ def _check(config_id: str, attempt: int) -> None:
                 status=FAILED,
                 statusReason=(
                     f"the runtime was still {status} after {MAX_CHECK_ATTEMPTS} checks "
-                    f"{_CHECK_DELAY_SECONDS}s apart"
+                    f"{CHECK_DELAY_SECONDS}s apart"
                 ),
             )
             return
-        enqueue(config_id, "CHECK", attempt=attempt + 1, delay=_CHECK_DELAY_SECONDS)
+        enqueue(config_id, "CHECK", attempt=attempt + 1, delay=CHECK_DELAY_SECONDS)
     else:
         _set_config(config_id, status=FAILED, statusReason=f"the runtime reported {status}")
 
@@ -1515,7 +1503,7 @@ def _update(config_id: str) -> None:
         agentRuntimeVersion=str(updated.get("agentRuntimeVersion", "")),
         containerUri=AGENT_IMAGE_URI,
     )
-    enqueue(config_id, "CHECK", delay=_CHECK_DELAY_SECONDS)
+    enqueue(config_id, "CHECK", delay=CHECK_DELAY_SECONDS)
 
 
 def lambda_handler(event: Mapping[str, Any], _context: Any = None) -> None:

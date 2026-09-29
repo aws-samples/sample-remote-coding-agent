@@ -42,7 +42,7 @@ SERVER_NAME = "remote-coding-agent"
 # tools that describe the same transition.
 _PROVISIONING_NOTE = (
     "A configuration whose status is PENDING or CREATING is still provisioning: tasks "
-    "against it are refused with 409 ConfigurationNotReady, so wait for READY (2-5 minutes) "
+    "against it are refused with 409 ConfigurationNotReady, so wait for READY (8-12 minutes) "
     "and check with get_repository."
 )
 _UNVERIFIED_NOTE = (

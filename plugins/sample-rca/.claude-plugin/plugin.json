@@ -1,6 +1,6 @@
 {
   "name": "sample-rca",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Dispatch a coding task to a remote agent running in your own AWS account, and get a pull request back.",
   "homepage": "https://github.com/aws-samples/sample-remote-coding-agent",
   "repository": "https://github.com/aws-samples/sample-remote-coding-agent",

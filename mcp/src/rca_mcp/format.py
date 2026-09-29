@@ -53,7 +53,7 @@ _PROVISIONING = ("PENDING", "CREATING")
 _UNVERIFIED = ("SUCCEEDED_UNVERIFIED", "FAILED_VERIFICATION")
 
 _NOT_READY_NOTE = (
-    "provisioning takes 2-5 minutes, and start_task against a configuration that is not "
+    "provisioning takes 8-12 minutes, and start_task against a configuration that is not "
     "READY is refused with 409 ConfigurationNotReady. Call get_repository to check before "
     "starting a task."
 )

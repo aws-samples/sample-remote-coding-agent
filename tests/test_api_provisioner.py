@@ -172,7 +172,7 @@ def test_create_never_creates_an_endpoint(aws: Any, monkeypatch: pytest.MonkeyPa
     # The runtime is not `READY` yet, so the phase hands off to `CHECK` rather than
     # blocking a Lambda on a poll loop.
     assert _bodies(sent) == [{"phase": "CHECK", "configId": _CONFIG_ID, "attempt": 0}]
-    assert sent[0]["DelaySeconds"] == provisioner._CHECK_DELAY_SECONDS
+    assert sent[0]["DelaySeconds"] == provisioner.CHECK_DELAY_SECONDS
 
 
 def test_create_sends_the_mount_the_lifetime_and_the_work_root(
@@ -1156,7 +1156,7 @@ def test_check_walks_a_creating_runtime_to_ready(aws: Any, monkeypatch: pytest.M
 
     _run(provisioner, "CHECK", attempt=4)
     assert _bodies(sent) == [{"phase": "CHECK", "configId": _CONFIG_ID, "attempt": 5}]
-    assert sent[0]["DelaySeconds"] == provisioner._CHECK_DELAY_SECONDS
+    assert sent[0]["DelaySeconds"] == provisioner.CHECK_DELAY_SECONDS
     stored = _status(common)
     assert stored is not None and stored["status"] == provisioner.CREATING
 
@@ -1867,3 +1867,60 @@ def test_a_stale_member_this_code_wants_removed_is_still_drift(
         "environmentVariables"
     ]
     assert provisioner._matches_intent(live, provisioner._desired_runtime(live, config)) is False
+
+
+def test_a_retired_fleet_variable_is_removed_from_a_live_runtime(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting a key from `_fleet_environment` does not remove it from a runtime.
+
+    `_desired_runtime` merges `{**create-time, **live, **fleet}` so that a key this version of
+    the code has never heard of survives an update (invariant 24). The mirror of that rule is
+    that a key this code has *stopped* sending is carried forward for the rest of the runtime's
+    life -- it stops being converged rather than being removed.
+
+    Measured rather than reasoned about: removing the five `OTEL_*` exporter variables with the
+    metrics collector (invariant 32b) deployed cleanly, a `runtime-update` converged
+    `CLAUDE_CODE_ENABLE_TELEMETRY` from `1` to `0`, and every one of the five `OTEL_*` names was
+    still on the live runtime afterwards. Nothing failed, and invariant 32b's own claim that no
+    `OTEL_*` variable is set anywhere was false for every runtime that predated the removal.
+
+    `RETIRED_FLEET_KEYS` is the tombstone list that fixes it, and this is what holds it: a
+    retired name is removed, while an unknown name beside it is still carried forward, because
+    the second half is what stops the fix becoming a blanket "drop what the fleet does not
+    send" rule -- which would silently discard per-configuration keys too.
+    """
+    _common, provisioner = _load("provisioner")
+
+    live = {
+        "agentRuntimeId": "rca_cfg_abc-XYZ",
+        "environmentVariables": {
+            # The retired group, as a runtime provisioned before the removal still carries it.
+            "OTEL_METRICS_EXPORTER": "otlp",
+            "OTEL_LOGS_EXPORTER": "none",
+            "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+            "OTEL_METRIC_EXPORT_INTERVAL": "10000",
+            # Still fleet policy, and converged by being sent rather than by being dropped.
+            "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+            # A key this code has never heard of: the carry-forward rule must still hold.
+            "SOME_FUTURE_KNOB": "carried",
+        },
+    }
+    desired = provisioner._desired_runtime(live, {"configId": "cfg_abc", "repository": "o/r"})
+    environment = desired["environmentVariables"]
+
+    for name in provisioner.RETIRED_FLEET_KEYS:
+        assert name not in environment, (
+            f"{name} is in RETIRED_FLEET_KEYS and must be removed from the runtime, not merely "
+            f"absent from the fleet group -- `UpdateAgentRuntime` is a full replace, so a key "
+            f"left in this dict is a key the runtime keeps"
+        )
+    assert environment["CLAUDE_CODE_ENABLE_TELEMETRY"] == "0", (
+        "the exporter switch is still fleet policy and converges to 0 by being sent; retiring "
+        "it instead would leave a runtime with no statement about telemetry at all"
+    )
+    assert environment["SOME_FUTURE_KNOB"] == "carried", (
+        "invariant 24's carry-forward rule still holds for everything not retired: a blanket "
+        "'drop what the fleet does not send' would also discard per-configuration keys"
+    )

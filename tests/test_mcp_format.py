@@ -152,7 +152,7 @@ def test_a_provisioning_repository_says_tasks_are_refused() -> None:
             }
         )
         assert "409 ConfigurationNotReady" in text
-        assert "2-5 minutes" in text
+        assert "8-12 minutes" in text
         assert "get_repository" in text
         assert "still being built" in text
 

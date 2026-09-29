@@ -63,7 +63,7 @@ The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI work
 2. **Sign in at the console URL.** Cognito emails a temporary password to `EMAIL`; check spam and change it on first sign-in.
 
 3. **Register a disposable repository** with **+ Add repository**. Enter its URL and PAT;
-   leave Advanced folded. Wait **2–5 min** for `READY`; starting sooner returns `409 ConfigurationNotReady`.
+   leave Advanced folded. Wait **8–12 min** for `READY`; starting sooner returns `409 ConfigurationNotReady`.
 
    The agent pushes branches and opens PRs. Start with a small repository whose tests already
    pass. Declare setup/test entry points so verification can run:

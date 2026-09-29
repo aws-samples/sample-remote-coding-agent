@@ -91,7 +91,7 @@ CONTAINER_DEFAULTS: dict[str, str] = {
 # of a default a reader has to know about, and a test is the only thing that can tell the
 # difference between "still set" and "quietly dropped".
 #
-# Two of the ten are not merely belt-and-braces:
+# Three of the eleven are not merely belt-and-braces:
 #   * `CLAUDE_CODE_DISABLE_AUTO_MEMORY` is the CROSS-TENANT one. Auto-memory loads REGARDLESS
 #     of `setting_sources`, and one container serves many tasks over its life, so without it
 #     one task's notes can surface in another's session. It is also a literal in
@@ -102,6 +102,16 @@ CONTAINER_DEFAULTS: dict[str, str] = {
 #     `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` explicitly does not suppress. That half of
 #     the posture is owned by
 #     `tests/test_subagents.py::test_no_role_can_reach_the_network`.
+#   * `CLAUDE_CODE_ENABLE_TELEMETRY` is a different mechanism from the other ten rather than
+#     more of the same, which is why it once had a table of its own here. The ten above govern
+#     **Anthropic-bound** traffic, which on Bedrock does not exist; this is the only variable
+#     that turns the CLI's **OTLP** exporter on, and nothing in this deployment listens for
+#     OTLP. It carried the provisioner's `OTEL_METRICS_ENABLED` constant when an in-container
+#     ADOT collector signed the CLI's metrics to CloudWatch for Coding Agent Insights; that
+#     feature was removed (`CLAUDE.md` says why), so the value is now a literal `"0"` and the
+#     five `OTEL_*` names that configured the exporter are gone with it. A literal `"1"` here
+#     points the CLI at a port nothing is listening on; any endpoint it *did* reach would be an
+#     egress destination invariant 33 has not sanctioned.
 CLI_SUPPRESSIONS: dict[str, str] = {
     # The umbrella: metrics, error reports, feature flags, surveys.
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -117,45 +127,9 @@ CLI_SUPPRESSIONS: dict[str, str] = {
     "CLAUDE_CODE_DISABLE_ARTIFACT": "1",
     "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    # Not one of the ten: the OTLP exporter switch, pinned off. See the note above.
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
 }
-
-# The OTel exporter group (invariant 32b), name -> expected value, and a separate
-# table from `CLI_SUPPRESSIONS` for a reason worth stating: the two groups look like they
-# contradict each other and do not. `DISABLE_TELEMETRY=1` and
-# `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` above govern **Anthropic-bound** traffic, which
-# on Bedrock does not exist, and neither of them affects OTel export at all --
-# `CLAUDE_CODE_ENABLE_TELEMETRY` is the only thing that turns OTLP on. Invariant 33 is
-# likewise untouched: the endpoint here is the loopback, and the collector's own destination is
-# an in-account AWS API.
-#
-# `CLAUDE_CODE_ENABLE_TELEMETRY` is deliberately **not** in this table: its value is the
-# `OTEL_METRICS_ENABLED` module constant rather than a literal, so it is invisible to
-# `_literal_items` and is pinned by `test_the_master_switch_is_bound_to_the_flag_not_to_a_literal`
-# instead. These five are the ones that are the same in both states of the flag.
-#
-# Like the suppression group, nothing under `agent/src/coding_agent/` reads any of these -- the
-# Claude Code CLI does -- so the one-way contract in this file cannot see them and the whole
-# group could be deleted without another test noticing. Two of the five are silent when wrong
-# rather than merely absent, which is why this table pins values:
-#   * `OTEL_EXPORTER_OTLP_PROTOCOL` must be `http/protobuf`. The CLI's default is `grpc` on
-#     4317 and invariant 32b fixes the loopback at 4318, the HTTP port, so the default is a
-#     no-export that reports nothing.
-#   * `OTEL_LOGS_EXPORTER` must be `none`. The CLI's OTel **logs** stream carries session and
-#     optionally prompt content, and this repository's compliance claim is that source content
-#     stays in the clone.
-OTEL_EXPORT: dict[str, str] = {
-    "OTEL_METRICS_EXPORTER": "otlp",
-    "OTEL_LOGS_EXPORTER": "none",
-    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
-    "OTEL_METRIC_EXPORT_INTERVAL": "10000",
-}
-
-# The name of the provisioner's own opt-in constant, which is what
-# `CLAUDE_CODE_ENABLE_TELEMETRY` must be bound to.
-_METRICS_FLAG = "OTEL_METRICS_ENABLED"
-_MASTER_SWITCH = "CLAUDE_CODE_ENABLE_TELEMETRY"
-
 
 # -- reading the container side ----------------------------------------------------
 
@@ -394,21 +368,6 @@ def _literal_items(tree: ast.Module, function: str) -> dict[str, str]:
     }
 
 
-def _value_node(tree: ast.Module, function: str, name: str) -> ast.expr | None:
-    """The **expression** a literal key is bound to, whatever kind of node it is.
-
-    `_literal_items` only sees `"NAME": "value"` pairs, which is the right reader for a group
-    whose values are fixed -- and exactly the wrong one for a key whose whole contract is that
-    its value is *not* a literal. `CLAUDE_CODE_ENABLE_TELEMETRY` has to be the
-    `OTEL_METRICS_ENABLED` module constant, so the test that pins it needs the node.
-    """
-    returned = _return_dict(tree, function)
-    for key, value in zip(returned.keys, returned.values, strict=True):
-        if isinstance(key, ast.Constant) and key.value == name:
-            return value
-    return None
-
-
 def _forwarded() -> tuple[set[str], set[str]]:
     """`(fleet, per_configuration)`: the keys `_fleet_environment` converges on every
     update, and the create-time defaults `_configuration_environment` supplies."""
@@ -454,13 +413,7 @@ def test_the_two_fleet_policy_knobs_are_classified_as_fleet() -> None:
     diffs a live runtime with `GetAgentRuntime`.
     """
     fleet, per_configuration = _forwarded()
-    # The two this phase adds, plus the four routing values they sit beside, plus the OTel
-    # exporter group -- whose classification is load-bearing in exactly the same way: the whole
-    # argument for owning the exporter switch here rather than in a Dockerfile `ENV`
-    # (invariant 26) is that fleet policy *converges*, so a runtime provisioned before Coding
-    # Agent Insights existed picks the group up on its next UPDATE. Put in the other group it
-    # would be carried forward from whatever the live runtime was born with, i.e. from nothing,
-    # and the flag would appear to do nothing on every existing runtime.
+    # The two this phase adds, plus the four routing values they sit beside.
     for name in (
         "ANTHROPIC_FALLBACK_MODEL",
         "CODE_GOAL_ENABLED",
@@ -468,8 +421,6 @@ def test_the_two_fleet_policy_knobs_are_classified_as_fleet() -> None:
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        _MASTER_SWITCH,
-        *OTEL_EXPORT,
     ):
         assert name in fleet, (
             f"{name} is fleet policy and must be a key of `_fleet_environment`: one value for "
@@ -489,7 +440,7 @@ def test_the_two_fleet_policy_knobs_are_classified_as_fleet() -> None:
 
 
 def test_the_cli_suppression_set_cannot_silently_shrink() -> None:
-    """The ten names in `CLI_SUPPRESSIONS`, each with its value, in the fleet group.
+    """The eleven names in `CLI_SUPPRESSIONS`, each with its value, in the fleet group.
 
     Nothing under `agent/src/coding_agent/` reads these, so the one-way contract above
     cannot see them, and on Bedrock the endpoints they suppress are never contacted anyway
@@ -524,108 +475,6 @@ def test_the_cli_suppression_set_cannot_silently_shrink() -> None:
             f"talking to whatever it was going to talk to, forever, and nothing short of "
             f"diffing it with `GetAgentRuntime` would say so."
         )
-
-
-def test_the_otel_exporter_group_cannot_silently_shrink() -> None:
-    """The five names in `OTEL_EXPORT`, each with its value, in the fleet group.
-
-    Same shape and same reasoning as `test_the_cli_suppression_set_cannot_silently_shrink`:
-    nothing under `agent/src/coding_agent/` reads these -- the Claude Code CLI does -- so the
-    one-way contract in this file cannot see them and a deletion is invisible to every other
-    test. It is invisible at run time too, and worse than the suppression group's silence:
-    dropping one of these does not turn export *off*, it turns export into a thing that appears
-    configured and never produces a datapoint.
-
-    A `**splat` is invisible to `_literal_items`, which is why the group has to be spelled as
-    literal pairs in `_fleet_environment` to be visible here at all.
-    """
-    tree = ast.parse(PROVISIONER.read_text(encoding="utf-8"))
-    fleet_items = _literal_items(tree, "_fleet_environment")
-    per_configuration = _returned_keys(tree, "_configuration_environment")
-    for name, expected in OTEL_EXPORT.items():
-        assert name in fleet_items, (
-            f'{name} is no longer forwarded as a literal `"{name}": "{expected}"` pair by '
-            f"`_fleet_environment` in api/src/handlers/provisioner.py. A `**splat` is invisible "
-            f"to this reader: literal pairs only. If the group was dropped deliberately, delete "
-            f"it from OTEL_EXPORT here AND from CLAUDE.md's invariant 32b, which is where the "
-            f"mechanism is written down."
-        )
-        assert fleet_items[name] == expected, (
-            f"{name} is forwarded as {fleet_items[name]!r} and this contract expects "
-            f"{expected!r}. Two of these are silent when wrong rather than absent: a `grpc` "
-            f"protocol or a 4317 endpoint means the CLI exports to a port the collector is not "
-            f"listening on, and an `OTEL_LOGS_EXPORTER` that is not `none` ships the CLI's log "
-            f"stream, which can carry session and prompt content."
-        )
-        assert name not in per_configuration, (
-            f"{name} is in `_configuration_environment`, so it is a create-time default that "
-            f"loses to the live runtime's value: `_desired_runtime` merges "
-            f"`{{**create-time, **live, **fleet}}` and only the fleet group converges "
-            f"(invariant 24). A runtime provisioned before this group existed would never pick "
-            f"it up, so flipping `otelMetricsEnabled` would appear to do nothing."
-        )
-
-
-def test_the_master_switch_is_bound_to_the_flag_not_to_a_literal() -> None:
-    """`CLAUDE_CODE_ENABLE_TELEMETRY` is the one thing that turns OTLP export on, and its value
-    must be the provisioner's `OTEL_METRICS_ENABLED` constant -- never a literal.
-
-    A literal `"1"` here would ship the exporter **on** from a branch whose whole safety
-    property is that `otelMetricsEnabled` defaults to false: every runtime would get a
-    `CLAUDE_CODE_ENABLE_TELEMETRY=1` while the boundary carried no `cloudwatch:PutMetricData`
-    and the image carried no collector. A literal `"0"` is the other failure -- it reads as
-    correct today and makes the context key unable to turn anything on, so an operator who
-    flips the flag gets the grant, the widened boundary and the collector layer, and no metrics.
-    Only the binding makes the one knob mean something.
-    """
-    tree = ast.parse(PROVISIONER.read_text(encoding="utf-8"))
-    value = _value_node(tree, "_fleet_environment", _MASTER_SWITCH)
-    assert value is not None, (
-        f"{_MASTER_SWITCH} is not a key of `_fleet_environment` any more. It is the master "
-        f"switch: without it every other name in OTEL_EXPORT is configuration for an exporter "
-        f"that never runs."
-    )
-    assert isinstance(value, ast.Name) and value.id == _METRICS_FLAG, (
-        f"{_MASTER_SWITCH} must be bound to the {_METRICS_FLAG} module constant, which "
-        f'normalises the Lambda\'s own environment variable to "1"/"0" with an opt-in '
-        f"whitelist. It is bound to {ast.dump(value)} instead."
-    )
-
-
-def test_the_exporter_speaks_http_protobuf_to_the_port_the_collector_binds() -> None:
-    """The two values invariant 32b actually names, and the two whose mismatch is a silent
-    no-export: the protocol and the port.
-
-    The Claude Code CLI defaults to `grpc` on **4317**; `agent/otel/collector.yaml` binds the
-    OTLP **HTTP** receiver on `127.0.0.1:4318`. Nothing fails when these disagree -- no error,
-    no log line, no metric -- so this is asserted separately from
-    `test_the_otel_exporter_group_cannot_silently_shrink` even though that test pins the same
-    two strings: this one says *why* those two strings and not others, and it fails with the
-    port and the protocol in the message.
-    """
-    tree = ast.parse(PROVISIONER.read_text(encoding="utf-8"))
-    fleet_items = _literal_items(tree, "_fleet_environment")
-
-    assert fleet_items.get("OTEL_EXPORTER_OTLP_PROTOCOL") == "http/protobuf", (
-        f"the CLI's default is grpc on 4317 and the collector binds HTTP on 4318, so anything "
-        f"but http/protobuf exports nothing and reports nothing. Got "
-        f"{fleet_items.get('OTEL_EXPORTER_OTLP_PROTOCOL')!r}"
-    )
-    endpoint = fleet_items.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-    assert endpoint.endswith(":4318"), (
-        f"invariant 32b fixes the loopback receiver at 4318, the OTLP HTTP port, and {endpoint!r} "
-        f"does not name it. 4317 is the gRPC port and nothing is listening on it."
-    )
-    assert endpoint.startswith("http://localhost") or endpoint.startswith("http://127.0.0.1"), (
-        f"the receiver binds 127.0.0.1, so the endpoint is the loopback and never the "
-        f"container's VPC address; {endpoint!r} would either miss the receiver or send OTLP "
-        f"over the network"
-    )
-    assert "/v1/metrics" not in endpoint, (
-        "this is the *base* endpoint -- the SDK appends `/v1/metrics` itself, so spelling the "
-        "path here posts to `/v1/metrics/v1/metrics`. It is the same mistake the collector's "
-        "own `metrics_endpoint:` vs `endpoint:` distinction guards against on the way out."
-    )
 
 
 def test_no_declared_dynamic_site_hides_a_name() -> None:

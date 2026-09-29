@@ -52,20 +52,11 @@ ACCOUNT = "123456789012"
 REGION = "ap-southeast-1"
 
 
-def build(
-    agent_stack: Any, asset_repository_arn: str, *, otel_metrics_enabled: bool = False
-) -> list[dict[str, Any]]:
+def build(agent_stack: Any, asset_repository_arn: str) -> list[dict[str, Any]]:
     """The boundary as JSON, built with the parameters above.
 
     `agent_stack` is the module, handed in rather than imported, so importing this file
     costs no `aws_cdk` import at collection time.
-
-    `otel_metrics_enabled` defaults to `False` -- the shipped state of the
-    `otelMetricsEnabled` context key -- so a call site that does not care about the metrics
-    switch keeps asserting today's shape. The callers that do care pass it explicitly and
-    build the *inline policy* in the same state, because the CloudWatch grant and
-    `MayPublishAgentMetrics` are gated on one flag and comparing one state's grant against
-    the other state's ceiling would report a disagreement that does not exist.
     """
     return [
         statement.to_json()
@@ -74,7 +65,6 @@ def build(
             account=ACCOUNT,
             region=REGION,
             asset_repository_arn=asset_repository_arn,
-            otel_metrics_enabled=otel_metrics_enabled,
         )
     ]
 
@@ -135,12 +125,9 @@ def grants_for(
 #
 # Empty, and the emptiness is the measured finding rather than an omission: built with the
 # parameters above, the set of actions the boundary's Allow statements permit is *exactly*
-# the set `provisioner._execution_role_policy` grants, no wildcard among them, both set
-# differences empty -- **in either state of `otelMetricsEnabled`**. With the flag off that is
-# 20 actions; with it on it is 21, the extra one being `cloudwatch:PutMetricData`, which the
-# boundary's `MayPublishAgentMetrics` and the grant's `PublishAgentMetrics` add in lockstep
-# off the same flag. So there is nothing to declare and nothing to narrow, and the value of
-# the test reading this table is that the next Allow fails it unless it is exercised or
+# the 20 actions `provisioner._execution_role_policy` grants, no wildcard among them, both
+# set differences empty. So there is nothing to declare and nothing to narrow, and the value
+# of the test reading this table is that the next Allow fails it unless it is exercised or
 # written down here.
 #
 # A legitimate future entry is a permission the AgentCore service itself needs on the role
@@ -188,15 +175,6 @@ WIDER_RESOURCES: dict[tuple[str, str], str] = {
         "what stops one repository reaching another's memory (invariant 31's division of "
         "labour, the same one `MayTouchOwnRows` states for `dynamodb:LeadingKeys`)."
     ),
-    # No entry for `MayPublishAgentMetrics`' `*`, and that is not an omission. This table is
-    # for a ceiling *wider than the grant*, and `cloudwatch:PutMetricData` supports no
-    # resource-level permission at all, so `*` is the only legal resource on **both** sides:
-    # the grant names it literally too, exactly as `AuthenticateToEcr`/`MayAuthenticateToEcr`
-    # do for `ecr:GetAuthorizationToken`, which is likewise absent from this table. Declaring
-    # it here would be a lie the suite catches from both directions --
-    # `test_no_boundary_declaration_is_stale` would report that the grant names that resource
-    # literally, and `test_every_boundary_declaration_names_something_the_boundary_still_allows`
-    # would report the Sid missing in the flag's off state.
 }
 
 # The same guard `tests/test_invoke_payload_contract.py` puts on its two declaration tables:

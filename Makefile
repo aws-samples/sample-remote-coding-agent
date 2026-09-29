@@ -77,7 +77,8 @@ OXLINT ?= npx --yes oxlint@$(OXLINT_VERSION)
 # no repeating timer, only `ui.js` may spell a refusal are decisions no linter has an
 # opinion about. Needs node on PATH, like `preflight` and `deploy` do; unlike the parse
 # test, which skips when node is missing, this one fails, because a lint that quietly
-# checked nothing is the hole it exists to close.
+# checked nothing is the hole it exists to close. `CHECK_NODE` runs first so the failure is
+# a sentence about Node rather than npm's `EBADENGINE` about a package nobody typed.
 #
 # The fourth line is the type checker, and it is LAST on purpose: ruff is seconds and a
 # cold mypy is tens of seconds, so a formatting slip reports first. The consequence,
@@ -88,6 +89,14 @@ OXLINT ?= npx --yes oxlint@$(OXLINT_VERSION)
 lint:
 	$(PYTHON) -m ruff check agent/src api/src infra mcp/src tests
 	$(PYTHON) -m ruff format --check agent/src api/src infra mcp/src tests
+	@set -eu; \
+	version=$$(command -v node >/dev/null 2>&1 && node --version || true); \
+	$(CHECK_NODE) || { printf '%s\n' \
+	  "lint: FAILED -- node: $${version:-not on PATH}. Needs ^$(NODE_MINIMUM) or >=$(NODE_MINIMUM_LTS)." \
+	  "  fix: install Node $(NODE_MINIMUM_LTS)+ (https://nodejs.org, 'brew install node', or nvm)." \
+	  "       oxlint@$(OXLINT_VERSION)'s own engines field is that floor. Without this line npm" \
+	  "       answers EBADENGINE about a package nobody typed -- which is how a pipeline whose" \
+	  "       image carried Node 18 failed here with nothing naming Node." >&2; exit 1; }
 	$(OXLINT) -c web/.oxlintrc.json web/js
 	$(PYTHON) -m mypy --config-file mypy.ini agent/src api/src mcp/src infra
 
@@ -128,9 +137,34 @@ lint:
 CDK_VERSION ?= 2.1138.0
 CDK ?= npx --yes aws-cdk@$(CDK_VERSION)
 
-# The CDK CLI needs a supported Node; 18 is end-of-life and the failure it produces is a
-# stack trace out of the CLI's own bundle rather than a sentence about Node.
-NODE_MINIMUM ?= 20
+# The Node floor, and it is **oxlint's** rather than the CDK CLI's -- which is the whole
+# reason it is spelled as two accepted ranges instead of one major.
+#
+# `oxlint@$(OXLINT_VERSION)`'s own `engines` field is `^20.19.0 || >=22.12.0`, and this
+# mirrors it exactly. A single `>= 20` floor was wrong in both directions: it passes on Node
+# 20.0 through 20.18, where `make lint` then dies with npm's `EBADENGINE` -- a message about
+# a package nobody typed -- and it says "the CDK CLI needs" about a constraint the CDK CLI
+# does not set. The floor was discovered the expensive way: a pipeline whose image carried
+# Node 18 failed `make lint` and nothing in this file named a version it could have checked.
+#
+# Two ranges rather than a flat `>= 22.12`, because `^20.19` is genuinely accepted and a
+# floor narrower than the tool's own turns a working machine away.
+NODE_MINIMUM ?= 20.19
+NODE_MINIMUM_LTS ?= 22.12
+
+# The check itself, as one shell expression both `lint` and `preflight` run, because two
+# spellings of one floor is how they come to disagree. It reads `$$version` from the calling
+# recipe -- set there rather than here, so a recipe can report the version it found in its
+# own message. `awk` and not `sort -V`: the BSD and GNU spellings of a version sort differ,
+# and the comparison is two integers either way.
+#
+# `test -n` first, and it is not belt-and-braces: `awk` never executes its block on empty
+# input, so it exits 0 and a machine with **no node at all** would pass the version check.
+CHECK_NODE ?= test -n "$$version" && printf '%s' "$$version" | awk -F. -v a="$(NODE_MINIMUM)" -v b="$(NODE_MINIMUM_LTS)" \
+	'{ gsub(/^v/, "", $$1); maj = $$1 + 0; min = $$2 + 0; \
+	   split(a, lo, "."); split(b, hi, "."); \
+	   ok = (maj > hi[1]) || (maj == hi[1] && min >= hi[2]) || (maj == lo[1] && min >= lo[2]); \
+	   exit ok ? 0 : 1 }'
 
 # `infra/app.py` owns the five suffixes and the default prefix -- including why the prefix
 # carries a `Sample` -- and this file mirrors the prefix and derives the three names it needs
@@ -506,11 +540,11 @@ preflight:
 	@echo "preflight: ok      uv $$(uv --version 2>/dev/null | awk '{print $$2}')"
 	@set -eu; \
 	version=$$(command -v node >/dev/null 2>&1 && node --version || true); \
-	major=$$(printf '%s' "$$version" | sed -e 's/^v//' -e 's/\..*//'); \
-	test -n "$$major" && test "$$major" -ge $(NODE_MINIMUM) 2>/dev/null || { printf '%s\n' \
-	  "preflight: FAILED -- node $${version:-is not on PATH} is not the v$(NODE_MINIMUM)-or-newer the CDK CLI needs." \
-	  "  fix: install Node $(NODE_MINIMUM)+ (https://nodejs.org, 'brew install node', or nvm)." \
-	  "       The CDK CLI is run as '$(CDK)', so npx has to work." >&2; exit 1; }; \
+	$(CHECK_NODE) || { printf '%s\n' \
+	  "preflight: FAILED -- node: $${version:-not on PATH}. Needs ^$(NODE_MINIMUM) or >=$(NODE_MINIMUM_LTS)." \
+	  "  fix: install Node $(NODE_MINIMUM_LTS)+ (https://nodejs.org, 'brew install node', or nvm)." \
+	  "       Both npx-run tools need it: '$(CDK)' for the deploy, and oxlint in 'make lint'," \
+	  "       whose own engines field is the floor above. Below it npm answers EBADENGINE." >&2; exit 1; }; \
 	printf 'preflight: ok      node %s\n' "$$version"
 	@command -v aws >/dev/null 2>&1 || { printf '%s\n' \
 	  "preflight: FAILED -- the aws CLI is not on PATH." \
