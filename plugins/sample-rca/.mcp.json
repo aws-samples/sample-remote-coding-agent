@@ -4,7 +4,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/aws-samples/sample-remote-coding-agent@v0.3.1#subdirectory=mcp",
+        "git+https://github.com/aws-samples/sample-remote-coding-agent@f0512b42492a3a69e8de4c81e14cabbc244d18d7#subdirectory=mcp",
         "rca-mcp"
       ],
       "env": {
