@@ -220,13 +220,25 @@ def main() -> None:
     # and no permission exports nothing; exporter variables with no collector point at a port
     # nothing is listening on.
     #
-    # `default=False` is the shipped-off property and is the whole reason this is safe to
-    # merge: the ADOT collector's effect on the ARM64 image against AgentCore's 2 GB cap
-    # (invariant 2) is unmeasured -- no machine in this repository's toolchain has a Docker
-    # daemon -- so the code ships and the switch does not. Flip it with
-    # `make deploy EMAIL=... CDK_CONTEXT='-c otelMetricsEnabled=true'`, which forwards
-    # `CDK_CONTEXT` verbatim, once somebody has built the image and checked its size.
-    otel_metrics_enabled = _flag_context(app, "otelMetricsEnabled", default=False)
+    # `default=True`: Coding Agent Insights is on unless a deploy turns it off with
+    # `CDK_CONTEXT='-c otelMetricsEnabled=false'`. A run's cost, turns and per-node timing are
+    # the first thing anyone asks about an agent, and a default that hides them makes every
+    # operator find this key before they can answer.
+    #
+    # Two things travel with that default, and both were reasons it shipped off:
+    #
+    # * It widens the container's reach from four things to **five** -- `cloudwatch:PutMetricData`
+    #   on `*`, on the execution role and on the permissions boundary. Write-only, no read of
+    #   any metric, and `*` is not laxity: `PutMetricData` supports no resource-level
+    #   permission, so no narrower grant exists. See "What remains exposed" in `CLAUDE.md`,
+    #   which counts five now rather than four.
+    # * The ADOT collector's effect on the ARM64 image against AgentCore's 2 GB cap was
+    #   unmeasured, because no machine in this repository's toolchain has a Docker daemon. It
+    #   is measured **in CI** now instead: the pipeline builds this image with privileged mode
+    #   on every deploy, so the collector layer is built and pushed there, and an image over
+    #   the cap fails a deploy loudly rather than waiting for somebody to set a flag. The
+    #   image was ~1.3 GB without it.
+    otel_metrics_enabled = _flag_context(app, "otelMetricsEnabled", default=True)
 
     data = DataStack(app, names.data, app_name=APP_NAME, env=env)
     agent = AgentStack(

@@ -511,8 +511,9 @@ def test_the_agent_image_gates_the_collector_behind_a_build_arg_defaulting_off()
     assert args.get("ENABLE_OTEL_COLLECTOR") == "0", (
         f"{_DOCKERFILE} must carry `ARG ENABLE_OTEL_COLLECTOR=0`, default exactly `0`. "
         f"Got {args.get('ENABLE_OTEL_COLLECTOR')!r}. A plain `docker build` of this file, and "
-        "every deploy that does not pass `-c otelMetricsEnabled=true`, must produce an image "
-        "with no collector in it."
+        "every deploy that passes `-c otelMetricsEnabled=false`, must produce an image "
+        "with no collector in it. The *deploy* default is on; this ARG default is not, so the "
+        "image and the flag stay separable."
     )
 
     logical = re.sub(r"\\\n\s*", " ", raw).splitlines()
@@ -545,3 +546,38 @@ def test_the_agent_image_gates_the_collector_behind_a_build_arg_defaulting_off()
             "here can be overridden by a runtime's `environmentVariables` but never unset, so "
             "an exporter switched on in the image could not be switched off without a rebuild."
         )
+
+
+def test_coding_agent_insights_is_on_by_default() -> None:
+    """`infra/app.py` reads `otelMetricsEnabled` with `default=True`.
+
+    Pinned because it is a *security* default, not a convenience one: on means the execution
+    role and the permissions boundary both carry `cloudwatch:PutMetricData` on `*`, which is
+    the difference between the four things stolen container credentials reach and the five
+    `CLAUDE.md`'s "What remains exposed" now counts. Flipping it back is a legitimate
+    decision and this test is where it has to be made deliberately -- until this change
+    nothing asserted the default at all, so it could have moved either way unnoticed.
+
+    Read as an AST rather than as a regex over the source: the argument is a keyword with a
+    literal default, and a regex would also match the sentence in the comment above it.
+    """
+    import ast
+
+    source = (REPO_ROOT / "infra" / "app.py").read_text()
+    defaults = {
+        node.args[1].value: kw.value.value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_flag_context"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        for kw in node.keywords
+        if kw.arg == "default" and isinstance(kw.value, ast.Constant)
+    }
+    assert defaults.get("otelMetricsEnabled") is True, (
+        "infra/app.py must read otelMetricsEnabled with default=True, so Coding Agent "
+        f"Insights is on unless a deploy declines it. Got {defaults.get('otelMetricsEnabled')!r}. "
+        "Turning it off is fine, but it takes the container's reachable services from five "
+        "back to four, and `CLAUDE.md`'s exposure count has to move with it."
+    )

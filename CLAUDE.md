@@ -551,8 +551,8 @@ reintroduced one. Each gets a comment and a regression test.
     whole credential story is "one PAT, never in the environment". And Coding Agent
     Insights is read in the CloudWatch console by a human, never proxied through
     `api/`, so note 30's read-only-over-DynamoDB posture is untouched.
-    The mechanism now exists and is **switched off**: one context key,
-    `-c otelMetricsEnabled=true`, gates the collector in the image
+    The mechanism is **on by default**, and one context key turns it off:
+    `-c otelMetricsEnabled=false` gates the collector in the image
     (`ENABLE_OTEL_COLLECTOR`, default `0`), the exporter variables in
     `provisioner._fleet_environment`, the `cloudwatch:PutMetricData` grant on the
     execution role and the matching widening of the permissions boundary -- all four
@@ -1214,17 +1214,19 @@ than one that does not. Four things are still true after everything above.
   for both runners, the verify command and the setup command. It defeats the
   environment-variable credential path. It does **not** defeat an attacker who hardcodes
   the container credentials endpoint. Within the permissions boundary, stolen credentials
-  reach exactly four things: this one repository's secret, this one configuration's task
-  items, Bedrock, and a read-only pull of the agent image from one ECR repository — the
-  runtime cannot be created at all without that last one, which is why it is granted. The
+  reach exactly **five** things: this one repository's secret, this one configuration's task
+  items, Bedrock, a read-only pull of the agent image from one ECR repository — the
+  runtime cannot be created at all without that last one, which is why it is granted — and
+  `cloudwatch:PutMetricData`. The
   `dynamodb:LeadingKeys` fences on both table statements are what shrink that list to *this*
   configuration, and the VPC with its 443-only security group is what stops the credentials
-  leaving. Four is the count as shipped; it becomes **five** on a deploy that passes
-  `-c otelMetricsEnabled=true`, which adds `cloudwatch:PutMetricData` on `*` to the execution
-  role and to the boundary. That fifth one is write-only and grants no read of any metric, and
+  leaving. The fifth one is Coding Agent Insights, and it is in the count because the flag now
+  **defaults to on** -- `-c otelMetricsEnabled=false` is how a deploy declines it, and such a
+  deploy grants four. It is write-only and grants no read of any metric, and
   `*` is not laxity -- `PutMetricData` supports no resource-level permission, so no narrower
-  grant exists. The exposure it buys an attacker is junk metrics and a small CloudWatch bill.
-  The flag defaults to false, so an unmodified deploy of this tree grants four.
+  grant exists. The exposure it buys an attacker is junk metrics and a small CloudWatch bill,
+  which is the trade for every operator being able to see a run's cost and per-node timing
+  without first discovering a context key.
 - **Prompt injection.** The controls are the `.agent/` quarantine — the clone's own
   `.agent/` is moved aside so repository content cannot pose as the roles' workspace —
   `setting_sources=[]` and `strict_mcp_config=True`, the `PreToolUse` hook that denies
