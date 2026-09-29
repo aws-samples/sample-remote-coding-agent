@@ -67,13 +67,12 @@ _MCP_CALL_COUNT = 6
 CONSOLE_NOT_CALLED: dict[tuple[str, str], str] = {
     ("GET", "/configurations/{configId}/memory"): (
         "Wired ahead of its view. The route is the operator's read of what a repository "
-        "remembers and `web/` is owned by another card in this wave, so the console has no "
-        "wrapper for it yet -- `web/js/views/register.js` prints the `memoryId` and nothing "
-        "behind it. Delete this entry with the wrapper that replaces it."
+        "remembers, and the console has no wrapper for it yet -- "
+        "`web/js/views/register.js` prints the `memoryId` and nothing behind it. Delete this "
+        "entry with the wrapper that replaces it."
     ),
     ("POST", "/tasks/{taskId}/cancel"): (
-        "Wired ahead of its control. `web/` is owned by another card, and the button is not "
-        "one line: it is a confirm panel over a destructive action (`ui.CONFIRM_ORDER`) plus "
+        "Wired ahead of its control. The button is not one line: it is a confirm panel over a destructive action (`ui.CONFIRM_ORDER`) plus "
         "the run view's two timers. Shipping the route without it is what lets an operator "
         "stop a run started by mistake today -- from the plugin or a signed request -- rather "
         "than waiting for the console. Delete this entry with the wrapper that replaces it."
@@ -119,9 +118,8 @@ MCP_NOT_CALLED: dict[tuple[str, str], str] = {
     ),
     ("POST", "/tasks/{taskId}/cancel"): (
         "Reachable by construction -- `POST` was chosen over `DELETE` for exactly that -- but "
-        "a `cancel_task` tool is a decision about what a chat window may stop, and this card "
-        "ships the route the console and the plugin will both call. The tool is the next "
-        "decision, not part of this one."
+        "a `cancel_task` tool is a decision about what a chat window may stop. The route the "
+        "console and the plugin both call ships here; the tool is a separate decision."
     ),
 }
 

@@ -989,16 +989,15 @@ def _matches_intent(live: Mapping[str, Any], desired: Mapping[str, Any]) -> bool
     """Whether the live runtime already *is* the desired one.
 
     The guard covers **every converged field**, not the image alone. An image-only guard
-    short-circuits before convergence and makes the mount unreachable by any number of
-    re-issued runtime updates -- both runtimes on the deploy this was measured against
-    predated session storage and the 8-hour lifetime, and neither would ever have got
-    them.
+    short-circuits before convergence, so a runtime created before session storage or the
+    8-hour lifetime existed would never receive either, however many runtime updates were
+    issued.
     """
     if _container_uri(live) != _container_uri(desired):
         return False
-    # A runtime created before `platformVersion` existed reports **no value** for it --
-    # measured, not assumed: every runtime in the live fleet answered `GetAgentRuntime` with
-    # it absent. Absence is the service's default, which is `V1`, so normalising it here is
+    # A runtime created before `platformVersion` existed reports **no value** for it:
+    # `GetAgentRuntime` answers with the member absent. Absence is the service's default,
+    # which is `V1`, so normalising it here is
     # what stops a `V1` fleet reading as drift against a desired `V1`. Without this every
     # existing runtime would take one needless update, and under V2 an update is a snapshot
     # rebuild of several minutes rather than an idle API call.
@@ -1083,7 +1082,7 @@ def _now_epoch() -> int:
 # wrapper assumed, which is the distinction the old terminal message could not draw.
 _TRANSIENT_CREATE_FAILURES: tuple[tuple[frozenset[str], tuple[str, ...], str], ...] = (
     (
-        # IAM propagation: the one condition here ever observed to heal with time.
+        # IAM propagation: the one condition here that heals with time.
         # `CreateAgentRuntime` runs moments after `CreateRole`, and AgentCore reports a
         # role it cannot assume yet by failing to assume it. Matched on the service's
         # phrasing of that failed attempt and on nothing else -- notably NOT on a bare

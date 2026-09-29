@@ -175,7 +175,7 @@ before deleting them; some are the only history of your runs.
 - **Tools succeed but the board is empty.** Check `endpoint used:` and stale API overrides for another deployment.
 - **Another `/remote` command answers.** Use `/sample-rca:remote`; other plugin namespaces are unrelated.
 
-Check current setup issues before deploying: [VPC quota](https://github.com/aws-samples/sample-remote-coding-agent/issues/2), [Cognito domain](https://github.com/aws-samples/sample-remote-coding-agent/issues/3),
+Setup notes worth reading before you deploy: [VPC quota](https://github.com/aws-samples/sample-remote-coding-agent/issues/2), [Cognito domain](https://github.com/aws-samples/sample-remote-coding-agent/issues/3),
 [deployment](https://github.com/aws-samples/sample-remote-coding-agent/issues/5), [wrong-account handling](https://github.com/aws-samples/sample-remote-coding-agent/issues/7), [account selection](https://github.com/aws-samples/sample-remote-coding-agent/issues/8).
 
 ## Contributing

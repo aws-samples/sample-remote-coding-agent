@@ -66,9 +66,8 @@ _NO_ORIGIN_HEAD = (
 )
 
 # What goes on disk when a pass returned nothing. `num_turns` is NOT evidence either way:
-# `/code-review` was observed returning `num_turns: 0` while producing 1234 characters of
-# real findings and costing $0.157, so a non-empty `result` is the only did-it-run signal
-# there is.
+# `/code-review` reports `num_turns: 0` even when it produces real findings, so a non-empty
+# `result` is the only did-it-run signal there is.
 _PRODUCED_NOTHING = (
     "# {command} (advisory) -- no output\n\n"
     'The pass returned an empty result. An empty result with `subtype: "success"` is the '
@@ -76,7 +75,7 @@ _PRODUCED_NOTHING = (
     "the pass DID NOT RUN. It is not a finding of zero.\n"
 )
 
-# `/security-review` emits, probe-observed:
+# `/security-review` emits:
 #     ## Vuln 1: Command injection: `app.py:42`
 #     * **Severity: HIGH**
 #     * **Category:** `command-injection`
@@ -174,7 +173,7 @@ def count_findings(text: str) -> int:
     count wrong, which is a wrong number beside a body a human can read -- the failure
     mode is deliberately that boring.
 
-    The observed shapes, probe-verified against CLI 2.1.236: `/security-review` emits
+    The shapes, against CLI 2.1.236: `/security-review` emits
     ``## Vuln <n>: <title>: `<file>:<line>` `` followed by `* **Severity: HIGH**`,
     `* **Category:** `...`` and `* **Confidence:** 9/10`; `/code-review` emits free-form
     prose with a `Findings:` list.

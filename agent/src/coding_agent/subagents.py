@@ -121,10 +121,9 @@ DENIED_TOOLS: tuple[str, ...] = (
 # is what asserts the pair: a drift makes `uvx` fetch from a registry at task time, or --
 # with no network -- makes the tools silently not appear.
 #
-# STILL OWED, and not this phase's: `docs.aws.amazon.com` on the VPC DNS allowlist, which
-# the Route 53 Resolver DNS Firewall owns. Until that lands the tools may simply not appear
-# -- an absent tool, never an error -- so it is named in this card's pull request
-# description as well as here.
+# The server reaches `docs.aws.amazon.com` through the VPC's NAT gateway. If that hostname
+# is ever blocked, the documentation tools do not appear at all rather than erroring, which
+# is the degradation `build_options` already documents.
 AWS_DOCS_PACKAGE = "awslabs.aws-documentation-mcp-server"
 AWS_DOCS_VERSION = "1.1.30"
 AWS_DOCS_REQUIREMENT = f"{AWS_DOCS_PACKAGE}=={AWS_DOCS_VERSION}"

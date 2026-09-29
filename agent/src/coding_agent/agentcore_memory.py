@@ -11,7 +11,7 @@ Get that pairing backwards and both namespace templates resolve to something no 
 looks at.
 
 **The two namespace templates below are half of a contract.** The provisioner writes the
-same two strings down when it creates the memory resource, under another card. A mismatch
+same two strings down when it creates the memory resource. A mismatch
 does not fail: `retrieve_memory_records` simply returns nothing, forever, with no error and
 no warning -- an agent that never remembers. They are module constants, and the resolvers
 `.format()` them rather than re-spelling the path, so at least the two halves can be diffed
@@ -52,7 +52,7 @@ from .state import TaskState
 log = logging.getLogger(__name__)
 
 # The two namespace templates, in the provisioner's spelling. See the module docstring:
-# these same two strings are configured on the memory resource by another card, and a
+# these same two strings are configured on the memory resource by the provisioner, and a
 # mismatch makes retrieval silently return nothing.
 EPISODIC_NAMESPACE = "/rca/{actorId}/episodic"
 SESSION_NAMESPACE = "/rca/{actorId}/session/{sessionId}"

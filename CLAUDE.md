@@ -30,9 +30,9 @@ the end.
 - **`make setup` comes before `make test` in a fresh container, always.** The `.venv`
   symlink is pre-created but points at an *empty* directory, so a first `make test`
   fails with `/usr/local/bin/python3: No module named pytest` and `make lint` with
-  `No module named ruff`. That is a missing environment, not a red suite — and it reads
-  as a red suite, which is how it costs an iteration. Run `make setup` (~2 min, and
-  idempotent) first, then treat any failure as yours.
+  `No module named ruff`. That is a missing environment rather than a failing suite, but it
+  reads as a failing suite. Run `make setup` (~2 min, and idempotent) first, then treat any
+  failure as yours.
 - **`--dist loadfile` in `pytest.ini` is load-bearing.** Handler modules bind their
   table names at import, so several test files `importlib.reload` them; the reload
   order is a within-file contract and only `loadfile` keeps a file's tests on one
@@ -48,12 +48,11 @@ the end.
 - **There is no `infra/stacks/__init__.py`.** `pythonpath` already contains `infra`,
   so `stacks` resolves as a namespace package with `__file__ is None`. Adding the
   file makes its import depend on which directory pytest started from. The empty
-  `infra/stacks/.gitkeep` is only there because git drops a directory with nothing
-  tracked in it, which would make the namespace-package test fail on a clean clone
-  for a reason nobody would guess.
+  `infra/stacks/.gitkeep` is there because git drops a directory with nothing tracked in
+  it, which would make the namespace-package test fail on a clean clone.
 - **Dependencies carry upper bounds.** An unbounded floor lets a major release land
-  and break a build that changed nothing — `mcp>=1.2.0` resolved to 2.0.0, which
-  removed a method, and `pytest>=8.0` resolved to 9 and turned a green checkout red.
+  and break a build that changed nothing: `mcp>=1.2.0` resolves to 2.0.0, which removed a
+  method, and `pytest>=8.0` resolves to 9, which fails a suite that was passing.
   `setup` runs before verification on every run that verifies, so the failure has
   nothing in the diff to explain it. `tests/test_repo_contracts.py` enforces this
   mechanically across all five manifests.
@@ -145,8 +144,8 @@ rather than a deploy-time one. All three defaults in `infra/app.py` are `global.
 exactly that reason, so reaching the hazard now takes an explicit geo-scoped
 `-c planModelId=` / `-c codeModelId=` / `-c haikuModelId=` override — which is also the
 one thing that buys residency, so the check earns its AWS call either way.
-`_DEFAULT_HAIKU_MODEL` was `apac.` and is the worked example: a default that only
-resolves in one geography failed every deploy outside APAC. Each failure stops at that check with a
+A geo-scoped default is the case to watch: a `apac.` default resolves in one geography and
+fails a deploy anywhere else. Each failure stops at that check with a
 `preflight: FAILED --` line and an indented `fix:` naming the action. A missing
 bootstrap is **printed as the exact command, never run for you**: it is one command,
 once per account and region, and at a different privilege level from a deploy.
@@ -172,14 +171,14 @@ offers to register this repository, asking for the PAT — the one value that ge
 cannot be discovered. Both targets are idempotent, so a re-run is the health check.
 
 An `RCA_API_URL` override outranks that endpoint document, and the `sample-rca` plugin's `api_url`
-`userConfig` field is one of these — see `plugins/sample-rca/.mcp.json`. A live walkthrough hit
-exactly that: a stale `api_url` from an earlier deployment beat the freshly written
-`~/.rca/endpoint.json`, so `register_repository` reported `PROVISIONING` and then `READY`
-against an older deployment in another region while the new fleet's `GET /configurations`
-returned nothing, and the operator's PAT went into the other account's Secrets Manager.
-The precedence is deliberate — someone running two deployments needs it — and it stays;
-what was missing was any statement of which endpoint had been used. So every tool's answer
-now ends with an `endpoint used:` line naming the URL, the region and which of the four
+`userConfig` field is one of these — see `plugins/sample-rca/.mcp.json`. The precedence is
+deliberate, because someone running two deployments needs it, and it has a sharp edge: a
+stale `api_url` from an earlier deployment outranks a freshly written `~/.rca/endpoint.json`,
+so `register_repository` can answer `PROVISIONING` and then `READY` against an older
+deployment in another region while the new fleet's `GET /configurations` returns nothing —
+and the PAT goes to wherever the stale value points. What makes that visible is that every
+tool's answer ends with an `endpoint used:` line naming the URL, the region and which of the
+four
 sources supplied it (the override, the endpoint document, discovery from the stack's
 `ApiUrl` output, or an endpoint passed in directly). It is a purely local read of what has
 already been settled — `mcp/src/rca_mcp/client.py::provenance` — rendered by
@@ -277,8 +276,7 @@ Everything the walkthrough used to attribute inline lives here, in the order an 
 The order is the whole instruction, and `README.md` carries only the order — the commands live
 here. **Destroying the stacks first orphans the AgentCore runtime, the per-configuration IAM
 role at `/rca/` and the Secrets Manager secret**: nothing in CloudFormation owns them, they are
-created per API call, and the runtime keeps costing money. This sequence has been run end to end
-once, against a fleet with nothing registered in it, which is what corrected the command below.
+created per API call, and the runtime keeps costing money.
 
 1. **Deregister every repository.** In the console: the repository's settings page →
    **Deregister** → two clicks, the second armed only after a moment
@@ -297,8 +295,8 @@ once, against a fleet with nothing registered in it, which is what corrected the
      SampleCodingAgentData SampleCodingAgentAccountEuWest1
    ```
 
-   **Both of the first two lines' additions are load-bearing, and this command failed without
-   them.** `cdk.json` runs the app as `python3 app.py`, so a bare invocation uses whatever
+   **Both additions on the first two lines are required.** `cdk.json` runs the app as
+   `python3 app.py`, so a bare invocation uses whatever
    `python3` is on `PATH` and dies with `ModuleNotFoundError: No module named 'aws_cdk'`; the
    `PATH` prefix is exactly what `make deploy` does for the same reason. And `infra/app.py` reads
    the account and region from **context**, which the CDK CLI does not inject — it exports
@@ -353,9 +351,9 @@ including runs where the environment is already built.
 
 ## Invariants
 
-These were expensive to discover -- each entry names the incident behind it, and
-several of them fail *silently*, so a reader who skips them cannot tell they have
-reintroduced one. Each gets a comment and a regression test.
+Each entry states a rule and what breaking it costs. Several fail *silently*, so a
+reader who skips them cannot tell one has been reintroduced. Each carries a comment at
+the code it governs and a regression test.
 
 1. **Never run the graph on the invocation thread** — `add_async_task` + a
    thread, return in ms. A blocked ping thread is reaped at 15 min, silently.
@@ -407,13 +405,11 @@ reintroduced one. Each gets a comment and a regression test.
    loud `log.error` and the verdict stands against the second run.
 7. **Read `final_text`, not `text`** — `text` is the whole transcript, narration
    included.
-8. **Do not lower the `code` role's effort** — at `medium`, **Opus 5** reported
-   complete with zero source edits against 214 insertions at `high`. That
-   measurement was made on Opus, and `code` now runs on **Sonnet** (see
-   "Model routing"), so it does not transfer: effort stays `high` there, and Sonnet-at-high
-   is an open question with a named comparison to run, not a settled default. The
-   no-op guard is what makes the experiment safe — under-performance here raises
-   rather than passing quietly.
+8. **Do not lower the `code` role's effort** — at `medium` a coding role can report a
+   task complete having made no source edits at all, where the same task at `high`
+   produces a real change. Effort stays `high`. The no-op guard in `nodes/code.py` is
+   what bounds the risk either way: a role that changes nothing raises rather than
+   reporting success quietly.
 9. **`permission_mode="acceptEdits"`, never `"plan"`** — `"plan"` returns only
    narration and the spec never reaches the coder.
 10. **`setting_sources=[]` *and* `strict_mcp_config=True`** — a checked-in
@@ -452,43 +448,42 @@ reintroduced one. Each gets a comment and a regression test.
     replaces a draft PR with an opaque `GraphRecursionError`.
 13. **Every observable transition is written to DynamoDB** — a new node needs a
     `_NODE_STATUS` entry, a `TaskStatus` literal, a `watchdog.RESUMABLE_STATUSES`
-    line and a `web/js/status.js` line. `review`/`REVIEWING` is the worked example
-    and the reason to price this: **four edits across three deployment units** for
-    one node, and the console one is parsed line by line by
+    line and a `web/js/status.js` line — **four edits across three deployment units** for
+    one node, with `review`/`REVIEWING` as the worked example. The console line is parsed
+    line by line by
     `tests/test_web_status_vocabulary.py`, so its formatting is load-bearing. The
     re-run hop is a real node visit and is instrumented like any other. Activity
     writes **skip `updatedAt`**: that field is `lastFinished`'s sort key *and* the
     watchdog's only liveness clock.
 13b. **The invocation payload's field names are a contract across two deployment
     units** — `api/src/handlers/dispatcher.py::_payload` writes it, `server._REQUIRED`
-    and `graph.PAYLOAD_TO_STATE`/`OPTIONAL_PAYLOAD_FIELDS` read it. The dispatcher sent
-    `prompt` while the container demanded `description` for a whole phase and **both
-    suites stayed green**, because each half asserted its own spelling; the first
-    invocation that ever reached a running container answered 500 with
-    `ValueError: the invocation payload is missing description`. The wire name is
+    and `graph.PAYLOAD_TO_STATE`/`OPTIONAL_PAYLOAD_FIELDS` read it. A mismatch here is
+    invisible to both suites, because each half can assert its own spelling and pass: the
+    first invocation to reach a running container is what fails, with a 500 and a
+    `ValueError` naming the missing field. The wire name is
     `prompt` — the public field of `POST /tasks` and the stored Tasks attribute — the
     graph-state name is `description`, and `graph._initial_state` is the one translation
     point. `tests/invoke_payload.py` is the single definition of the shape and
     `tests/test_invoke_payload_contract.py` holds both halves to it, so a field the
     dispatcher sends which nothing in the container reads fails a test until it is
-    classified there with a written reason. Beside 13 rather than folded into it: 13's
-    subject is a *node* and its four-edit tax, this one is a *payload* and its two-unit
-    tax, and they are reintroduced by different edits.
+    classified there with a written reason. It sits beside 13 rather than inside it because
+    13's subject is a *node* across three units and this one is a *payload* across two;
+    different edits reintroduce them.
 14. **Do not create a custom AgentCore endpoint** — `ENDPOINT_NAME = "DEFAULT"`.
 15. **IAM is eventually consistent** — what may be retried at all is an **allowlist**
     (`provisioner._TRANSIENT_CREATE_FAILURES`): an error code, the operation that produced
     it, and for propagation a closed set of pinned message shapes. Everything else is
     terminal — but the allowlist has a **floor**: a message it does not recognise, out of
     `CreateAgentRuntime`, is retried **exactly once** and is then terminal with the vendor's
-    own words in `statusReason`. The floor is there because a gap in the enumeration once
-    cost the ability to provision at all: the live propagation message says the trust policy
-    allows `assumption` by this service, all six pinned shapes were built around `assume`
-    and `assumed`, so nothing matched and every `POST /configurations` failed on its first
-    attempt. So the next phrasing the vendor invents costs one slow success, never an
-    immediate permanent failure. The floor's own label claims no cause — nothing was
-    classified, so the report may say only that the failure was unrecognised and was retried
-    — and it is gated on the operation, because a permanent `iam:CreateRole` denial reaches
-    the same handler and stays terminal on its first attempt. The budget
+    own words in `statusReason`. The floor matters because the pinned shapes are the service's
+    wording, and that wording changes: a propagation message phrased around `assumption`
+    matches no shape built around `assume`, and without the floor every `POST
+    /configurations` would fail on its first attempt. With it, a phrasing nobody has
+    enumerated costs one slow success rather than an immediate permanent failure. The floor's
+    label claims no cause — nothing was classified, so the report says only that the failure
+    was unrecognised and was retried — and it is gated on the operation, because a permanent
+    `iam:CreateRole` denial reaches the same handler and must stay terminal on its first
+    attempt. The budget
     is wall-clock — `_TRANSIENT_BUDGET_SECONDS`, 90 seconds, carried as a `retryDeadline` in
     the message body — not a count of attempts; retries are new SQS messages.
 16. **`iam:TagRole` must not carry the `iam:PermissionsBoundary` condition** —
@@ -525,8 +520,9 @@ reintroduced one. Each gets a comment and a regression test.
     `_base_env()` (which builds its env from nothing, so it copies the whole
     `GIT_CONFIG_*` group back explicitly) and every subagent's inherited `Bash`.
     git 2.39 supports **no glob** in `safe.directory`; never use `*`. Probe the
-    root with a real throwaway `git init` — `mkdir` succeeding is what let three
-    tasks die 30 s later.
+    root with a real throwaway `git init`: `mkdir` succeeding proves the directory is
+    writable, not that git will accept it, so a probe that stops at `mkdir` passes and the
+    task fails seconds later.
 26. **A Dockerfile `ENV` cannot be unset by a runtime's `environmentVariables`** —
     only overridden. `WORK_ROOT` is therefore forwarded by the provisioner and
     **not** baked into the image.
@@ -562,39 +558,28 @@ reintroduced one. Each gets a comment and a regression test.
     `git_config_env()`. One private `_run` for both the verify and setup commands,
     so the two cannot drift, and the absence is pinned by a parametrised test.
 32b. **The container exports no metrics, and no handler names a CloudWatch action** —
-    `CLAUDE_CODE_ENABLE_TELEMETRY` is the only variable that turns the Claude Code
-    CLI's OTLP exporter on, and it is pinned `"0"` in two places: fleet policy in
+    `CLAUDE_CODE_ENABLE_TELEMETRY` is the only variable that turns the Claude Code CLI's
+    OTLP exporter on, and it is pinned `"0"` in two places: fleet policy in
     `provisioner._fleet_environment`, so a deploy converges it, and a literal in
-    `subagents.build_options`' `env`, which is what holds on a local run and on a
-    runtime that has not converged. No `OTEL_*` variable is set anywhere, and
+    `subagents.build_options`' `env`, which is what holds on a local run and on a runtime
+    that has not converged yet. No `OTEL_*` variable is set anywhere, and
     `tests/test_api_grant_contract.py::test_no_handler_names_a_cloudwatch_action_at_all`
-    holds the other half: nothing under `api/` reads or writes a metric, nor mints a
-    policy letting the container do so.
+    holds the other half: nothing under `api/` reads or writes a metric, nor mints a policy
+    that would let the container do so.
 
-    This was **CloudWatch Coding Agent Insights, and it was removed** — the reason is
-    the invariant, because the implementation looked like it worked. The container ran
-    an in-container ADOT collector that SigV4-signed the CLI's metrics to
-    `monitoring.<region>.amazonaws.com/v1/metrics` with the execution role. Measured
-    end to end: the collector started and bound `127.0.0.1:4318`, accepted a metric
-    (`200 {"partialSuccess":{}}`), logged no export error, and a directly signed POST
-    to that endpoint answered `200 {}` — so **not** an access problem — yet no metric
-    appeared in any namespace. The reason is that AWS documents exactly two paths, and
-    this was neither: the CLI posting directly with a **bearer token**, which is a
-    long-term IAM-user credential this container's whole credential story ("one
-    repository-scoped PAT, never in the environment") refuses, or a vendor gateway,
-    which invariant 33's DNS Firewall blocks by name. The dashboards also read a
-    Prometheus-compatible store queried by **PromQL** rather than `ListMetrics`, and
-    they dimension on identity attributes (`user.email`, `team.id`, `department`,
-    `cost_center`, `organization`) this repository had no way to populate.
+    An exporter is not a default to switch on. Reaching CloudWatch from the CLI requires
+    either a bearer token, which is a long-term IAM-user credential this container's
+    credential story refuses (one repository-scoped PAT, never in the environment), or a
+    vendor gateway, which invariant 33's DNS Firewall blocks by name. Adding one means
+    choosing a receiver and an egress destination first, plus the
+    `cloudwatch:PutMetricData` grant and the matching permissions-boundary widening —
+    which takes the container's reachable services from four to five.
 
-    So the removal took all six limbs at once, because each is silent alone: the collector
-    and its configuration out of the image, the `ENABLE_OTEL_COLLECTOR` and
-    `ADOT_COLLECTOR_VERSION` build args, the `otelMetricsEnabled` context key and its thread
-    through both stacks, the container's own telemetry module, the five `OTEL_*` fleet
-    variables, and the `cloudwatch:PutMetricData` grant with the `MayPublishAgentMetrics`
-    boundary widening that ceilinged it — which is what takes "What remains exposed" back
-    from five reachable things to **four**. Reintroducing an exporter means choosing a
-    receiver and an egress destination *first*; it is not a default to flip.
+    Removing a fleet variable is not the inverse of adding one. `_desired_runtime` merges
+    `{**create-time, **live, **fleet}`, so a key dropped from `_fleet_environment` stops
+    being converged and the live value is carried forward for the rest of the runtime's
+    life. `provisioner.RETIRED_FLEET_KEYS` is the tombstone list that removes one, and the
+    five `OTEL_*` names are in it.
 33. **No role may reach the network, and no vendor endpoint may be reached** —
     `WebFetch`/`WebSearch` stay out of `ALLOWED_TOOLS`, the CLI's suppression
     variables stay in `_container_environment`, and the DNS Firewall deny list
@@ -614,9 +599,9 @@ reintroduced one. Each gets a comment and a regression test.
     `mcp/`, and a commit's sha does not exist until the commit does. So a change under
     `mcp/` lands as **two commits pushed together** — the change, then the re-pin naming
     it — and a lone commit that edits `mcp/` is a red suite with nothing in the working
-    tree to fix. Plan any `mcp/` change that way; the alternative a hurried reader reaches
-    for is a pin on a sha that is local-only or invented, which passes the shape check,
-    installs nothing from GitHub, and is exactly the silence invariant 34 exists to stop.
+    tree to fix. Plan any `mcp/` change that way. A pin on a sha that is local-only or
+    invented passes the shape check, installs nothing from GitHub, and is exactly the
+    silent failure this invariant exists to prevent.
 35. **The suite only runs from `.venv`** — so `verifyCommand` for this repo is
     `make test`, not `python -m pytest -q`, and `setupCommand` is `make setup`.
     A wrong *verify* command is a red exit the loop can react to; a wrong *setup*
@@ -644,24 +629,19 @@ reintroduced one. Each gets a comment and a regression test.
     policy are fixed by AWS, so this is not the widening invariant 17 fences. It is a
     *separate* statement, because `MintExecutionRoles`'s `iam:PermissionsBoundary`
     condition would never match a role that carries no boundary (invariant 16's lesson).
-    The other half is the report: retryability is an **allowlist** of error code plus the
-    operation that produced it plus, for propagation, a closed set of pinned message shapes,
-    and everything unrecognised is retried exactly once — the allowlist's floor — and is then
-    terminal with the vendor's own words in `statusReason` — inside a wall-clock budget rather
-    than a count of attempts. The floor is what keeps a gap in the enumeration cheap: the live
-    propagation message says the trust policy allows `assumption` by this service and every
-    pinned shape said `assume`, so a missing shape cost the ability to create any
-    configuration at all; one retry makes the next unenumerated phrasing cost one slow success
-    instead. It claims no cause of its own, and it does not reach an `iam:CreateRole` denial
-    raised into the same handler. What
-    this replaced was keyword matching on the vendor's prose, whose default was *retry*:
-    anything containing `assume` and none of four permanent-cause phrases, so every
-    permanent cause nobody had met yet was retryable by omission. That turned `Failed
-    creating service linked role` into ten attempts over 26 minutes that then blamed an
-    execution role that was never the problem — the third such lie. A
-    permanent cause gets a named predicate, `FAILED`, and a `statusReason` naming itself,
-    and it returns rather than raises: a raise leaves the item `PENDING` with no reason
-    and only a DLQ body, and the operator reads `statusReason`.
+    The other half is the report, and it follows invariant 15: retryability is an
+    **allowlist** of error code plus the operation that produced it plus, for propagation, a
+    closed set of pinned message shapes, with everything unrecognised retried exactly once and
+    then terminal with the vendor's own words in `statusReason`, inside a wall-clock budget
+    rather than a count of attempts.
+
+    Classifying by keyword over the vendor's prose does not work here, and the failure is
+    one-directional: a default of *retry* makes every permanent cause nobody has enumerated
+    retryable by omission, so `Failed creating service linked role` becomes a long series of
+    attempts that then reports an execution role which was never the problem. So a permanent
+    cause gets a named predicate, `FAILED`, and a `statusReason` naming itself — and it
+    returns rather than raises, because a raise leaves the item `PENDING` with no reason and
+    only a DLQ body, while an operator reads `statusReason`.
 38. **Every run has a card** — `api/src/handlers/tasks.py::create` reads the configuration,
     then creates the card, then queues the run, then records the run on the card, in that
     order. The card is `api/src/handlers/cards.py::create_claimed`'s: born `ACTIVE` with
@@ -686,10 +666,10 @@ reintroduced one. Each gets a comment and a regression test.
     by queueing a `CHECK`, each `CHECK` queues the next, and it terminates only by writing
     `READY` or `FAILED`. So **one lost SQS message strands a configuration forever**, and
     there is nothing to redeliver, because the message that would have been redelivered is
-    the one that never arrived. Seen live: twelve minutes of `CREATING`, an empty DLQ, an
-    enabled event-source mapping, no Lambda invocation at all, and one hand-injected `CHECK`
-    promoted it to `READY` in fifteen seconds. `watchdog._sweep_configuration` is that hand,
-    and three things about it are the invariant rather than the implementation. **The driver
+    the one that never arrived. The symptom is a configuration sitting at `CREATING` with an
+    empty DLQ, an enabled event-source mapping and no Lambda invocation, and a single
+    injected `CHECK` clears it in seconds. `watchdog._sweep_configuration` sends that
+    message, and three things about it are the invariant rather than the implementation. **The driver
     map is the safety argument**: `watchdog.CONFIG_DRIVERS` re-sends only `CHECK` (a pure read
     plus a status write) and `DELETE` (idempotent by construction — every removal in
     `provisioner._delete` tolerates an already-gone resource). `PENDING` is **absent from it
@@ -724,13 +704,11 @@ mint a second memory; and `tags` as a **map**, `{"rca:configId": ..., "rca:repos
 — not `create_role`'s list of `{"Key": ..., "Value": ...}` pairs, because `CreateMemory`'s
 `tags` member really is a map in the service model.
 
-**Three things about memory are unmeasured, and this is the only place that says so.** No live
-run has shown a memory written by one task being recalled by another, so the feature is
-implemented and undemonstrated. The two strategies' extraction quality is a default nobody has
-judged. And the **90**-day `eventExpiryDuration` is a default too: a memory silently empties
-after a quarter, and no run has been alive long enough to see it happen. `README.md` used to
-carry this in a `## Known gaps` section; that section was removed, so an admission that is not
-written here is written nowhere.
+**Three things about memory are unmeasured, and this is where that is recorded.** No live run
+has shown a memory written by one task being recalled by another, so the feature is implemented
+and undemonstrated. The two strategies' extraction quality is a default nobody has judged. And
+the **90**-day `eventExpiryDuration` is a default too: a memory silently empties after a
+quarter, and no run has been alive long enough to see it happen.
 
 It runs **before** `provisioner._ensure_role`, because the inline policy that role gets has to
 name the memory's exact ARN. It is idempotent the way `_ensure_role` is: a stored `memoryId`
@@ -904,18 +882,31 @@ not create one"), and `mcp/src/rca_mcp/format.py::repository` prints a `memory:`
 states, because a `memory:` line that is absent cannot be told from a field that was not in
 the payload.
 
-## What was probed against the pinned SDK, and what came back
+## What this depends on in the pinned SDK
 
-Four things the documentation does not answer were measured here rather than assumed,
-against `claude` **2.1.235** on `PATH`, the **2.1.236** CLI bundled inside
-`claude-agent-sdk` **0.2.141**, and live Bedrock credentials. Each answer below carries
-its reproduction, so it can be re-run after an SDK or CLI bump instead of trusted
-forever. Re-run them if either version moves: three of the four changed the design.
+Four behaviours of the Claude Code CLI and the Agent SDK shape the code around them, and
+none is documented. They were verified against `claude` **2.1.235** on `PATH`, the
+**2.1.236** CLI bundled inside `claude-agent-sdk` **0.2.141**, and Bedrock. Re-check them
+when either version moves, because three of the four decide a design choice here.
 
-### 1. The SDK never passes `--bare`, and the `/goal` half was probed on the `PATH` CLI
+### 1. No role invokes a slash command
 
-`--bare` disables the hooks system, and `/goal` is built on hooks. Every flag the SDK
-appends was enumerated:
+An input that begins with a slash command is treated as a *command invocation*, so
+everything after it becomes that command's argument rather than a prompt the model answers
+— a session given `/goal <condition>` followed by a coding prompt returns without making a
+model call, and reports success.
+
+So the goal condition travels in the coding session's **system prompt**
+(`agent/src/coding_agent/nodes/code.py`'s `GOAL_SYSTEM_PROMPT`, selected by
+`cfg.goal_enabled`) with nothing prefixed to the prompt itself. A session that produced no
+text at all raises `RoleError` from `agent/src/coding_agent/subagents.py::run_role`, so a
+session that did not run is loud rather than empty.
+`tests/test_agent_nodes.py`'s goal-on / goal-off parametrisation and
+`tests/test_subagents.py::test_a_session_that_produced_nothing_is_a_failed_session` hold
+both halves.
+
+The flags the SDK passes are worth knowing when changing session options, and they can be
+enumerated from the installed package rather than guessed:
 
 ```bash
 grep -o '"--[a-z-]*"' \
@@ -923,140 +914,72 @@ grep -o '"--[a-z-]*"' \
   | sort -u
 ```
 
-That gives 32 flags — `--add-dir --append-system-prompt --betas --continue --effort
---fallback-model --fork-session --include-hook-events --include-partial-messages
---input-format --json-schema --max-budget-usd --max-thinking-tokens --max-turns
---mcp-config --model --output-format --permission-mode --permission-prompt-tool
---plugin-dir --session-mirror --settings --strict-mcp-config --system-prompt
---system-prompt-file --task-budget --thinking --thinking-display --tools --verbose` —
-and `--bare` is not among them. That half is a property of the SDK's own
-`subprocess_cli.py`, so it holds for whichever CLI the SDK launches. The other half is
-scoped narrower than it looks: `goal` appearing in the init message's `slash_commands`
-was observed against **`claude` 2.1.235 on `PATH`**, and the container does not run that
-binary. It runs the SDK's *bundled* CLI, `claude_agent_sdk/_bundled/claude`, which
-announces itself in the runtime logs as "Using bundled Claude Code CLI" — a different
-artefact from the one probed. So what was measured is that the SDK appends no `--bare`
-and that `/goal` is registered on the CLI on `PATH`; the container's binary was not the
-one probed, and nothing here says whether `/goal` is registered in it. The risk it guards
-against is a *future* CLI or SDK default, and nothing here depends on the answer any more:
-**no role invokes a slash command at all**. `CODE_GOAL_ENABLED` is still the switch and
-still defaults on, but `cfg.goal_enabled` now selects a system prompt rather than a command
-(`agent/src/coding_agent/nodes/code.py`'s `GOAL_SYSTEM_PROMPT`), and a session that made no
-model call raises `RoleError` from `agent/src/coding_agent/subagents.py::run_role`
-("produced no text at all, so the session did not run") instead of surfacing later as the
-no-op guard in `nodes/code.py`. Held by `tests/test_agent_nodes.py`'s goal-on / goal-off
-parametrisation (`test_the_coding_instructions_survive_the_goal_switch`) and
-`tests/test_subagents.py::test_a_session_that_produced_nothing_is_a_failed_session`.
+That lists 32 flags. `--bare`, which would disable the hooks system, is not among them.
 
-### 2. `/security-review` has a silent empty success, and neither pass is machine-readable
+### 2. The review passes are advisory, and their output is not a contract
 
-`/security-review` is a prompt template whose body opens with a shell pre-command,
-``!`git log --no-decorate origin/HEAD...` ``. Everything below follows from that.
+`nodes/review.py` runs `/security-review` and `/code-review`. Neither is documented as
+machine-readable, so both outputs are parsed **heuristically**: a findings count is an
+indication, and a wording change upstream degrades to a wrong number rather than to an
+exception. Neither pass touches `verified`, which has exactly one writer (invariant 6b).
 
-- **Where `refs/remotes/origin/HEAD` does not resolve, it aborts before any model call**
-  and the CLI still reports `subtype: "success"`, `is_error: false`, `num_turns: 0`,
-  `total_cost_usd: 0`, `terminal_reason: null` and **`result: ""`**, in about 100 ms, with
-  the git error delivered out of band as a `<local-command-stderr>` user message. That is
-  a no-op that reads as a clean pass — the exact class of confident-looking green this
-  project exists to avoid. A plain local clone and a `git init` scratch repo both lack
-  that ref, so `git_ops.has_origin_head` is checked before the pass runs and the reason is
-  written to the artefact when it is missing.
-- **Where the ref does resolve, it copes with an uncommitted-only diff.** It found a
-  `shell=True` injection living only in the working tree while the `origin/HEAD...` commit
-  range was empty. 3 turns, $0.21.
-- **Observed output shape**, heuristic and never a contract — a `# Security Review`
-  heading, then one block per finding:
+Four properties the parsing depends on:
 
-  ```text
-  ## Vuln 1: Command injection via unsanitised input: `app.py:42`
-  * **Severity: HIGH**
-  * **Category:** `command_injection`
-  * **Confidence:** 9/10
-  ```
-
-  followed by Description, Exploit Scenario and Recommendation prose. It applies a
-  **confidence ≥ 8** bar and states secrets on disk as a hard exclusion, so it is not a
-  substitute for secret scanning.
-- **`/code-review` returned `num_turns: 0` while producing 1234 characters of real
-  findings and costing $0.157.** So `num_turns` is worthless as a did-it-run signal for
-  these commands: the only reliable one is a **non-empty `result`**, and an empty one is
-  recorded as "the pass did not run", never as "no findings". `/code-review` needs no
-  `origin/HEAD` — it adapted to "no upstream, the change is uncommitted" — and it prints
-  **absolute paths** (`/tmp/pb2/work/app.py`), so the clone directory is scrubbed out of
+- **A non-empty `result` is the only reliable did-it-run signal.** `num_turns` reports `0`
+  on a pass that produced real findings, so an empty `result` is recorded as "the pass did
+  not run" and never as "no findings".
+- **`/security-review` needs `refs/remotes/origin/HEAD`.** Its body opens with a shell
+  pre-command over `origin/HEAD...`; where that ref does not resolve the pass aborts before
+  any model call and still reports success with an empty result. `git_ops.has_origin_head`
+  is checked first, and the reason is written to the artefact when the ref is missing.
+- **`/code-review` prints absolute paths**, so the clone directory is scrubbed out of
   anything that reaches a pull-request body.
-- **A leading `/goal` consumed the whole coding prompt, and the session still reported
-  success.** In the live walkthrough the coding role's input began with
-  `/goal <condition>` on its own first line and the real coding prompt below it. The
-  session came back with **0 turns, $0.00, in 2.2 seconds**, `subtype: "success"` and
-  `error=False`, and wrote **no cost row at all** — the task item's `costs` array held
-  only the `plan` row. The same repository and the same prompt with
-  `CODE_GOAL_ENABLED=0` produced **9 turns and $0.17**. The CLI treats an input that
-  begins with a slash command as a *command invocation*, so everything after it becomes
-  that command's argument rather than a prompt the model answers. The fix is
-  `nodes/code.py`'s `GOAL_CONDITION`, carried in the coding session's **system prompt** as
-  `GOAL_SYSTEM_PROMPT` and passed `system_prompt=GOAL_SYSTEM_PROMPT if cfg.goal_enabled
-  else None`, with **nothing prefixed to the prompt** — which is what makes the prompt
-  survive. This is the same lesson as `/code-review`'s arriving through a different door:
-  `num_turns`, `subtype` and `is_error` all reported a clean run, and the only thing that
-  disagreed was the output — no cost row, because there was nothing to charge for.
+- **`/security-review` applies a confidence bar and excludes secrets on disk**, so it is
+  not a substitute for secret scanning.
 
-The rule that follows, and it is in `nodes/review.py` as a docstring: parse both outputs
-**heuristically, never as a contract**. Neither is documented as machine-readable, so a
-findings count is an indication and a wording change upstream must degrade to a wrong
-number rather than to an exception. Both passes are **advisory**: they never touch
-`verified`, which has exactly one writer.
+### 3. `TodoWrite` and `Agent` are not in `ALLOWED_TOOLS`
 
-### 3. `TodoWrite` is not in the session's init tool list, and neither is `Agent`
+A session started with those names in `--tools` does not expose them: the `system:init`
+message lists `Bash`, `Edit`, `Glob`, `Grep`, `Read`, `Skill`, `Task` and `Write` only.
+Unknown names in `--tools` are accepted silently, so a stale name fails as an absent tool
+rather than loudly.
 
-Run with `--tools "Read,Write,Edit,Grep,Glob,Bash,Skill,Task,Agent,TodoWrite"`, the
-`system:init` message reports exactly
-`['Bash','Edit','Glob','Grep','Read','Skill','Task','Write']`. Two consequences:
+`ALLOWED_TOOLS` is what the prompt's tool paragraph is generated from, so a name the
+session does not expose would make the prompt promise a tool the role does not have.
+Subtask breakdown is delivered by fan-out to the `implementer` subagent instead.
 
-- **Unknown names in `--tools` are silently tolerated** — no error — so a stale or
-  misspelled name fails as an absent tool and never loudly.
-- **`TodoWrite` and `Agent` are therefore not in `ALLOWED_TOOLS`.** That tuple is what the
-  prompt's tool paragraph is generated from, so adding a name the session does not expose
-  would make the prompt promise a tool the role does not have — the precise failure
-  generating the paragraph exists to prevent. The loss is nothing: fan-out to the
-  `implementer` subagent already delivers subtask breakdown through a supported primitive,
-  and `TodoWrite`'s output was never going to be parsed as a contract anyway.
+The `Task` → `Agent` rename in Claude Code v2.1.63 matters where the message stream is
+read: `activity.SUBAGENT_TOOL_NAMES` checks **both** names, because current releases emit
+`"Agent"` in tool-use blocks while the init list still says `"Task"`.
 
-The `Task` → `Agent` rename in Claude Code v2.1.63 lands where it matters instead: code
-that reads the message stream checks **both** names, via
-`activity.SUBAGENT_TOOL_NAMES`, because current releases emit `"Agent"` in tool-use
-blocks while the init tool list above still says `"Task"`.
+### 4. `total_cost_usd` is populated on Bedrock
 
-### 4. `total_cost_usd` arrives populated on Bedrock
+Sessions report a cost with `model_usage[...]["provider"] == "bedrock"`, so
+`graph._instrument` tags each session's cost with its node name and writes it to the task
+item. Two caveats travel with the number wherever it appears, including beside
+`subagents.cost_row`:
 
-`0.02556625` on a one-turn call and `0.2059445` on a `/security-review`, with
-`model_usage[...]["provider"] == "bedrock"`. So `graph._instrument` can tag each session's
-cost with its node name and write it to the task item. Two caveats travel with the number
-everywhere it appears, including beside `subagents.cost_row`:
-
-- **It is a client-side estimate** from a price table bundled in the SDK, so it drifts from
+- It is a **client-side estimate** from a price table bundled in the SDK, so it drifts from
   billing whenever pricing or the SDK version changes. Use it for operational budgeting,
-  **not for invoicing**.
-- **`usage` excludes subagents while `model_usage` does not.** That difference is
-  invisible until fan-out is switched on, and then it is the whole difference.
+  not for invoicing.
+- **`usage` excludes subagents while `model_usage` does not.** The difference only shows up
+  once fan-out is on, and then it is the whole difference.
 
-`model_usage` is a plain dict keyed by model id whose `costUSD` is a **float**, and the
-DynamoDB resource API refuses a float anywhere in an item, so `store._ddb_safe` over the
-cost rows is mandatory rather than tidy.
+`model_usage` is keyed by model id and its `costUSD` is a **float**, which the DynamoDB
+resource API refuses anywhere in an item — so `store._ddb_safe` over the cost rows is
+required rather than tidy.
 
-### Two things that were not measured, said plainly
+### Two things this repository does not claim to have measured
 
-- **Fan-out has never been measured here.** The `implementer` subagent on the `code` role
-  is a demonstration of a Claude Code capability, not a claim that it makes this agent
-  produce better changes. `FANOUT_MAX_BUDGET_USD` is a runaway backstop chosen to bound a
-  loop that misbehaves, not a figure observed from a run; and `FANOUT_TASK_BUDGET` rides a
-  beta header this SDK cannot even name, so it may be silently inert on Bedrock and is a
-  pacing hint at best.
-- **`code` on Sonnet is unmeasured too.** Per-role routing puts `plan`/`replan`/`review` on
-  Opus and `code` on Sonnet, and effort stays `high`: invariant 8's measurement — a coding
-  role at `medium` reporting a task complete with zero edits — was made on Opus and does
-  not transfer to Sonnet. What makes the experiment safe is the no-op guard in
-  `nodes/code.py`: if the cheaper model under-performs to the point of changing nothing,
-  the run raises instead of passing quietly.
+- **Fan-out.** The `implementer` subagent on the `code` role demonstrates a Claude Code
+  capability; nothing here claims it produces better changes. `FANOUT_MAX_BUDGET_USD` is a
+  backstop chosen to bound a runaway loop rather than a figure from a run, and
+  `FANOUT_TASK_BUDGET` rides a beta header this SDK cannot name, so it may be inert on
+  Bedrock and is a pacing hint at best.
+- **`code` on Sonnet.** Per-role routing puts `plan`/`replan`/`review` on Opus and `code`
+  on Sonnet at `high` effort. Invariant 8's measurement was made on Opus and does not
+  transfer. The no-op guard in `nodes/code.py` is what bounds the risk: a role that changes
+  nothing raises instead of reporting success.
 
 ## Only register repositories you trust
 
@@ -1193,12 +1116,12 @@ The default is a **`global.` inference profile**, and a `global.` profile may se
 request from **any commercial AWS region**. That does not break zero retention and
 shares nothing with the vendor — it is still Bedrock, still the customer's account,
 still not retained — but it **does** break **data residency**, which is a different
-claim and often the contractual one. Conflating the two is the dishonest move, so:
-this deployment keeps zero retention everywhere and keeps residency only if you pin it.
+claim and often the contractual one. The two are worth keeping apart: this deployment keeps
+zero retention everywhere, and keeps residency only if you pin it.
 
 A residency-constrained deployment must pin a **geo-scoped** profile (`us.` / `eu.` /
 `apac.`) and deploy in a region where one exists for its model. The reason the default
-is `global.` is concrete rather than lazy: `apac.anthropic.claude-opus-5` does not
+is `global.` is an availability constraint: `apac.anthropic.claude-opus-5` does not
 exist, and bare `anthropic.claude-opus-5` rejects on-demand invocation, so from
 `ap-southeast-1` the `global.` profile is the only thing that works for that model.
 
@@ -1307,54 +1230,35 @@ than one that does not. Four things are still true after everything above.
   repository-scoped token, and branch protection are what bound them, and nothing further is
   coming to help.
 
-### Static scanners: 29 findings, 13 retired and 16 suppressed
+### Static analysis suppressions
 
-An artifact scan of this tree — Bandit plus Semgrep OSS, August 2026 — returned **29 HIGH
-findings and not one real vulnerability**. This is where that triage lives, because the
-alternative is deriving it again from the next report. Neither scanner is run by `make lint`,
-which is ruff, oxlint and mypy; they belong to the artifact scan, so nothing local goes red when
-a suppression is added and only a reader holding a report ever sees one. `ruff.toml` carries the
-sibling decision for the same reason — `S105`/`S106` are deliberately not selected because every
-one of them is a test-fixture token.
+`make lint` is ruff, oxlint and mypy. Bandit and Semgrep are not run by it — they belong to
+an artifact scan — so a suppression added for them turns nothing red locally and is only
+visible to a reader holding a report. `ruff.toml` makes the sibling decision for the same
+reason: `S105`/`S106` are deliberately not selected, because every match is a test-fixture
+token.
 
-**13 of the 29 were retired rather than suppressed, and the mechanism is worth knowing** because
-it is the cheapest fix available for this whole class. `B105`/`B106` fire on a *literal* — one
-assigned to a name containing `token`, `secret`, `pass` or `pwd`, passed as such a keyword
-argument, or filed under such a dict key. Behind a name they do not fire at all. So the fake PATs
-live in `tests/conftest.py` as `FAKE_PAT`, `FAKE_FINE_GRAINED_PAT`,
-`FAKE_FINE_GRAINED_REPLACEMENT_PAT` and `FAKE_UNLOGGED_PAT`, which is where `CLAUDE.md` already
-said fake credentials belong, and the nine test modules that had their own copies now import
-them. Two of the three moto clients passed `aws_secret_access_key="testing"` that the autouse
-`conftest._aws_env` had already put in the environment, so the argument was deleted outright;
-the third is built at *module import*, before any fixture runs, and splats
-`conftest.FAKE_AWS_CREDENTIALS`. `tests/test_api_provisioner.py`'s secret ARN is an f-string
-because a `JoinedStr` is not a literal, and `tests/test_plugin_manifest.py`'s loop variable is
-`word` rather than `token` — it iterates the words of a `git push` line, and the name was the
-only reason the scanner looked. **Nothing was deleted and no test lost coverage**: reaching for
-deletion here would have cost 126 tests, because every one of those literals was a module-level
-constant, and `tests/test_api_fakes.py` is imported by 13 other test modules.
-
-The remaining 16 carried a suppression; **14 are left, in four shapes**, and the count is the
-whole argument. Two went with the metrics collector (invariant 32b) rather than being fixed —
-one `dangerous-subprocess-use-audit` on `telemetry.py`'s `Popen`, and the `B104` on its test —
-which is the cheapest way this class ever shrinks: delete the code.
+Fourteen suppressions remain, in four groups, and each exists because no fix is available
+rather than because the finding is inconvenient:
 
 | Finding | Count | Why no fix exists |
 |---|---|---|
 | `B301`/`B403` on `pickle` | 6 | `agent/src/coding_agent/checkpoint.py`'s accepted exposure, argued in the bullet above and again at `checkpoint._load`; in `tests/test_checkpoint.py` it reads back a file the test just wrote |
 | `B602` and two Semgrep subprocess rules on `agent/src/coding_agent/commands.py` | 3 | `shell=True` in `commands._run` **is** the product: an untrusted repository's own declared `make test`, bounded by the dedicated account, the repository-scoped PAT and `_base_env` |
 | Semgrep `dangerous-subprocess-use-audit` on `tests/test_git_ops.py` and `tests/test_repo_contracts.py` | 3 | list argv, no shell, every element a module constant or a path the test wrote |
-| `B310` on the two `urlopen` calls | 2 | fixed in code — see below — but bandit flags the call site either way |
+| `B310` on the two `urlopen` calls | 2 | pinned in code — see below — but bandit flags the call site either way |
 
-The `B310` pair is the one that changed behaviour rather than gaining a comment.
+Two conventions keep the group honest. **Fake credentials live behind names in
+`tests/conftest.py`** (`FAKE_PAT`, `FAKE_FINE_GRAINED_PAT` and siblings) and are imported by
+the modules that need them, because `B105`/`B106` fire on a literal and not on a name — so
+the cheapest fix for that whole class is a shared constant rather than a suppression. And
+**every suppression names its rule and carries a reason**, beside the marker or on the line
+above it: a bare `# nosec` blankets its whole line, including the next real finding to land
+there.
+
+The `B310` pair is pinned in code rather than explained away.
 `agent/src/coding_agent/github.py::_request` and `api/src/handlers/github_probe.py::_request`
-now refuse a URL that is not under `_API_ROOT`, raising `GitHubError` and `ProbeUnavailable`
-respectively. It was already true that no other scheme or host was reachable, but only because
-every caller happened to build on the constant — and both functions set an `Authorization`
-header carrying the PAT, so a URL naming another host hands the token to it, and `urlopen`
-honours `file:`. The guard makes the suppression's reason structural instead of conventional.
-
-**Every suppression names its rule and carries a reason**, beside the marker or in the comment
-line directly above it. A bare `# nosec` blankets its whole line, including the real finding that
-lands there next — which is the one way this triage could turn into the thing it was written to
-prevent.
+refuse a URL that is not under `_API_ROOT`, raising `GitHubError` and `ProbeUnavailable`.
+Both set an `Authorization` header carrying the PAT, so a URL naming another host would hand
+the token to it, and `urlopen` honours `file:` — the guard makes the suppression's reason
+structural instead of conventional.

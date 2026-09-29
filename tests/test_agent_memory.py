@@ -8,7 +8,7 @@ and a *session* record belongs to the task (`/rca/<configId>/session/<taskId>`).
 out of a single pairing on the write -- `actorId` is the configuration id, `sessionId` is
 the task id, deliverable D6 -- and getting it backwards does not fail: every namespace
 still resolves, just to somewhere no reader looks. The two templates are also written down
-in the provisioner under another card, so they are pinned here as exact literals.
+in the provisioner, so they are pinned here as exact literals.
 
 **Both halves of the namespace contract, in one file.** A retyped literal only pins the
 half that retyped it, and retyping is the failure being prevented -- so this file now also
@@ -246,9 +246,8 @@ def test_the_session_namespace_is_one_per_task() -> None:
 def test_the_namespace_templates_are_the_provisioners_spelling() -> None:
     """The two templates are half of a contract with the card that creates the resource."""
     assert EPISODIC_NAMESPACE == "/rca/{actorId}/episodic", (
-        "the provisioner configures the memory resource with these same two templates under "
-        "another card, so a change here is a change to a contract whose other half is not in "
-        "this file -- and a mismatch does not fail, it makes retrieval silently return "
+        "the provisioner configures the memory resource with these same two templates, so a "
+        "change here is a change to a contract whose other half is not in this file -- and a mismatch does not fail, it makes retrieval silently return "
         "nothing, forever, with no error and no warning"
     )
     assert SESSION_NAMESPACE == "/rca/{actorId}/session/{sessionId}"

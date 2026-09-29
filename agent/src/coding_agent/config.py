@@ -53,8 +53,8 @@ MODEL_RE = re.compile(
 # The four model variables the provisioner forwards into every runtime, named here so the
 # agent side has one owner for the contract rather than four strings scattered across two
 # deployment units. `api/src/handlers/provisioner._fleet_environment` ALREADY sets all
-# four -- this tuple documents and asserts the agent's half of the deal, and that file
-# belongs to another card, so it is pointed at rather than edited.
+# four -- this tuple documents and asserts the agent's half of the deal, and the other half
+# lives in a separate deployment unit, so it is pointed at rather than edited.
 #
 # The three alias variables matter because `ROLES` routes by alias: with
 # `ANTHROPIC_DEFAULT_OPUS_MODEL` unset, `model="opus"` is resolved by the CLI to whatever

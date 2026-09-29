@@ -113,17 +113,13 @@ never mandatory:
 # Coding role only: `plan` and `review` each produce one artefact and have nothing to
 # iterate toward, so a goal there would be a condition met the moment the file is written.
 #
-# This used to be sent as a `/goal <condition>` first line of the session input, on the
-# assumption that a slash command is an ordinary SDK input the CLI expands before the model
-# sees it. That assumption is the bug. The CLI treats an input that *begins* with a slash
-# command as a COMMAND INVOCATION, so everything after it becomes that command's argument:
-# `/goal` produced no model turn and swallowed the entire coding prompt -- specification
-# text, verify sentence, tool paragraph, recalled memory and memory digest. Measured against
-# one repository with one prompt and one variable changed, `CODE_GOAL_ENABLED=1` gave 0 turns
-# and $0.00 in 2.2s with `subtype: "success"` and `error=False` (and no cost row at all), while
-# `CODE_GOAL_ENABLED=0` gave 9 turns and $0.17. The symptom was `CodeError: the coding role
-# changed nothing outside .agent/`, which points a reader at the model rather than at the
-# slash command.
+# It must NOT be sent as a `/goal <condition>` first line of the session input. The CLI
+# treats an input that *begins* with a slash command as a COMMAND INVOCATION, so everything
+# after it becomes that command's argument: the entire coding prompt -- specification text,
+# verify sentence, tool paragraph, recalled memory and memory digest -- is consumed, the
+# session makes no model turn, and it still reports `subtype: "success"` with no cost row.
+# The visible symptom is `CodeError: the coding role changed nothing outside .agent/`, which
+# points a reader at the model rather than at the prompt's first line.
 #
 # So the condition now rides in the session's system prompt, which cannot consume the
 # input. Yielding `/goal` as its own user message from an async-iterable `prompt=` was the
