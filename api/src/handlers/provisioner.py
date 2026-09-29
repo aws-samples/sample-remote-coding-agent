@@ -131,6 +131,33 @@ SESSION_NAMESPACE = "/rca/{actorId}/session/{sessionId}"
 MAX_CHECK_ATTEMPTS = 60
 CHECK_DELAY_SECONDS = 30
 
+# Fleet environment variables this code used to send and now actively **removes** from every
+# runtime it updates. A tombstone list, and it exists because deletion is not the inverse of
+# addition here: `_desired_runtime` merges `{**create-time, **live, **fleet}`, so a key
+# dropped from `_fleet_environment` merely stops being converged and the live value is carried
+# forward forever (invariant 24's carry-forward rule, working exactly as intended and against
+# you). An entry here is the only thing that takes a variable off a runtime that already has
+# it.
+#
+# These five configured the OTLP exporter for CloudWatch Coding Agent Insights, removed with
+# the collector they pointed at (invariant 32b). `CLAUDE_CODE_ENABLE_TELEMETRY` is **not**
+# here: it is still fleet policy, pinned `"0"`, so it converges by being sent rather than by
+# being deleted -- which is also why it was the one telemetry variable that *did* update while
+# these five did not.
+#
+# An entry is safe to delete from this list only once no live runtime can still carry the key,
+# which in practice means never: a runtime created before the retirement outlives the deploy
+# that retired it. Leaving them costs one `pop` each.
+RETIRED_FLEET_KEYS = frozenset(
+    {
+        "OTEL_METRICS_EXPORTER",
+        "OTEL_LOGS_EXPORTER",
+        "OTEL_EXPORTER_OTLP_PROTOCOL",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_METRIC_EXPORT_INTERVAL",
+    }
+)
+
 # The transient-failure budget, in wall-clock seconds: "IAM gets 90 seconds". A count of
 # attempts says nothing about how long an operator waits -- the ten geometric sleeps this
 # replaces were 26 minutes -- and the number an operator needs is a duration.
@@ -858,6 +885,19 @@ def _desired_runtime(live: Mapping[str, Any] | None, config: Mapping[str, Any]) 
         **{str(k): str(v) for k, v in (current.get("environmentVariables") or {}).items()},
         **_fleet_environment(),
     }
+    # Retirement, which the merge above cannot express. `{**create-time, **live, **fleet}`
+    # carries forward every key the fleet group does not name -- deliberately, so a key this
+    # version has never heard of survives -- and the mirror of that is that **deleting a key
+    # from `_fleet_environment` does not remove it from a live runtime**. It stops being
+    # converged, so the live value is carried forward for the rest of the runtime's life.
+    #
+    # Measured, not theorised: removing the five `OTEL_*` exporter variables (invariant 32b)
+    # landed a deploy, a `runtime-update` converged `CLAUDE_CODE_ENABLE_TELEMETRY` from `1` to
+    # `0`, and all five `OTEL_*` names were still on the runtime afterwards -- so the
+    # invariant's own claim that no `OTEL_*` variable is set anywhere was false for every
+    # existing runtime, with nothing failing.
+    for name in RETIRED_FLEET_KEYS:
+        environment.pop(name, None)
     desired: dict[str, Any] = {
         "agentRuntimeArtifact": {"containerConfiguration": {"containerUri": AGENT_IMAGE_URI}},
         "roleArn": current.get("roleArn") or str(config.get("executionRoleArn") or ""),
