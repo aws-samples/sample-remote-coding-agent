@@ -842,7 +842,9 @@ def test_a_cancellation_the_route_wrote_is_resolved_by_the_sweep(
     # (`ResourceNotFoundException` is success), so the count is not what is asserted.
     assert len(fake.calls_to("StopRuntimeSession")) >= 1
     assert watchdog._scan() == [], "a resolved task is out of the filter, not logged forever"
-    assert watchdog.lambda_handler({}, None) == {"scanned": 0}
+    # The task half only: the sweep's configuration half is `tests/test_api_watchdog.py`'s,
+    # and asserting its keys here would make this test fail for a reason about another table.
+    assert watchdog.lambda_handler({}, None)["scanned"] == 0
 
 
 # -- the route table --------------------------------------------------------------

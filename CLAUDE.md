@@ -126,7 +126,13 @@ make deploy EMAIL=you@example.com STACK_PREFIX=Foo  # the same deploy as a secon
 
 `make preflight` checks the prerequisites and nothing else: a Docker daemon that
 answers (the agent's ~1.3 GB ARM64 image is built on *this* machine), `uv` on `PATH`,
-a Node new enough for the CDK CLI, `aws sts get-caller-identity` — printing the
+a Node that satisfies **`^20.19 || >=22.12`** — which is **oxlint's** floor and not the CDK
+CLI's, so `make lint` runs the same check (`CHECK_NODE`, one expression both targets share)
+rather than leaving an operator to read npm's `EBADENGINE` about a package they never typed.
+That was a real failure: a pipeline image carried Node 18, `make lint` died inside npm, and
+nothing in the `Makefile` named a version it could have checked — while `NODE_MINIMUM` was a
+bare `20`, which also passes on 20.0 through 20.18 where oxlint does not run. Then
+`aws sts get-caller-identity` — printing the
 account and the region it resolved — whether `cdk bootstrap` has been run in that
 account and region, whether **Bedrock AgentCore answers in that region at all**, and
 whether **every inference profile this deploy forwards into a runtime is `ACTIVE`
@@ -228,9 +234,20 @@ Everything the walkthrough used to attribute inline lives here, in the order an 
 - **Registration is a console page, not a plugin tool.** With zero configurations `web/js/app.js`
   routes straight to `#/register`; afterwards the sidebar's **+ Add repository**
   (`web/js/views/sidebar.js`) is the link. `web/js/views/register.js` `POST`s `/configurations` and
-  on `201` clears the token field, says provisioning takes a couple of minutes, and redirects to
+  on `201` clears the token field, says provisioning takes about ten minutes, and redirects to
   the board. A task started before the runtime reaches `READY` is refused with
   `409 ConfigurationNotReady`.
+- **Provisioning takes 8-12 minutes, and that number is measured rather than estimated.** A V2
+  runtime reached `READY` in **508s** of snapshot preparation, and a live registration polled at
+  585s. It is the *deploy* that takes 15-25 minutes; this is the per-repository step after it.
+  Everything said "2-5 minutes" until the V2 upgrade made that wrong, and an understated wait is
+  not a cosmetic error — an operator who believes it concludes the registration is stuck at
+  exactly the point where waiting is the correct action. The number is spelled in **five** places
+  and they have to move together: `README.md`'s registration step, `mcp/src/rca_mcp/format.py`'s
+  `_NOT_READY_NOTE`, `mcp/src/rca_mcp/server.py`'s `_PROVISIONING_NOTE`, and the two console
+  strings in `web/js/views/register.js` and `web/js/views/sidebar.js`. Nothing pins them to each
+  other, because there is no shared unit to pin them in: two are model-facing tool prose, two are
+  browser strings and one is an operator's README.
 - **The slash command and the drag are one code path** — `tasks.create` and `cards.move` both call
   `runs.queue_run`. The board is live-polled by `web/js/activity.js`, and the task view links to
   that run's log group, `/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`.
@@ -664,6 +681,30 @@ reintroduced one. Each gets a comment and a regression test.
     which asserts a `POST /tasks` run draws in `Planning` and then follows the run through
     `Coding` to `Done`. Not retroactive: task items written before this carry no `cardId`
     and no migration invents one.
+39. **A provisioning chain that loses a message has to be re-driven, and only with a message
+    that is safe to send twice** — the provisioner's chain is self-perpetuating: `CREATE` ends
+    by queueing a `CHECK`, each `CHECK` queues the next, and it terminates only by writing
+    `READY` or `FAILED`. So **one lost SQS message strands a configuration forever**, and
+    there is nothing to redeliver, because the message that would have been redelivered is
+    the one that never arrived. Seen live: twelve minutes of `CREATING`, an empty DLQ, an
+    enabled event-source mapping, no Lambda invocation at all, and one hand-injected `CHECK`
+    promoted it to `READY` in fifteen seconds. `watchdog._sweep_configuration` is that hand,
+    and three things about it are the invariant rather than the implementation. **The driver
+    map is the safety argument**: `watchdog.CONFIG_DRIVERS` re-sends only `CHECK` (a pure read
+    plus a status write) and `DELETE` (idempotent by construction — every removal in
+    `provisioner._delete` tolerates an already-gone resource). `PENDING` is **absent from it
+    on purpose**: its driver is `CREATE`, `create_agent_runtime` takes no `clientToken`, and a
+    re-sent `CREATE` after a runtime was created but its id never stored mints a *second*
+    AgentCore runtime that no item names and nothing tears down — so a stalled `PENDING` is
+    resolved to `FAILED`, which `POST /configurations` can retire and replace (invariant 22),
+    instead. **The threshold is derived, never chosen**:
+    `MAX_CHECK_ATTEMPTS × CHECK_DELAY_SECONDS` is the longest a *healthy* chain is ever
+    non-terminal, so the sweep waits that out plus one tick — below it, every configuration
+    being created is nudged on every tick. **And the cap has to push the count *past* itself**:
+    the scan filter is `<=` the cap so the resolving tick can happen at all, and `_fail_config`
+    writes `MAX_CONFIG_NUDGES + 1`, which is what takes the item out of the filter. Written
+    with `<`, the resolve branch was unreachable and the cap silently meant "stop looking" —
+    caught by its own test, not by review.
 
 ## AgentCore Memory — one per registered repository
 

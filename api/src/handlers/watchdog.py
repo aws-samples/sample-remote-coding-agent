@@ -1,11 +1,22 @@
-"""The liveness sweep: one EventBridge tick every 15 minutes, no HTTP surface.
+"""The liveness sweep: one EventBridge tick every five minutes, no HTTP surface.
 
-Three jobs, in this order per task: *resolve* a cancellation, *stop* the session of a
-task that has finished, and *resume* a task that has gone quiet. The sweep is the only
-thing in the system that can unstick a run whose container died mid-node, so it is
-written to converge -- every branch either writes an attribute the next scan filters on
-(`stoppedAt`, a terminal `status`) or claims a bounded resume. A branch that only logged
-would log the same task every 15 minutes forever.
+**Two tables, and the second half is the newer one.** Per *task*: *resolve* a
+cancellation, *stop* the session of a task that has finished, and *resume* a task that
+has gone quiet. Per *configuration*: re-drive a provisioning chain whose next message was
+lost. Both halves exist for the same reason -- they are the only things in the system that
+can unstick work nothing else will look at again -- and both are written to converge:
+every branch either writes an attribute the next scan filters on (`stoppedAt`, a terminal
+`status`, a nudge count at its cap) or claims a bounded retry. A branch that only logged
+would log the same item every tick forever.
+
+The configuration half closes a bug seen live. The provisioner's chain is
+self-perpetuating: `CREATE` ends by queueing a `CHECK`, each `CHECK` queues the next, and
+the chain terminates only by writing `READY` or `FAILED`. So **one lost SQS message
+strands a configuration in `CREATING` forever** -- there is no redelivery to wait for,
+because the message that would have been redelivered is the one that never arrived. That
+is what happened: twelve minutes of `CREATING` with an empty DLQ, an enabled event-source
+mapping and no Lambda invocation at all, and injecting a single `CHECK` by hand promoted
+it to `READY` in fifteen seconds. Nothing recovered it on its own, and nothing would have.
 
 `lambda_handler` is undecorated and ignores its event: there is nothing in a scheduled
 EventBridge payload this needs, and `@handler` is for the HTTP surface. This module
@@ -23,7 +34,7 @@ from typing import Any
 from boto3.dynamodb.conditions import Attr, ConditionBase
 from botocore.exceptions import ClientError
 
-from . import _common, observability, runs
+from . import _common, observability, provisioner, runs
 from ._common import LOG
 
 # 2700, not 1800: `verify` makes no model call at all, so a *healthy* verification emits
@@ -70,6 +81,54 @@ _STOP_ATTEMPTS = 3
 # `runs.py` names only the two statuses it writes itself; this is the one the watchdog
 # writes, and it is the same string `runs.TERMINAL_STATUSES` carries.
 _FAILED = "FAILED"
+
+
+# -- the configuration half --------------------------------------------------------
+
+# Which provision message re-drives each stalled status, and the mapping IS the safety
+# argument: a message may only be re-sent when sending it twice is indistinguishable from
+# sending it once.
+#
+# * `CHECK` is a pure read of the live runtime followed by a status write, so a duplicate
+#   costs one `GetAgentRuntime`. `CREATING` and `UPDATING` are both driven by it.
+# * `DELETE` is idempotent by construction: every removal in `provisioner._delete`
+#   tolerates an already-gone resource -- runtime, memory, inline policy, role, secret --
+#   and it ends with the item itself, so a duplicate finds nothing left to do.
+#
+# `PENDING` is deliberately **absent**, and that is the one arm where re-driving is the
+# wrong answer: its driver is `CREATE`, `create_agent_runtime` takes no `clientToken`, and
+# a `CREATE` re-sent after a runtime was created but its id never stored would mint a
+# *second* AgentCore runtime that no configuration item names and nothing ever tears down.
+# A stalled `PENDING` is resolved to `FAILED` instead -- which is a state an operator can
+# clear, because `POST /configurations` retires a `FAILED` item and registers a replacement
+# (invariant 22), where a `PENDING` one has no route out at all.
+CONFIG_DRIVERS: dict[str, str] = {
+    "CREATING": "CHECK",
+    "UPDATING": "CHECK",
+    "DELETING": "DELETE",
+}
+
+# Every status a configuration can sit in without the chain being finished. `READY` and
+# `FAILED` are terminal and are not swept.
+CONFIG_STALLED_STATUSES = frozenset(CONFIG_DRIVERS) | {"PENDING"}
+
+# Derived from the provisioner's own patience rather than chosen, because the failure this
+# must not cause is nudging a chain that is merely slow: `_check` polls
+# `MAX_CHECK_ATTEMPTS` times `CHECK_DELAY_SECONDS` apart and then writes `FAILED` itself,
+# so 1800s is the longest a *healthy* chain is ever non-terminal. One five-minute tick of
+# slack on top means a configuration is only touched here once the chain that owned it is
+# provably gone. V2 provisioning was measured at ~508s, well inside that.
+CONFIG_STUCK_THRESHOLD_SECONDS = (
+    provisioner.MAX_CHECK_ATTEMPTS * provisioner.CHECK_DELAY_SECONDS + 900
+)
+
+# Three nudges, then a reason and no more. The cap is what makes this converge: the tick that
+# resolves an exhausted configuration pushes the count *past* the cap, which is what drops it
+# out of `_scan_configurations`' filter -- so it is not re-logged forever, the failure mode
+# invariant 28 names for the task half.
+MAX_CONFIG_NUDGES = 3
+
+_CONFIG_SCAN_PROJECTION = "configId, #st, provisionNudges, updatedAt, createdAt"
 
 
 def _status_is_one_of(statuses: Iterable[str]) -> ConditionBase:
@@ -349,8 +408,207 @@ def _sweep_task(task: Mapping[str, Any], now: datetime) -> str:  # noqa: PLR0911
     return "resumed"
 
 
+def _scan_configurations() -> list[dict[str, Any]]:
+    """Every configuration whose provisioning chain has not finished and has nudges left.
+
+    The nudge clause is in the *filter* rather than in the loop for the reason the task
+    half writes `stoppedAt`: an exhausted configuration has to leave this scan, or the
+    sweep logs the same stuck item every five minutes for as long as it exists.
+    """
+    stalled = _status_is_one_of(CONFIG_STALLED_STATUSES)
+    # `lte` and not `lt`: a configuration sitting exactly *at* the cap still has to be listed
+    # once, because that is the tick that resolves it and writes the reason an operator reads.
+    # `_fail_config` then pushes the count past the cap, which is what takes it out of here for
+    # good -- with `lt` the resolve branch was unreachable and the whole cap silently meant
+    # "stop looking", which is the failure mode this half exists to remove.
+    not_yet_resolved = Attr("provisionNudges").not_exists() | Attr("provisionNudges").lte(
+        MAX_CONFIG_NUDGES
+    )
+
+    items: list[dict[str, Any]] = []
+    start_key: dict[str, Any] | None = None
+    while True:
+        kwargs: dict[str, Any] = {
+            "ProjectionExpression": _CONFIG_SCAN_PROJECTION,
+            "ExpressionAttributeNames": {"#st": "status"},
+            "FilterExpression": stalled & not_yet_resolved,
+        }
+        if start_key:
+            kwargs["ExclusiveStartKey"] = start_key
+        page = _common.config_table.scan(**kwargs)
+        items.extend(page.get("Items", []))
+        start_key = page.get("LastEvaluatedKey")
+        if not start_key:
+            return items
+
+
+def _config_quiet_seconds(config: Mapping[str, Any], now: datetime) -> float | None:
+    """How long this configuration has sat at its current status, or `None` when nothing on
+    the item parses -- which is a configuration the sweep declines to judge.
+
+    `updatedAt` is the clock here, and unlike the task half that is correct rather than
+    forbidden: `provisioner._set_config` writes it on **every** status write, so it is the
+    chain's own last sign of life, and no index sorts on it (invariant 13's caveat is about
+    the Tasks table's `lastFinished`). `createdAt` covers the item that has never been
+    updated -- which is exactly a `PENDING` one whose `CREATE` never arrived.
+    """
+    for field in ("updatedAt", "createdAt"):
+        stamp = _common.parse_iso(config.get(field))
+        if stamp is not None:
+            return (now - stamp).total_seconds()
+    return None
+
+
+def _config_nudges(config: Mapping[str, Any]) -> int:
+    """DynamoDB hands numbers back as `Decimal`, and a configuration written before this
+    sweep existed has none at all."""
+    try:
+        return int(config.get("provisionNudges") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _claim_config_nudge(config: Mapping[str, Any]) -> bool:
+    """Claim the right to re-drive this configuration. Returns whether this sweep won.
+
+    Pinning the count to the value the scan read is what makes exactly one of two
+    concurrent ticks win, the same shape as `_claim_resume`. The status is pinned too, and
+    that half is not redundant: a chain that moved between the scan and this write has just
+    proved it is alive, so this sweep's nudge is stale and a duplicate message is exactly
+    what the pin exists to avoid sending.
+    """
+    previous = _config_nudges(config)
+    pin = (
+        Attr("provisionNudges").eq(previous)
+        if "provisionNudges" in config
+        else Attr("provisionNudges").not_exists()
+    )
+    try:
+        _common.config_table.update_item(
+            Key={"configId": config["configId"]},
+            UpdateExpression="SET provisionNudges = :next, lastNudgeAt = :now",
+            ExpressionAttributeValues={":next": previous + 1, ":now": _common.now_iso()},
+            # `attribute_exists(configId)` because `update_item` *creates* an absent item
+            # (invariant 23) -- and a torn-down configuration is precisely what this sweep
+            # must not resurrect.
+            ConditionExpression=(
+                Attr("configId").exists() & Attr("status").eq(config.get("status")) & pin
+            ),
+        )
+    except ClientError as err:
+        if not _common.is_condition_failure(err):
+            raise
+        LOG.info("config=%s moved underneath the sweep; not nudged", config["configId"])
+        return False
+    return True
+
+
+def _fail_config(config: Mapping[str, Any], reason: str) -> bool:
+    """Resolve the configuration to `FAILED` with a reason, or -- for a stalled `DELETING`
+    -- record the reason and leave the status alone. Returns whether this sweep won.
+
+    The asymmetry is invariant 22's: a `FAILED` configuration is retired and replaced by
+    the next `POST /configurations`, which is the operator's route out, while a `DELETING`
+    one is a teardown already in flight and must not be retired. So a `DELETING` that has
+    exhausted its nudges keeps its status and gains a `statusReason`; the nudge count at its
+    cap is what stops this repeating, not the status.
+    """
+    stamp = _common.now_iso()
+    # The count goes past the cap unconditionally, and that is what makes this converge for
+    # *both* arms. A `FAILED` status already leaves `CONFIG_STALLED_STATUSES`, but a `DELETING`
+    # one deliberately does not (invariant 22), so without this the resolved teardown would be
+    # listed and resolved again on every tick -- the same reason the task half writes
+    # `stoppedAt` rather than logging.
+    sets = ["statusReason = :reason", "updatedAt = :now", "provisionNudges = :spent"]
+    values: dict[str, Any] = {
+        ":reason": reason,
+        ":now": stamp,
+        ":spent": MAX_CONFIG_NUDGES + 1,
+        ":pin": config.get("status"),
+    }
+    if config.get("status") != "DELETING":
+        sets.append("#st = :failed")
+        values[":failed"] = _FAILED
+    try:
+        _common.config_table.update_item(
+            Key={"configId": config["configId"]},
+            UpdateExpression="SET " + ", ".join(sets),
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues=values,
+            ConditionExpression="attribute_exists(configId) AND #st = :pin",
+        )
+    except ClientError as err:
+        if not _common.is_condition_failure(err):
+            raise
+        LOG.info("config=%s moved underneath the sweep; not resolved", config["configId"])
+        return False
+    LOG.warning("config=%s resolved: %s", config["configId"], reason)
+    return True
+
+
+def _sweep_configuration(config: Mapping[str, Any], now: datetime) -> str:  # noqa: PLR0911 -- the same shape as `_sweep_task`: every return is a guard clause naming one outcome for the tick's summary, and early exit is the readable form
+    """One configuration, one outcome name for the tick's summary."""
+    config_id = str(config.get("configId") or "")
+    status = str(config.get("status") or "")
+    if status not in CONFIG_STALLED_STATUSES:
+        return "terminal"
+
+    quiet = _config_quiet_seconds(config, now)
+    if quiet is None:
+        LOG.warning("config=%s has no readable timestamp; not judged", config_id)
+        return "unreadable"
+    if quiet < CONFIG_STUCK_THRESHOLD_SECONDS:
+        return "working"
+
+    nudges = _config_nudges(config)
+    driver = CONFIG_DRIVERS.get(status)
+    if driver is None:
+        # `PENDING`: its `CREATE` never arrived, and re-sending one risks a second runtime.
+        return (
+            "failed"
+            if _fail_config(
+                config,
+                f"the provisioning chain never started: this configuration sat at {status} for "
+                f"{quiet:.0f}s with no CREATE message. Register the repository again -- a FAILED "
+                f"configuration is retired and replaced by the next registration.",
+            )
+            else "raced"
+        )
+    if nudges >= MAX_CONFIG_NUDGES:
+        return (
+            "exhausted"
+            if _fail_config(
+                config,
+                f"the provisioning chain stalled at {status}: {MAX_CONFIG_NUDGES} re-driven "
+                f"{driver} messages {CONFIG_STUCK_THRESHOLD_SECONDS}s apart did not move it.",
+            )
+            else "raced"
+        )
+
+    if not _claim_config_nudge(config):
+        return "raced"
+    # Through `provisioner.enqueue` and nothing else: it is the single owner of the provision
+    # message shape, so a nudge cannot drift from the message the chain sends itself.
+    provisioner.enqueue(config_id, driver)
+    LOG.warning(
+        "re-drove config=%s status=%s with %s quiet=%.0fs nudge=%d/%d",
+        config_id,
+        status,
+        driver,
+        quiet,
+        nudges + 1,
+        MAX_CONFIG_NUDGES,
+    )
+    return "nudged"
+
+
 def lambda_handler(_event: Any, _context: Any = None) -> dict[str, Any]:
-    """The 15-minute tick. Schedule-driven, so the event carries nothing this reads."""
+    """The five-minute tick. Schedule-driven, so the event carries nothing this reads.
+
+    Both halves run on every tick, and the configuration half runs even if the task half
+    raised: a stranded configuration is what stops any task being started at all, so it must
+    not be gated on the health of the sweep over tasks.
+    """
     now = datetime.now(tz=UTC)
     tasks = _scan()
     outcomes: Counter[str] = Counter()
@@ -359,8 +617,24 @@ def lambda_handler(_event: Any, _context: Any = None) -> dict[str, Any]:
             outcomes[_sweep_task(task, now)] += 1
         except Exception:
             # One malformed or unlucky task must not end the sweep: the sweep is what
-            # unsticks every *other* task, and it only runs four times an hour.
+            # unsticks every *other* task, and it only runs twelve times an hour.
             LOG.exception("watchdog failed on task=%s", task.get("taskId"))
             outcomes["error"] += 1
     LOG.info("watchdog swept %d task(s): %s", len(tasks), dict(outcomes))
-    return {"scanned": len(tasks), **outcomes}
+
+    configs = _scan_configurations()
+    config_outcomes: Counter[str] = Counter()
+    for config in configs:
+        try:
+            config_outcomes[_sweep_configuration(config, now)] += 1
+        except Exception:
+            LOG.exception("watchdog failed on config=%s", config.get("configId"))
+            config_outcomes["error"] += 1
+    LOG.info("watchdog swept %d configuration(s): %s", len(configs), dict(config_outcomes))
+
+    return {
+        "scanned": len(tasks),
+        **outcomes,
+        "configurationsScanned": len(configs),
+        "configurations": dict(config_outcomes),
+    }

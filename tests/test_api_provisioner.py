@@ -172,7 +172,7 @@ def test_create_never_creates_an_endpoint(aws: Any, monkeypatch: pytest.MonkeyPa
     # The runtime is not `READY` yet, so the phase hands off to `CHECK` rather than
     # blocking a Lambda on a poll loop.
     assert _bodies(sent) == [{"phase": "CHECK", "configId": _CONFIG_ID, "attempt": 0}]
-    assert sent[0]["DelaySeconds"] == provisioner._CHECK_DELAY_SECONDS
+    assert sent[0]["DelaySeconds"] == provisioner.CHECK_DELAY_SECONDS
 
 
 def test_create_sends_the_mount_the_lifetime_and_the_work_root(
@@ -1156,7 +1156,7 @@ def test_check_walks_a_creating_runtime_to_ready(aws: Any, monkeypatch: pytest.M
 
     _run(provisioner, "CHECK", attempt=4)
     assert _bodies(sent) == [{"phase": "CHECK", "configId": _CONFIG_ID, "attempt": 5}]
-    assert sent[0]["DelaySeconds"] == provisioner._CHECK_DELAY_SECONDS
+    assert sent[0]["DelaySeconds"] == provisioner.CHECK_DELAY_SECONDS
     stored = _status(common)
     assert stored is not None and stored["status"] == provisioner.CREATING
 

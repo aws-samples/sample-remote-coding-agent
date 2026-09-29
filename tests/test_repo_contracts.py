@@ -553,3 +553,40 @@ def test_the_agent_image_carries_no_metrics_collector() -> None:
         "agent/otel/ is back. It held the collector configuration -- a `sigv4auth` extension, a "
         "loopback OTLP receiver and an `otlphttp` exporter -- and nothing reads it now."
     )
+
+
+def test_mypy_excludes_the_synthesized_cloud_assembly() -> None:
+    """`make lint` must survive a tree that has been deployed from.
+
+    `infra` is one of mypy's four declared bases, `make deploy` synthesizes into
+    `infra/cdk.out/`, and an `ecr_assets.DockerImageAsset` copies the whole agent source tree
+    in there as `asset.<hash>/src/coding_agent/`. Without an exclude mypy finds every module
+    in that package twice and stops with "Source file found twice under different module
+    names", having checked nothing.
+
+    Worth pinning because of how it presents rather than how it breaks: `cdk.out/` is in
+    `.gitignore`, so a clean tree passes, the identical tree one deploy later fails, and
+    `git status` shows nothing that could explain it. The message names an `__init__.py` in a
+    directory the operator has never heard of.
+    """
+    config = (REPO_ROOT / "mypy.ini").read_text(encoding="utf-8")
+    excludes = [
+        line.split("=", 1)[1].strip() for line in config.splitlines() if line.startswith("exclude")
+    ]
+    assert excludes, (
+        "mypy.ini declares no `exclude`, so `make lint` fails on any tree somebody has run "
+        "`make deploy` (or `cdk synth`) in -- see this test's docstring for why that is "
+        "invisible from `git status`"
+    )
+    pattern = re.compile(excludes[0].replace("(?x)", ""), re.VERBOSE)
+    assert pattern.search("infra/cdk.out/asset.abc123/src/coding_agent/state.py"), (
+        f"mypy.ini's exclude {excludes[0]!r} does not match a synthesized asset path. The "
+        f"duplicate it has to keep out is the agent source the Docker image asset copies into "
+        f"cdk.out, not cdk.out's own JSON."
+    )
+    # The exclude must not reach the tree it is meant to leave alone: `agent/src` is checked
+    # through its own base, and an over-broad pattern here would silently stop checking it.
+    assert not pattern.search("agent/src/coding_agent/state.py"), (
+        f"mypy.ini's exclude {excludes[0]!r} also matches the real agent source, so the copy "
+        f"is not what is being skipped -- the package is"
+    )

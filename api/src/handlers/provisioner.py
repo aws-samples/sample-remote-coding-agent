@@ -129,7 +129,7 @@ EPISODIC_NAMESPACE = "/rca/{actorId}/episodic"
 SESSION_NAMESPACE = "/rca/{actorId}/session/{sessionId}"
 
 MAX_CHECK_ATTEMPTS = 60
-_CHECK_DELAY_SECONDS = 30
+CHECK_DELAY_SECONDS = 30
 
 # The transient-failure budget, in wall-clock seconds: "IAM gets 90 seconds". A count of
 # attempts says nothing about how long an operator waits -- the ten geometric sleeps this
@@ -1316,7 +1316,7 @@ def _create(config_id: str, attempt: int, deadline: Any = None) -> None:
         memoryId=memory_id,
         containerUri=AGENT_IMAGE_URI,
     )
-    enqueue(config_id, "CHECK", delay=_CHECK_DELAY_SECONDS)
+    enqueue(config_id, "CHECK", delay=CHECK_DELAY_SECONDS)
 
 
 def _check(config_id: str, attempt: int) -> None:
@@ -1351,11 +1351,11 @@ def _check(config_id: str, attempt: int) -> None:
                 status=FAILED,
                 statusReason=(
                     f"the runtime was still {status} after {MAX_CHECK_ATTEMPTS} checks "
-                    f"{_CHECK_DELAY_SECONDS}s apart"
+                    f"{CHECK_DELAY_SECONDS}s apart"
                 ),
             )
             return
-        enqueue(config_id, "CHECK", attempt=attempt + 1, delay=_CHECK_DELAY_SECONDS)
+        enqueue(config_id, "CHECK", attempt=attempt + 1, delay=CHECK_DELAY_SECONDS)
     else:
         _set_config(config_id, status=FAILED, statusReason=f"the runtime reported {status}")
 
@@ -1463,7 +1463,7 @@ def _update(config_id: str) -> None:
         agentRuntimeVersion=str(updated.get("agentRuntimeVersion", "")),
         containerUri=AGENT_IMAGE_URI,
     )
-    enqueue(config_id, "CHECK", delay=_CHECK_DELAY_SECONDS)
+    enqueue(config_id, "CHECK", delay=CHECK_DELAY_SECONDS)
 
 
 def lambda_handler(event: Mapping[str, Any], _context: Any = None) -> None:

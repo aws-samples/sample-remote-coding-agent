@@ -181,11 +181,19 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
         "agentcore:invoke",
     ),
     ("dispatcher", "dlq_handler"): ("tasks:write",),
+    # `config:write` and `provision-queue:send` are the configuration half of the sweep:
+    # a provisioning chain whose next message was lost is stranded forever, so the watchdog
+    # re-drives it (`CHECK` or `DELETE`, never `CREATE` -- see `watchdog.CONFIG_DRIVERS`) and
+    # records the nudge on the item. `provision-queue:send` and not `tasks-queue:send` for
+    # that half: a provision message on the task queue is an AccessDenied that reads like a
+    # service problem.
     ("watchdog", "lambda_handler"): (
         "tasks:read",
         "tasks:write",
         "config:read",
+        "config:write",
         "tasks-queue:send",
+        "provision-queue:send",
         "agentcore:stop",
     ),
 }

@@ -170,11 +170,19 @@ _GRANTS: dict[tuple[str, str], set[str]] = {
         "agentcore_data.invoke_agent_runtime",
     },
     ("dispatcher", "dlq_handler"): {"tasks_table.update_item"},
+    # `config_table.scan` and `config_table.update_item` are the sweep's configuration half:
+    # it lists the configurations whose provisioning chain has not finished, records a nudge
+    # on one it re-drives, and resolves one that stayed stalled. `sqs.send_message` covers
+    # both queues it writes to -- the task queue for a resume and the provision queue for a
+    # nudge -- which is why `_ENTRY_POINT_GRANTS` names the two queues separately and this
+    # table cannot.
     ("watchdog", "lambda_handler"): {
         "tasks_table.scan",
         "tasks_table.get_item",
         "tasks_table.update_item",
         "config_table.get_item",
+        "config_table.scan",
+        "config_table.update_item",
         "sqs.send_message",
         "agentcore_data.stop_runtime_session",
     },
