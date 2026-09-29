@@ -175,7 +175,6 @@ def test_provisioner_environment_names_every_variable_the_handler_reads() -> Non
         haiku_model_id="apac.anthropic.claude-haiku-4-5-20251001-v1:0",
         fallback_model_id="global.anthropic.claude-sonnet-4-5-20250929-v1:0",
         goal_enabled=True,
-        otel_metrics_enabled=False,
         git_author_name="agentcore-coding-agent",
         git_author_email="99+bot@users.noreply.github.com",
     )
@@ -191,11 +190,6 @@ def test_provisioner_environment_names_every_variable_the_handler_reads() -> Non
         "HAIKU_MODEL_ID": "apac.anthropic.claude-haiku-4-5-20251001-v1:0",
         "FALLBACK_MODEL_ID": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
         "CODE_GOAL_ENABLED": "1",
-        # Forwarded even when off, and that is the point: the provisioner's own constant reads
-        # this name, `_fleet_environment` puts its value on every runtime as
-        # `CLAUDE_CODE_ENABLE_TELEMETRY`, and a `GetAgentRuntime` diff showing "0" says
-        # something where an absent variable says nothing.
-        "OTEL_METRICS_ENABLED": "0",
         "AGENT_GIT_AUTHOR_NAME": "agentcore-coding-agent",
         "AGENT_GIT_AUTHOR_EMAIL": "99+bot@users.noreply.github.com",
     }
@@ -228,101 +222,10 @@ def test_the_goal_flag_is_normalised_rather_than_forwarded_as_a_bool() -> None:
         haiku_model_id="h",
         fallback_model_id="f",
         goal_enabled=False,
-        otel_metrics_enabled=False,
         git_author_name="n",
         git_author_email="e",
     )
     assert off["CODE_GOAL_ENABLED"] == "0"
-
-
-def _metrics_environment(*, otel_metrics_enabled: bool) -> dict[str, str]:
-    """`_provisioner_environment` with everything but the metrics flag held constant."""
-    return api_stack._provisioner_environment(
-        image_uri="i",
-        boundary_arn=_BOUNDARY_ARN,
-        subnet_ids=[],
-        security_group_ids=[],
-        plan_model_id="p",
-        code_model_id="c",
-        haiku_model_id="h",
-        fallback_model_id="f",
-        goal_enabled=True,
-        otel_metrics_enabled=otel_metrics_enabled,
-        git_author_name="n",
-        git_author_email="e",
-    )
-
-
-def test_the_metrics_flag_is_normalised_rather_than_forwarded_as_a_bool() -> None:
-    """The same normalisation the goal flag gets, for the same reason -- a Lambda environment
-    variable is a string either way -- and then one difference that is the whole point of this
-    knob: the **direction of the default**.
-
-    `provisioner.CODE_GOAL_ENABLED` is an opt-out blacklist, so an empty or unrecognised value
-    there means *on*. `provisioner.OTEL_METRICS_ENABLED` is an opt-in whitelist, so an empty
-    or unrecognised value means *off*. That asymmetry is deliberate: a `/goal` loop that comes
-    on by accident is a feature, while an exporter that comes on by accident is a
-    `cloudwatch:PutMetricData` grant on `*`, a widened permissions boundary and a CloudWatch
-    bill nobody asked for. So this test pins both the stack side's "1"/"0" and the handler
-    side's direction; a handler that flipped to `.get(...) != "0"` would pass every other test
-    in this file.
-    """
-    assert _metrics_environment(otel_metrics_enabled=True)["OTEL_METRICS_ENABLED"] == "1"
-    assert _metrics_environment(otel_metrics_enabled=False)["OTEL_METRICS_ENABLED"] == "0"
-
-    # The handler's own reader, by source rather than by import: `provisioner.py` builds
-    # `boto3.resource("dynamodb").Table(...)` at module scope and cannot be imported without a
-    # region. The three spellings that mean on are the whole vocabulary, so every other value
-    # -- unset, empty, "TRUE " with a space, "on", a typo -- lands on "0".
-    source = (HANDLERS / "provisioner.py").read_text(encoding="utf-8")
-    assert (
-        'os.environ.get("OTEL_METRICS_ENABLED", "").strip().lower() in ("1", "true", "yes")'
-        in source
-    ), (
-        "OTEL_METRICS_ENABLED must be read as an opt-in whitelist -- membership of a closed "
-        "set of on-values -- and not as an opt-out blacklist like CODE_GOAL_ENABLED. Inverting "
-        "it makes an unrecognised value turn the exporter, the grant and the boundary widening "
-        "on, which is the one failure mode this flag exists to make impossible."
-    )
-
-
-def test_the_boundary_widens_only_when_metrics_are_enabled() -> None:
-    """The ceiling half of the switch, built both ways.
-
-    `provisioner._execution_role_policy` grants `cloudwatch:PutMetricData` only when its own
-    `OTEL_METRICS_ENABLED` is "1", and a boundary is a whitelist: a grant the boundary does not
-    cover is *silently denied at run time*, with nothing naming the missing action -- the
-    container would simply export no metric and report nothing. The converse costs review
-    rather than function, which is why both directions are asserted here.
-    """
-
-    def actions_of(otel_metrics_enabled: bool) -> set[str]:
-        return {
-            action
-            for statement in execution_boundary.allows(
-                execution_boundary.build(
-                    agent_stack,
-                    _ASSET_REPOSITORY_ARN,
-                    otel_metrics_enabled=otel_metrics_enabled,
-                )
-            )
-            for action in execution_boundary.actions(statement)
-        }
-
-    on, off = actions_of(True), actions_of(False)
-    assert "cloudwatch:PutMetricData" in on, (
-        "with otelMetricsEnabled on, the boundary must permit the one action the inline policy "
-        "then grants, or every metric export is an AccessDenied the container cannot report"
-    )
-    assert "cloudwatch:PutMetricData" not in off, (
-        "with otelMetricsEnabled off the inline policy grants nothing on CloudWatch, so a "
-        "ceiling that allows it anyway is dead surface a future inline policy could take "
-        "without review -- and it is the shipped state of this branch"
-    )
-    assert on - off == {"cloudwatch:PutMetricData"}, (
-        f"the flag may widen the ceiling by exactly that one write-only action, and it widened "
-        f"it by {sorted(on - off)}"
-    )
 
 
 def _statement_with(statements: list[Any], action: str) -> dict[str, Any]:
@@ -460,10 +363,6 @@ def boundary_statements() -> list[Any]:
         # The boundary cannot be the union of what the inline policy grants without naming
         # the repository the agent image lives in.
         asset_repository_arn=_ASSET_REPOSITORY_ARN,
-        # The shipped state of the `otelMetricsEnabled` context key, so every test taking this
-        # fixture asserts the ceiling a deploy from this branch actually creates. The other
-        # state has its own test, `test_the_boundary_widens_only_when_metrics_are_enabled`.
-        otel_metrics_enabled=False,
     )
 
 
@@ -554,19 +453,6 @@ def test_the_boundary_denies_escalation(boundary_statements: list[Any]) -> None:
         "the ECR pull is granted by MayAuthenticateToEcr/MayPullAgentImage above; a deny here "
         "nullifies both, and the failure is a null errorMessage on CreateAgentRuntime"
     )
-    # Same shape as the `ecr:` clause above, and the reason it is worth writing twice: with
-    # `otelMetricsEnabled` on, the boundary carries a `MayPublishAgentMetrics` Allow, and an
-    # explicit Deny beats every Allow in either document. A `cloudwatch:*` here would make
-    # that Allow -- and the grant it is the ceiling over -- a dead letter whose only symptom is
-    # a fleet that exports no metric, which is indistinguishable from a collector that never
-    # started. `MayNotEscalate` denies IAM, STS, Organizations, AgentCore, S3 and SQS, and
-    # CloudWatch is deliberately not among them.
-    assert not any(action.startswith("cloudwatch") for action in denied), (
-        "a cloudwatch deny here silently shadows MayPublishAgentMetrics and the "
-        "PublishAgentMetrics grant it ceilings; PutMetricData is write-only, so the escalation "
-        "this list guards against is not reachable through it. Every other CloudWatch action "
-        "is denied by not being listed among the Allows -- a boundary is a whitelist"
-    )
     assert all("*" in _resources(statement) for statement in denies)
 
 
@@ -574,9 +460,9 @@ def test_no_deny_in_the_boundary_shadows_an_allow_in_it() -> None:
     """The `ecr:*` failure stated once, mechanically, rather than one clause per service
     prefix.
 
-    `test_the_boundary_denies_escalation` above spells that property out for `ecr:`, for
-    `cloudwatch` and for a `bedrock-agentcore` wildcard, because each of those messages names
-    its own incident and is worth reading at the point of failure. This is the general form:
+    `test_the_boundary_denies_escalation` above spells that property out for `ecr:` and for a
+    `bedrock-agentcore` wildcard, because each of those messages names its own incident and is
+    worth reading at the point of failure. This is the general form:
     an explicit Deny beats every Allow in the same document, so a Deny pattern that matches
     an action this boundary Allows makes that Allow -- and the inline-policy grant it is the
     ceiling over -- a dead letter whose only symptom is an `AccessDenied` nothing reports.
@@ -588,35 +474,28 @@ def test_no_deny_in_the_boundary_shadows_an_allow_in_it() -> None:
     already performs against the grant; it lives here because it needs only
     `stacks.agent_stack` -- the same reason
     `test_every_boundary_declaration_names_something_the_boundary_still_allows` below does.
-
-    Both states of `otelMetricsEnabled`, because the flag adds an Allow (and only an Allow):
-    the state that is off cannot see a Deny shadowing `MayPublishAgentMetrics`.
     """
-    for otel_metrics_enabled in (False, True):
-        boundary = execution_boundary.build(
-            agent_stack, _ASSET_REPOSITORY_ARN, otel_metrics_enabled=otel_metrics_enabled
-        )
-        for allow in execution_boundary.allows(boundary):
-            for allowed in execution_boundary.actions(allow):
-                # Literal Allow patterns only. A wildcard Allow is not an action, so matching
-                # a Deny pattern against it would compare two patterns and mean nothing --
-                # `test_the_boundary_permits_no_action_the_inline_policy_does_not_grant` is
-                # what makes a wildcard Allow cost a `SURPLUS_ACTIONS` line in the first place.
-                if execution_boundary.is_wildcard(allowed):
-                    continue
-                for deny in execution_boundary.denies(boundary):
-                    for pattern in execution_boundary.actions(deny):
-                        assert not execution_boundary.permits(pattern, allowed), (
-                            f"the boundary's {deny['Sid']} denies {pattern}, which matches "
-                            f"{allowed} allowed by {allow['Sid']} (otelMetricsEnabled="
-                            f"{otel_metrics_enabled}). An explicit Deny beats every Allow in "
-                            f"the same document, so that Allow and the inline-policy grant it "
-                            f"ceilings are both dead letters while the diff reads as correct. "
-                            f"Spell the denial out one literal action at a time, as "
-                            f"MayNotEscalate does -- every action this boundary does not "
-                            f"Allow is already denied by omission, because a boundary is a "
-                            f"whitelist"
-                        )
+    boundary = execution_boundary.build(agent_stack, _ASSET_REPOSITORY_ARN)
+    for allow in execution_boundary.allows(boundary):
+        for allowed in execution_boundary.actions(allow):
+            # Literal Allow patterns only. A wildcard Allow is not an action, so matching
+            # a Deny pattern against it would compare two patterns and mean nothing --
+            # `test_the_boundary_permits_no_action_the_inline_policy_does_not_grant` is
+            # what makes a wildcard Allow cost a `SURPLUS_ACTIONS` line in the first place.
+            if execution_boundary.is_wildcard(allowed):
+                continue
+            for deny in execution_boundary.denies(boundary):
+                for pattern in execution_boundary.actions(deny):
+                    assert not execution_boundary.permits(pattern, allowed), (
+                        f"the boundary's {deny['Sid']} denies {pattern}, which matches "
+                        f"{allowed} allowed by {allow['Sid']}. An explicit Deny beats every "
+                        f"Allow in the same document, so that Allow and the inline-policy "
+                        f"grant it ceilings are both dead letters while the diff reads as "
+                        f"correct. Spell the denial out one literal action at a time, as "
+                        f"MayNotEscalate does -- every action this boundary does not "
+                        f"Allow is already denied by omission, because a boundary is a "
+                        f"whitelist"
+                    )
 
 
 def test_every_boundary_declaration_names_something_the_boundary_still_allows(

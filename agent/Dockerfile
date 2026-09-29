@@ -40,18 +40,6 @@ ARG CLAUDE_CODE_VERSION=2.0.76
 ARG AWS_DOCS_MCP_VERSION=1.1.30
 ARG UV_VERSION=0.9.2
 
-# The AWS Distro for OpenTelemetry collector, which signs this container's OTel metrics with
-# the execution role and hands them to CloudWatch (invariant 32b). `0` IS THE SAFETY PROPERTY
-# OF THIS FILE: with it off, the `RUN` below executes nothing, no collector lands in the
-# image, and this build produces exactly the image it produced before the collector existed.
-# `infra/stacks/agent_stack.py` passes `ENABLE_OTEL_COLLECTOR=1` only when the deploy carries
-# `-c otelMetricsEnabled=true`, and nobody should flip that until somebody has built this
-# image on a machine with a Docker daemon and checked it against AgentCore's 2 GB cap
-# (invariant 2) -- the collector's own artifact is not small, and no test in this repository
-# can measure an image.
-ARG ENABLE_OTEL_COLLECTOR=0
-ARG ADOT_COLLECTOR_VERSION=0.49.0
-
 ENV PYTHONUNBUFFERED=1
 
 # `git` and `make` because this container clones an untrusted repository and then runs that
@@ -104,48 +92,6 @@ COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-cache-dir .
 
-# The collector, and ONLY when `ENABLE_OTEL_COLLECTOR=1` -- see the `ARG` above for why the
-# default is the point. It arrives as the pinned Debian package AWS publishes rather than as a
-# `COPY --from=` of the ADOT image, because every published tag of that ECR Public repository
-# is `v`-prefixed and `test_the_agent_image_installs_nothing_from_a_moving_reference` requires
-# a tag whose first character is a digit; weakening that guard for one dependency's tagging
-# habit costs more than a download does. So the `v` lives in the URL and the `ARG` stays
-# digits-only.
-#
-# Fetched with the base image's own `python3` because this stage has Python and
-# `ca-certificates` already, so the download needs no new apt package -- and unpacked with
-# `dpkg-deb -x` rather than installed with `dpkg -i` because the package's maintainer scripts
-# create an `aoc` user and install a systemd unit, and this container has no systemd and runs
-# the collector as its own child process (`coding_agent/telemetry.py`). `dpkg-deb -x` unpacks
-# the data archive and runs none of them.
-#
-# The layout check closes the SAME `RUN`, for the reason the CLI install above gives: a
-# package whose internal layout moved would otherwise produce an image whose collector
-# silently never starts, and "no metrics appeared" is a much worse place to discover that
-# than a failed build.
-#
-# It is `test -x` plus the package's own `VERSION` file and **not** `--version`, which is
-# what this line used to run. `aws-otel-collector` has no such flag: it prints its version
-# banner on start-up and then answers `flag provided but not defined: -version`, dumps its
-# usage and exits non-zero -- so under `set -eu` every build with the collector enabled
-# failed, while the log showed `ADOT Collector version: v0.49.0` two lines above the error
-# and looked like a download problem. Reproduced locally and fixed against a real
-# `docker build --build-arg ENABLE_OTEL_COLLECTOR=1`.
-#
-# `test -x` is also the stronger assertion for what this guard is actually for. The failure
-# it exists to catch is the binary not being where `coding_agent/telemetry.py` looks for it,
-# and that is a path and a mode -- not an exit status. `bin/VERSION` ships in the package, so
-# the build log still records which collector went in without invoking it.
-RUN if [ "${ENABLE_OTEL_COLLECTOR}" = "1" ]; then \
-      set -eu; \
-      python -c "import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], '/tmp/aoc.deb')" \
-        "https://aws-otel-collector.s3.amazonaws.com/debian/arm64/v${ADOT_COLLECTOR_VERSION}/aws-otel-collector.deb"; \
-      dpkg-deb -x /tmp/aoc.deb /; \
-      rm -f /tmp/aoc.deb; \
-      test -x /opt/aws/aws-otel-collector/bin/aws-otel-collector; \
-      cat /opt/aws/aws-otel-collector/bin/VERSION; \
-    fi
-
 # The two Agent Skills as ONE plugin root. `config.skill_paths()` reads `AGENT_SKILL_PATHS`
 # and falls back to the in-tree `agent/skills`; that directory itself contains
 # `skills/<name>/SKILL.md`, and the nesting IS the plugin-root layout `tests/test_skills.py`
@@ -153,12 +99,6 @@ RUN if [ "${ENABLE_OTEL_COLLECTOR}" = "1" ]; then \
 # skills then silently never load, because the CLI reports a missing skill as nothing at all.
 COPY skills /app/skills
 ENV AGENT_SKILL_PATHS=/app/skills
-
-# The collector's configuration, copied unconditionally even when the binary above was not
-# installed: it is about a kilobyte, and a configuration with nothing to read it is inert.
-# `coding_agent/telemetry.py` requires both this file and the binary before it starts anything,
-# so the binary stays the one thing that decides whether this container exports at all.
-COPY otel /opt/otel
 
 # THREE THINGS THIS FILE DELIBERATELY DOES NOT DO.
 #
@@ -172,13 +112,15 @@ COPY otel /opt/otel
 # `subagents.build_options`: such a file loads REGARDLESS of `setting_sources=[]`, so it is
 # the one file that can widen every role's session from inside the image.
 #
-# It sets no OTel environment variable either -- not the exporter's endpoint, not its protocol
-# and above all not `CLAUDE_CODE_ENABLE_TELEMETRY`. Those are fleet policy, forwarded by
-# `api/src/handlers/provisioner.py`'s `_fleet_environment` so that a deploy converges them
-# across runtimes provisioned before they existed (invariant 24), and invariant 26 is why they
-# cannot live here: an `ENV` is overridable by a runtime's `environmentVariables` but not
-# removable, so an exporter switched on in this file could never be switched off again without
-# an image rebuild.
+# It sets no telemetry environment variable either, and above all not
+# `CLAUDE_CODE_ENABLE_TELEMETRY` -- the one variable that turns the CLI's OTLP exporter on.
+# That is fleet policy, pinned to `0` by `api/src/handlers/provisioner.py`'s
+# `_fleet_environment` so a deploy converges it onto runtimes provisioned before it existed
+# (invariant 24), and invariant 26 is why it cannot live here: an `ENV` is overridable by a
+# runtime's `environmentVariables` but not removable, so an exporter switched on in this file
+# could never be switched off again without an image rebuild. This image once carried an ADOT
+# collector behind a build arg for CloudWatch Coding Agent Insights; `CLAUDE.md` records why
+# that feature was removed rather than left wired up.
 
 # AgentCore reaches `/invocations` and `/ping` on 8080; `bedrock_agentcore`'s `app.run()`
 # serves both, and `server.py` already carries the `if __name__ == "__main__"` guard.

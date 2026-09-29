@@ -544,26 +544,40 @@ reintroduced one. Each gets a comment and a regression test.
     no `AWS_*`, no GitHub token, only `PATH`, `HOME`, `LANG`, `CI` and
     `git_config_env()`. One private `_run` for both the verify and setup commands,
     so the two cannot drift, and the absence is pinned by a parametrised test.
-32b. **Telemetry goes out through the loopback, and no handler gains a CloudWatch
-    grant** — the container exports OTel *metrics* to `localhost:4318`, where an
-    in-container ADOT collector SigV4-signs with the execution role. **Never a
-    bearer token**: that is a long-term IAM-user credential, and this container's
-    whole credential story is "one PAT, never in the environment". And Coding Agent
-    Insights is read in the CloudWatch console by a human, never proxied through
-    `api/`, so note 30's read-only-over-DynamoDB posture is untouched.
-    The mechanism is **on by default**, and one context key turns it off:
-    `-c otelMetricsEnabled=false` gates the collector in the image
-    (`ENABLE_OTEL_COLLECTOR`, default `0`), the exporter variables in
-    `provisioner._fleet_environment`, the `cloudwatch:PutMetricData` grant on the
-    execution role and the matching widening of the permissions boundary -- all four
-    or none, because an image with a collector and no permission is a broken deploy.
-    `agent/otel/collector.yaml`'s `sigv4auth` extension signs for service
-    `monitoring` in `${env:AWS_REGION}`, with no credential written anywhere. The
-    container gets the last word and only in one direction:
-    `telemetry.exporter_env` returns `CLAUDE_CODE_ENABLE_TELEMETRY=0` whenever the
-    collector binary is absent from this filesystem, and never returns `1` -- so a
-    runtime whose fleet policy has not converged cannot retry against a port nothing
-    is listening on, and turning the exporter *on* stays the fleet's decision.
+32b. **The container exports no metrics, and no handler names a CloudWatch action** —
+    `CLAUDE_CODE_ENABLE_TELEMETRY` is the only variable that turns the Claude Code
+    CLI's OTLP exporter on, and it is pinned `"0"` in two places: fleet policy in
+    `provisioner._fleet_environment`, so a deploy converges it, and a literal in
+    `subagents.build_options`' `env`, which is what holds on a local run and on a
+    runtime that has not converged. No `OTEL_*` variable is set anywhere, and
+    `tests/test_api_grant_contract.py::test_no_handler_names_a_cloudwatch_action_at_all`
+    holds the other half: nothing under `api/` reads or writes a metric, nor mints a
+    policy letting the container do so.
+
+    This was **CloudWatch Coding Agent Insights, and it was removed** — the reason is
+    the invariant, because the implementation looked like it worked. The container ran
+    an in-container ADOT collector that SigV4-signed the CLI's metrics to
+    `monitoring.<region>.amazonaws.com/v1/metrics` with the execution role. Measured
+    end to end: the collector started and bound `127.0.0.1:4318`, accepted a metric
+    (`200 {"partialSuccess":{}}`), logged no export error, and a directly signed POST
+    to that endpoint answered `200 {}` — so **not** an access problem — yet no metric
+    appeared in any namespace. The reason is that AWS documents exactly two paths, and
+    this was neither: the CLI posting directly with a **bearer token**, which is a
+    long-term IAM-user credential this container's whole credential story ("one
+    repository-scoped PAT, never in the environment") refuses, or a vendor gateway,
+    which invariant 33's DNS Firewall blocks by name. The dashboards also read a
+    Prometheus-compatible store queried by **PromQL** rather than `ListMetrics`, and
+    they dimension on identity attributes (`user.email`, `team.id`, `department`,
+    `cost_center`, `organization`) this repository had no way to populate.
+
+    So the removal took all six limbs at once, because each is silent alone: the collector
+    and its configuration out of the image, the `ENABLE_OTEL_COLLECTOR` and
+    `ADOT_COLLECTOR_VERSION` build args, the `otelMetricsEnabled` context key and its thread
+    through both stacks, the container's own telemetry module, the five `OTEL_*` fleet
+    variables, and the `cloudwatch:PutMetricData` grant with the `MayPublishAgentMetrics`
+    boundary widening that ceilinged it — which is what takes "What remains exposed" back
+    from five reachable things to **four**. Reintroducing an exporter means choosing a
+    receiver and an egress destination *first*; it is not a default to flip.
 33. **No role may reach the network, and no vendor endpoint may be reached** —
     `WebFetch`/`WebSearch` stay out of `ALLOWED_TOOLS`, the CLI's suppression
     variables stay in `_container_environment`, and the DNS Firewall deny list
@@ -1214,19 +1228,16 @@ than one that does not. Four things are still true after everything above.
   for both runners, the verify command and the setup command. It defeats the
   environment-variable credential path. It does **not** defeat an attacker who hardcodes
   the container credentials endpoint. Within the permissions boundary, stolen credentials
-  reach exactly **five** things: this one repository's secret, this one configuration's task
-  items, Bedrock, a read-only pull of the agent image from one ECR repository — the
-  runtime cannot be created at all without that last one, which is why it is granted — and
-  `cloudwatch:PutMetricData`. The
+  reach exactly **four** things: this one repository's secret, this one configuration's task
+  items, Bedrock, and a read-only pull of the agent image from one ECR repository — the
+  runtime cannot be created at all without that last one, which is why it is granted. The
   `dynamodb:LeadingKeys` fences on both table statements are what shrink that list to *this*
   configuration, and the VPC with its 443-only security group is what stops the credentials
-  leaving. The fifth one is Coding Agent Insights, and it is in the count because the flag now
-  **defaults to on** -- `-c otelMetricsEnabled=false` is how a deploy declines it, and such a
-  deploy grants four. It is write-only and grants no read of any metric, and
-  `*` is not laxity -- `PutMetricData` supports no resource-level permission, so no narrower
-  grant exists. The exposure it buys an attacker is junk metrics and a small CloudWatch bill,
-  which is the trade for every operator being able to see a run's cost and per-node timing
-  without first discovering a context key.
+  leaving. Four is the whole count, with no flag that makes it five: a
+  `cloudwatch:PutMetricData` grant on `*` was the fifth until Coding Agent Insights was
+  removed (invariant 32b), and
+  `tests/test_api_grant_contract.py::test_no_handler_names_a_cloudwatch_action_at_all` is what
+  stops it coming back as one line.
 - **Prompt injection.** The controls are the `.agent/` quarantine — the clone's own
   `.agent/` is moved aside so repository content cannot pose as the roles' workspace —
   `setting_sources=[]` and `strict_mcp_config=True`, the `PreToolUse` hook that denies
@@ -1282,15 +1293,17 @@ only reason the scanner looked. **Nothing was deleted and no test lost coverage*
 deletion here would have cost 126 tests, because every one of those literals was a module-level
 constant, and `tests/test_api_fakes.py` is imported by 13 other test modules.
 
-The remaining **16 carry a suppression**, in five shapes, and the count is the whole argument:
+The remaining 16 carried a suppression; **14 are left, in four shapes**, and the count is the
+whole argument. Two went with the metrics collector (invariant 32b) rather than being fixed —
+one `dangerous-subprocess-use-audit` on `telemetry.py`'s `Popen`, and the `B104` on its test —
+which is the cheapest way this class ever shrinks: delete the code.
 
 | Finding | Count | Why no fix exists |
 |---|---|---|
 | `B301`/`B403` on `pickle` | 6 | `agent/src/coding_agent/checkpoint.py`'s accepted exposure, argued in the bullet above and again at `checkpoint._load`; in `tests/test_checkpoint.py` it reads back a file the test just wrote |
 | `B602` and two Semgrep subprocess rules on `agent/src/coding_agent/commands.py` | 3 | `shell=True` in `commands._run` **is** the product: an untrusted repository's own declared `make test`, bounded by the dedicated account, the repository-scoped PAT and `_base_env` |
-| Semgrep `dangerous-subprocess-use-audit` on `agent/src/coding_agent/telemetry.py` and two test files | 4 | list argv, no shell, every element a module constant or a path the test wrote |
+| Semgrep `dangerous-subprocess-use-audit` on `tests/test_git_ops.py` and `tests/test_repo_contracts.py` | 3 | list argv, no shell, every element a module constant or a path the test wrote |
 | `B310` on the two `urlopen` calls | 2 | fixed in code — see below — but bandit flags the call site either way |
-| `B104` on `tests/test_agent_telemetry.py` | 1 | the flagged line asserts `"0.0.0.0" not in settings` — it is the check, not a binding, and a constant would only move the literal |
 
 The `B310` pair is the one that changed behaviour rather than gaining a comment.
 `agent/src/coding_agent/github.py::_request` and `api/src/handlers/github_probe.py::_request`

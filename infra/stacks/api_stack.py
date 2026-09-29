@@ -202,7 +202,6 @@ def _provisioner_environment(
     haiku_model_id: str,
     fallback_model_id: str,
     goal_enabled: bool,
-    otel_metrics_enabled: bool,
     git_author_name: str,
     git_author_email: str,
 ) -> dict[str, str]:
@@ -233,13 +232,6 @@ def _provisioner_environment(
         # a Lambda environment variable is a string either way and `provisioner.py` reads
         # this one with `config._env_flag`'s vocabulary.
         "CODE_GOAL_ENABLED": "1" if goal_enabled else "0",
-        # The `otelMetricsEnabled` context key, normalised for the same reason as the line
-        # above. It reaches two things inside the provisioner and nothing else: the OTel
-        # exporter group in `_fleet_environment`, which converges onto every live runtime,
-        # and the conditional `PublishAgentMetrics` statement in `_execution_role_policy`.
-        # `AgentStack` reads the same flag for the image's build arg and the permissions
-        # boundary, so all four move on one `-c otelMetricsEnabled=true`.
-        "OTEL_METRICS_ENABLED": "1" if otel_metrics_enabled else "0",
         # The `gitAuthorName`/`gitAuthorEmail` context keys, forwarded as free text rather
         # than normalised: `git_ops._identity` in the container treats "" as unset and falls
         # back to its own default, so "" is a meaningful value here and not a missing one.
@@ -399,11 +391,6 @@ class ApiStack(cdk.Stack):
         haiku_model_id: str,
         fallback_model_id: str,
         goal_enabled: bool,
-        # Beside `goal_enabled`, and keeping the no-defaults convention `_provisioner_environment`'s
-        # docstring explains: this is the same `otelMetricsEnabled` context key `AgentStack`
-        # takes, and the two stacks reading one value is what stops the image and the fleet
-        # environment disagreeing about whether a collector exists.
-        otel_metrics_enabled: bool,
         # The commit identity, keyword-only and required like every other value here. The
         # default lives in the container (`git_ops._DEFAULT_AUTHOR_EMAIL`) and not in a
         # default argument, so there is exactly one place that says what it is.
@@ -456,7 +443,6 @@ class ApiStack(cdk.Stack):
                 haiku_model_id=haiku_model_id,
                 fallback_model_id=fallback_model_id,
                 goal_enabled=goal_enabled,
-                otel_metrics_enabled=otel_metrics_enabled,
                 git_author_name=git_author_name,
                 git_author_email=git_author_email,
             ),

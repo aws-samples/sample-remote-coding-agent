@@ -496,102 +496,60 @@ def test_the_agent_image_bakes_the_skills_and_sets_no_work_root() -> None:
         )
 
 
-def test_the_agent_image_gates_the_collector_behind_a_build_arg_defaulting_off() -> None:
-    """The ADOT collector is installed only when asked for, and nothing asks by default.
+def test_the_agent_image_carries_no_metrics_collector() -> None:
+    """Nothing in the image, and nothing in the tree, exports the CLI's OTel metrics.
 
-    This is what makes "shipped switched off" a contract rather than a comment. Nothing in
-    this suite can build an image or measure one, so the collector's effect on the ARM64
-    image against AgentCore's 2 GB cap (invariant 2) is unmeasured -- and the default below
-    is the whole reason that is safe to merge: with it `0`, this build produces the image it
-    produced before the collector existed.
+    This replaces two tests that asserted the *presence* of an ADOT collector behind a build
+    arg, and its deploy-time default. Coding Agent Insights was removed: AWS documents two
+    supported paths -- a bearer token the CLI posts with directly, and a vendor gateway -- and
+    this repository could take neither. A bearer token is a long-term IAM-user credential,
+    which this container's whole credential story (one repository-scoped PAT, never in the
+    environment) refuses; the gateway is a vendor endpoint invariant 33 blocks by name. What
+    was built instead -- an in-container collector SigV4-signing to
+    `monitoring.<region>.amazonaws.com/v1/metrics` -- is a third path that was measured end to
+    end and produced no metric in any namespace.
+
+    So this asserts the absence, in every place the feature had a limb, because each of them
+    fails silently on its own: a collector with no permission exports nothing, exporter
+    variables with no collector retry against a closed port, and a `cloudwatch:PutMetricData`
+    grant with neither is the fifth thing stolen container credentials reach. `CLAUDE.md`
+    carries the whole argument; this is the mechanical half.
     """
     raw = (REPO_ROOT / _DOCKERFILE).read_text()
     args = _dockerfile_args()
 
-    assert args.get("ENABLE_OTEL_COLLECTOR") == "0", (
-        f"{_DOCKERFILE} must carry `ARG ENABLE_OTEL_COLLECTOR=0`, default exactly `0`. "
-        f"Got {args.get('ENABLE_OTEL_COLLECTOR')!r}. A plain `docker build` of this file, and "
-        "every deploy that passes `-c otelMetricsEnabled=false`, must produce an image "
-        "with no collector in it. The *deploy* default is on; this ARG default is not, so the "
-        "image and the flag stay separable."
+    assert "ENABLE_OTEL_COLLECTOR" not in args and "ADOT_COLLECTOR_VERSION" not in args, (
+        f"{_DOCKERFILE} declares a collector build arg again ({sorted(args)}). The collector was "
+        f"removed with the feature it served; reintroducing it means reintroducing an exporter "
+        f"endpoint, the CloudWatch grant and the boundary widening that ceilings it."
     )
-
-    logical = re.sub(r"\\\n\s*", " ", raw).splitlines()
-    downloads = [line for line in logical if "aws-otel-collector.deb" in line]
-    assert len(downloads) == 1, (
-        f"the collector must be downloaded exactly once in {_DOCKERFILE}; found "
-        f"{len(downloads)} references to the package."
-    )
-    assert downloads[0].startswith("RUN ") and '"${ENABLE_OTEL_COLLECTOR}" = "1"' in downloads[0], (
-        "the collector download must sit inside a `RUN` guarded by "
-        '`[ "${ENABLE_OTEL_COLLECTOR}" = "1" ]`. Unguarded, the flag stops being a switch and '
-        f"every build pays for the collector. Got {downloads[0]!r}"
-    )
-    assert "${ADOT_COLLECTOR_VERSION}" in downloads[0], (
-        "invariant 34: the collector URL must name `${ADOT_COLLECTOR_VERSION}` rather than "
-        "spelling a version inline, so the one `ARG` above is the only place a version moves."
-    )
-    # The *property*, not one spelling of it: a check that the binary is where
-    # `coding_agent/telemetry.py` looks for it must close the SAME `RUN` that unpacks the
-    # package, like `claude --version` above -- a layout that moved would otherwise build an
-    # image whose collector silently never starts, and "no metrics appeared" is a much worse
-    # place to discover that.
-    #
-    # This asserted `--version` until a real `docker build --build-arg
-    # ENABLE_OTEL_COLLECTOR=1` was run for the first time: `aws-otel-collector` has no such
-    # flag. It prints its version banner on start-up, then answers `flag provided but not
-    # defined: -version`, dumps its usage and exits non-zero -- so under `set -eu` every
-    # collector-enabled build failed, with `ADOT Collector version: v0.49.0` two lines above
-    # the error making it look like a download problem. The test passed throughout, because it
-    # pinned the command rather than the guarantee.
-    assert "/opt/aws/aws-otel-collector/bin/aws-otel-collector" in downloads[0], (
-        "a check that the collector binary landed must close the SAME `RUN` that unpacks it, "
-        "like `claude --version` above. Assert the path exists -- `test -x` -- rather than "
-        "invoking the binary: this binary has no `--version` flag and exits non-zero when "
-        f"given one. Got {downloads[0]!r}"
+    # Instructions only, so the paragraph at the bottom of the Dockerfile that explains why no
+    # collector is here does not fail the test that keeps it true.
+    instructions = [
+        line
+        for line in re.sub(r"\\\n\s*", " ", raw).splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    offending = [line for line in instructions if "otel" in line.lower()]
+    assert offending == [], (
+        f"{_DOCKERFILE} carries {offending}, an OTel collector or `otel` path again. The ~1.3 GB "
+        f"ARM64 image is built on the operator's own machine against AgentCore's 2 GB cap "
+        f"(invariant 2), and nothing in this suite can measure an image."
     )
 
     for line in raw.splitlines():
         if not line.startswith("ENV "):
             continue
         assert "OTEL_" not in line and "CLAUDE_CODE_ENABLE_TELEMETRY" not in line, (
-            f"invariant 26: {_DOCKERFILE} sets {line!r}. The OTel exporter variables are fleet "
-            "policy in `provisioner._fleet_environment`, converged on every provision; an `ENV` "
-            "here can be overridden by a runtime's `environmentVariables` but never unset, so "
-            "an exporter switched on in the image could not be switched off without a rebuild."
+            f"invariant 26: {_DOCKERFILE} sets {line!r}. `CLAUDE_CODE_ENABLE_TELEMETRY` is fleet "
+            "policy in `provisioner._fleet_environment`, pinned to `0` and converged on every "
+            "provision; an `ENV` here can be overridden by a runtime's `environmentVariables` "
+            "but never unset, so an exporter switched on in the image could not be switched off "
+            "without a rebuild."
         )
 
-
-def test_coding_agent_insights_is_on_by_default() -> None:
-    """`infra/app.py` reads `otelMetricsEnabled` with `default=True`.
-
-    Pinned because it is a *security* default, not a convenience one: on means the execution
-    role and the permissions boundary both carry `cloudwatch:PutMetricData` on `*`, which is
-    the difference between the four things stolen container credentials reach and the five
-    `CLAUDE.md`'s "What remains exposed" now counts. Flipping it back is a legitimate
-    decision and this test is where it has to be made deliberately -- until this change
-    nothing asserted the default at all, so it could have moved either way unnoticed.
-
-    Read as an AST rather than as a regex over the source: the argument is a keyword with a
-    literal default, and a regex would also match the sentence in the comment above it.
-    """
-    import ast
-
-    source = (REPO_ROOT / "infra" / "app.py").read_text()
-    defaults = {
-        node.args[1].value: kw.value.value
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "_flag_context"
-        and len(node.args) >= 2
-        and isinstance(node.args[1], ast.Constant)
-        for kw in node.keywords
-        if kw.arg == "default" and isinstance(kw.value, ast.Constant)
-    }
-    assert defaults.get("otelMetricsEnabled") is True, (
-        "infra/app.py must read otelMetricsEnabled with default=True, so Coding Agent "
-        f"Insights is on unless a deploy declines it. Got {defaults.get('otelMetricsEnabled')!r}. "
-        "Turning it off is fine, but it takes the container's reachable services from five "
-        "back to four, and `CLAUDE.md`'s exposure count has to move with it."
+    # The collector's own configuration directory, which `COPY otel /opt/otel` used to place.
+    assert not (REPO_ROOT / "agent" / "otel").exists(), (
+        "agent/otel/ is back. It held the collector configuration -- a `sigv4auth` extension, a "
+        "loopback OTLP receiver and an `otlphttp` exporter -- and nothing reads it now."
     )

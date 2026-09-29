@@ -4,9 +4,8 @@ Two pure seams carry the whole of this module's testability, and both matter mor
 they look. `build_options` opens no session and reaches no network, so the
 security-relevant fields -- `permission_mode`, `setting_sources`, `strict_mcp_config`, and
 the *absence* of `WebFetch`/`WebSearch` -- are asserted on every run rather than reviewed
-by eye. Its one piece of I/O is `telemetry.exporter_env`'s probe for the collector binary,
-which takes injectable paths and answers "not installed" wherever there is none -- so the
-tests below still run with no collector, no socket and no AWS.
+by eye. It performs no I/O at all: no filesystem probe, no environment read, no socket and
+no AWS call, so the tests below need nothing stubbed to reach it.
 `_collect` folds any async iterable of SDK messages, so the transcript-versus-verdict
 rule is tested over a handful of hand-built dataclasses with no `claude` process and no
 Bedrock call anywhere.
@@ -51,7 +50,7 @@ from claude_agent_sdk import (
 # they come from the types module by name -- the same shape as `hooks.HookEvent`.
 from claude_agent_sdk.types import McpStdioServerConfig, TaskBudget
 
-from . import activity, config, hooks, memory_tools, telemetry
+from . import activity, config, hooks, memory_tools
 from .state import TaskState
 
 log = logging.getLogger(__name__)
@@ -390,10 +389,8 @@ def build_options(
     `cwd` is the clone and nothing above it (invariant 11). The caller resolves it;
     this function never derives a path of its own.
 
-    The one thing here that touches a filesystem is `telemetry.exporter_env`, which stats
-    the collector binary's path to decide whether this image can export metrics at all. It
-    reads no environment variable and its paths are injectable keywords, so this stays a
-    function whose output is decided by its arguments and the image it runs in.
+    Nothing here touches a filesystem or reads an environment variable, so the whole option
+    surface is decided by this function's arguments.
 
     `state` and `node` exist only for the hooks: the compaction and subagent callbacks
     need somewhere to put an activity row, and `hooks.build_hooks` closes over both.
@@ -501,20 +498,18 @@ def build_options(
         # that can drift, and the values are pinned in
         # `tests/test_env_contract.CLI_SUPPRESSIONS`.
         #
-        # `telemetry.exporter_env` is the OTel interlock, and it is here for the SAME
-        # reason and with the same asymmetry: the fleet variable
-        # `CLAUDE_CODE_ENABLE_TELEMETRY` is the policy, and this can only ever turn the
-        # exporter OFF -- when the collector binary is absent from this image, so a
-        # runtime created against an image from before the flag flip cannot make the CLI
-        # retry OTLP exports against a port nothing is listening on. It never returns
-        # `"1"`. When a collector *is* present it contributes `OTEL_RESOURCE_ATTRIBUTES`,
-        # which is what gives each turn its `team.id`/`task.id`/`role` dimensions.
-        #
-        # This costs `build_options` nothing a test has to stub out: `exporter_env` stats
-        # two paths, reads no environment variable, and takes both paths as keywords.
+        # `CLAUDE_CODE_ENABLE_TELEMETRY=0` joins it for a related but narrower reason: it
+        # is the ONLY variable that turns the CLI's OTLP exporter on, this container ships
+        # nothing for it to export to, and there is no code path here that would ever set
+        # it to `"1"`. It is a fleet variable too (`provisioner._fleet_environment`), and
+        # the duplicate is what holds on a local `python -m coding_agent.local_run` and on
+        # a runtime whose environment has not converged. Hard-coded rather than probed: the
+        # collector this once configured is gone, so the answer no longer depends on which
+        # image is running. Restoring an exporter here means restoring an egress
+        # destination, which is invariant 33's business and not a one-line default.
         env={
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
-            **telemetry.exporter_env(role, state),
+            "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
             **(FANOUT_ENV if fanout else {}),
         },
         # The coding role's fan-out, and its three bounds. `None` everywhere else, which

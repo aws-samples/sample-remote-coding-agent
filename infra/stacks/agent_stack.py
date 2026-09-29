@@ -333,7 +333,6 @@ def execution_role_boundary_statements(
     account: str,
     region: str,
     asset_repository_arn: str,
-    otel_metrics_enabled: bool,
 ) -> list[iam.PolicyStatement]:
     """The permissions boundary every per-configuration execution role is minted under.
 
@@ -351,10 +350,7 @@ def execution_role_boundary_statements(
     `MayReadOneSecret`, `MayWriteRuntimeLogs` and `MayUseOwnMemory`, each for the reason its
     own comment below gives -- and each of the four is declared in
     `execution_boundary.WIDER_RESOURCES`, so widening a fifth costs a line in that table with
-    a reason rather than passing as a silent change. `MayPublishAgentMetrics`' `*` is not a fourth and is deliberately not declared
-    there: `cloudwatch:PutMetricData` supports no resource-level permission, so the grant
-    names `*` literally too and the ceiling is exactly as wide as the grant -- the same
-    position `MayAuthenticateToEcr` is already in. Same idiom as
+    a reason rather than passing as a silent change. Same idiom as
     `provisioner._execution_role_policy`'s docstring pointing back at this ceiling.
 
     `asset_repository_arn` is the one parameter that is not a name: the union above cannot
@@ -368,46 +364,11 @@ def execution_role_boundary_statements(
     docstring gives about `live`: a default is how a future caller loses the grant without
     noticing, and a ceiling one action too narrow is silent at run time.
 
-    `otel_metrics_enabled` is the CDK context key `otelMetricsEnabled`, read once in
-    `infra/app.py` and threaded here, and it raises the ceiling by exactly one statement:
-    `MayPublishAgentMetrics`, over the `cloudwatch:PutMetricData` that
-    `provisioner._execution_role_policy` grants under the same flag (invariant
-    32b). Required and undefaulted for the same reason `asset_repository_arn` is -- a default
-    is how a future caller loses the grant without noticing, and this one is worse than most,
-    because a boundary that does not cover the grant makes every metric export an
-    `AccessDenied` the container has no way to report. `MayNotEscalate` lists no
-    `cloudwatch:*`, so nothing shadows the Allow.
-
     Pure and stack-free on purpose: `iam.PolicyStatement.to_json()` needs no `Stack`, so
     `tests/test_grant_contract.py` reads these statements directly. That test is the only
     thing standing between invariant 21 and a fleet that cannot invoke a model, because
     this stack cannot be synthesized in CI (the image asset needs a Docker daemon).
     """
-    # The same conditional-list idiom `provisioner._execution_role_policy` uses for the two
-    # ECR statements, and for the same reason: a ceiling over a grant nobody holds is dead
-    # surface a future inline policy could take without review, so with the flag off there is
-    # no statement at all rather than an Allow with nothing under it. Both sides are gated on
-    # one flag, so neither of `execution_boundary`'s two set differences gains a member in
-    # either state.
-    publish_metrics: list[iam.PolicyStatement] = (
-        [
-            iam.PolicyStatement(
-                sid="MayPublishAgentMetrics",
-                effect=iam.Effect.ALLOW,
-                actions=["cloudwatch:PutMetricData"],
-                # `*` is what the action *requires*: `cloudwatch:PutMetricData` supports no
-                # resource-level permission at all, so a scoped ARN here matches no call and
-                # the export is denied with nothing naming the pattern that is too narrow.
-                # So this is not a widening to declare in
-                # `execution_boundary.WIDER_RESOURCES`: the grant names `*` literally too, as
-                # `AuthenticateToEcr`/`MayAuthenticateToEcr` already do. Write-only either
-                # way: no `GetMetricData`, no `ListMetrics`, no read of anybody's metrics.
-                resources=["*"],
-            )
-        ]
-        if otel_metrics_enabled
-        else []
-    )
     return [
         iam.PolicyStatement(
             sid="MayInvokeClaude",
@@ -503,11 +464,10 @@ def execution_role_boundary_statements(
             # `ListMemories` are absent here and *denied by name* below, so a later
             # "helpful" widening of the grant fails a test rather than landing.
             #
-            # Not gated on any flag, unlike `MayPublishAgentMetrics`: there is no context key
-            # for memory, and the grant side degrades per configuration rather than per fleet
-            # -- a configuration whose `CreateMemory` failed simply carries no `memoryId` and
-            # gets no statement. So both of `execution_boundary`'s set differences stay closed
-            # in either state of `otelMetricsEnabled`.
+            # Gated on nothing: the grant side degrades per configuration rather than per
+            # fleet -- a configuration whose `CreateMemory` failed simply carries no
+            # `memoryId` and gets no statement -- so both of `execution_boundary`'s set
+            # differences stay closed either way.
             actions=[
                 "bedrock-agentcore:CreateEvent",
                 "bedrock-agentcore:ListEvents",
@@ -527,7 +487,6 @@ def execution_role_boundary_statements(
             # `provisioner._execution_role_policy` names (invariant 31's division of labour).
             resources=[f"arn:aws:bedrock-agentcore:{region}:{account}:memory/*"],
         ),
-        *publish_metrics,
         iam.PolicyStatement(
             sid="MayNotEscalate",
             # The explicit deny is why the boundary exists at all. Without it the
@@ -595,13 +554,6 @@ class AgentStack(cdk.Stack):
         construct_id: str,
         *,
         app_name: str,
-        # The `otelMetricsEnabled` context key, read once in `infra/app.py` and threaded to
-        # the two places that have to agree: the image's build arg below and the permissions
-        # boundary at the bottom of this method. Undefaulted on purpose -- an image built with
-        # the collector and a boundary that does not cover `cloudwatch:PutMetricData` is a
-        # runtime that exports nothing and says nothing, so the two must move together or not
-        # at all, and a default is how one of them stops moving.
-        otel_metrics_enabled: bool,
         # Defaulted so nothing that constructs this stack without an address breaks; empty
         # means the DNS alarm is created with no action and `add_agent_network` annotates
         # the synth to say so.
@@ -641,18 +593,6 @@ class AgentStack(cdk.Stack):
             # `CreateAgentRuntime`, so overshooting it fails the provisioning of every
             # configuration at once rather than one build.
             platform=ecr_assets.Platform.LINUX_ARM64,
-            # The ADOT collector's on/off switch, and the whole of what the flag does to the
-            # image: `agent/Dockerfile`'s `ARG ENABLE_OTEL_COLLECTOR` defaults to `0` and its
-            # download `RUN` does nothing at all unless this is `"1"`, so a deploy from this
-            # branch builds exactly the image it built before the flag existed.
-            #
-            # `build_args` participates in the **asset hash**, which is wanted rather than
-            # tolerated: flipping the flag produces a new image URI, `ApiStack` forwards that
-            # URI as `AGENT_IMAGE_URI`, and `provisioner._desired_runtime` therefore issues a
-            # real `UpdateAgentRuntime` that moves the image and the exporter variables
-            # together. With a hash that did not move, the fleet environment would say
-            # "export" against an image with no collector in it.
-            build_args={"ENABLE_OTEL_COLLECTOR": "1" if otel_metrics_enabled else "0"},
         )
 
         # -- the VPC and the DNS Firewall (Tier 2 #16) ----------------------------
@@ -704,10 +644,5 @@ class AgentStack(cdk.Stack):
                 # the provisioner derives from `AGENT_IMAGE_URI` at run time, so grant and
                 # ceiling name one repository from one source.
                 asset_repository_arn=self.image.repository.repository_arn,
-                # The same flag the build arg above carries, so the ceiling and the image are
-                # one decision. The matching *grant* is minted at run time by
-                # `provisioner._execution_role_policy`, which reads the same flag out of its
-                # own `OTEL_METRICS_ENABLED` -- three readers, one context key.
-                otel_metrics_enabled=otel_metrics_enabled,
             ),
         )

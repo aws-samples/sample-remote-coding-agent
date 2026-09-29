@@ -399,37 +399,18 @@ def fleet_policy(aws: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 class _Agreement(NamedTuple):
-    """The inline policy and the boundary, built in the *same* state of `otelMetricsEnabled`."""
+    """The inline policy and the boundary it is the grant half of."""
 
     policy: dict[str, Any]
     boundary: list[dict[str, Any]]
-    metrics_enabled: bool
 
 
-@pytest.fixture(params=(False, True), ids=("metrics-off", "metrics-on"))
-def agreement(
-    request: pytest.FixtureRequest, aws: Any, monkeypatch: pytest.MonkeyPatch
-) -> _Agreement:
-    """`fleet_policy` and the matching boundary, once per state of the metrics switch.
-
-    Every agreement test below runs twice, because `cloudwatch:PutMetricData` is granted by
-    `provisioner._execution_role_policy` and permitted by the boundary's
-    `MayPublishAgentMetrics` only when `otelMetricsEnabled` is on, and each half reads as
-    correct on its own -- which is exactly the shape of the `ecr:*` failure this file's
-    docstring describes. A fixture that built one state would check the ceiling that ships and
-    leave the one an operator gets by flipping the flag unexamined; building the grant in one
-    state and the ceiling in the other would report a disagreement that does not exist.
-    """
-    metrics_enabled: bool = request.param
-    # Both set before `_load`, because the module binds its environment at import -- which is
-    # also how a real deploy changes them.
+@pytest.fixture
+def agreement(aws: Any, monkeypatch: pytest.MonkeyPatch) -> _Agreement:
+    """`fleet_policy` and the matching boundary, built from one image URI."""
+    # Set before `_load`, because the module binds its environment at import -- which is also
+    # how a real deploy changes it.
     monkeypatch.setenv("AGENT_IMAGE_URI", _FLEET_IMAGE_URI)
-    if metrics_enabled:
-        monkeypatch.setenv("OTEL_METRICS_ENABLED", "1")
-    else:
-        # Deleted rather than assumed absent: the off state must not depend on what some other
-        # test in this process left in the environment, or "off" proves nothing.
-        monkeypatch.delenv("OTEL_METRICS_ENABLED", raising=False)
     _common, provisioner = _load("provisioner")
     return _Agreement(
         policy=provisioner._execution_role_policy(_CONFIG),
@@ -438,9 +419,7 @@ def agreement(
             # Derived from the same URI the grant is derived from, so the two halves name one
             # repository from one source.
             provisioner._asset_repository_arn(_FLEET_IMAGE_URI),
-            otel_metrics_enabled=metrics_enabled,
         ),
-        metrics_enabled=metrics_enabled,
     )
 
 
@@ -688,50 +667,20 @@ def test_a_policy_for_a_configuration_with_no_memory_omits_the_memory_statement(
         )
 
 
-def test_a_policy_built_with_metrics_off_omits_the_cloudwatch_statement(
-    agreement: _Agreement,
-) -> None:
-    """The mirror of `test_a_policy_built_with_no_fleet_image_omits_the_ecr_statements`, for
-    the switch this branch ships in the off position.
+def test_no_handler_names_a_cloudwatch_action_at_all() -> None:
+    """The mechanical form of "nothing under `api/src/handlers/` grants itself CloudWatch".
 
-    `otelMetricsEnabled` defaults to false, so what a deploy from this branch mints is the
-    execution role it minted before Coding Agent Insights existed -- no `cloudwatch:` anywhere
-    in the document, not an Allow with an empty action list or a Deny standing in for one. The
-    on state is asserted in the same test rather than in a sibling, because the two halves of
-    a two-state contract drift the moment they live apart.
-    """
-    text = json.dumps(agreement.policy)
-    if not agreement.metrics_enabled:
-        assert not _statements(agreement.policy, "PublishAgentMetrics")
-        assert "cloudwatch:" not in text, (
-            "with the flag off the per-configuration execution role must carry no CloudWatch "
-            "permission at all: the collector is not in the image, so the grant would be "
-            "surface for free -- and this is the state a deploy from this branch produces"
-        )
-        return
+    This was once "no handler *but the provisioner*", because the provisioner minted a
+    `cloudwatch:PutMetricData` statement onto the container's execution role for Coding Agent
+    Insights. That feature is gone -- see `CLAUDE.md`'s note on why -- so the exception went
+    with it and the property is now the stronger one: no module here names a CloudWatch action
+    in any position, neither for its own role nor in a policy it writes for somebody else's.
 
-    (publish,) = _statements(agreement.policy, "PublishAgentMetrics")
-    assert _actions(publish) == ["cloudwatch:PutMetricData"], (
-        f"one write-only action and no other: `PutMetricData` grants no read of anybody's "
-        f"metrics, and the whole of the new exposure is junk datapoints. Got "
-        f"{_actions(publish)}"
-    )
-    assert _resources(publish) == ["*"], (
-        "`cloudwatch:PutMetricData` supports no resource-level permission, so `*` is the only "
-        "legal resource; a scoped ARN here matches no call and every export is denied"
-    )
-
-
-def test_no_handler_but_the_provisioner_names_cloudwatch() -> None:
-    """The mechanical form of "no handler under `api/src/handlers/` gains a CloudWatch grant".
-
-    The provisioner is allowed to name `cloudwatch:` because *minting* an execution-role policy
-    is that module's whole job -- the grant it writes is for the **container**, not for itself.
-    Every other module here runs as a control-plane Lambda, and Coding Agent Insights is read
-    by a human in the CloudWatch console: nothing in `api/` reads a metric, and nothing in
-    `api/` should be able to write one. Worth a test rather than a sentence because it is a
-    security property, and the cheapest way to break it is a helpful `put_metric_data` call in
-    a handler that already has an IAM statement nearby to extend.
+    Worth a test rather than a sentence because it is a security property, and the cheapest way
+    to break it is a helpful `put_metric_data` call in a handler that already has an IAM
+    statement nearby to extend. Reintroducing an exporter means reintroducing this grant, the
+    boundary widening that ceilings it, and an egress destination -- so it should cost a failing
+    test and a deliberate edit, not a line.
     """
     naming: dict[str, list[str]] = {}
     for module in _MODULES:
@@ -746,16 +695,12 @@ def test_no_handler_but_the_provisioner_names_cloudwatch() -> None:
         if found:
             naming[module] = found
 
-    assert set(naming) <= {"provisioner"}, (
-        f"{sorted(set(naming) - {'provisioner'})} name a cloudwatch: action. Only "
-        f"provisioner.py may, and only in the inline policy it mints onto the per-configuration "
-        f"execution role -- a CloudWatch permission on a control-plane Lambda's own role is a "
-        f"grant nobody asked for, and a read of a metric from api/ is a route this design does "
-        f"not have"
-    )
-    assert naming.get("provisioner") == ["cloudwatch:PutMetricData"], (
-        f"the provisioner may name exactly the one write-only action it grants the container, "
-        f"got {naming.get('provisioner')}"
+    assert naming == {}, (
+        f"{sorted(naming)} name a cloudwatch: action ({naming}). No handler under api/ reads or "
+        f"writes a metric, and none mints a policy that lets the container do so either -- the "
+        f"execution role's four reachable things are this repository's secret, this "
+        f"configuration's task items, Bedrock and a read-only ECR pull. A grant here makes it "
+        f"five and widens the permissions boundary to match"
     )
 
 
@@ -872,9 +817,6 @@ def test_the_boundary_permits_every_action_the_inline_policy_grants(
     here rather than in `tests/test_grant_contract.py` because building the inline policy
     at all needs the `aws` fixture and `test_api_fakes.load_handlers`.
 
-    Run in both states of `otelMetricsEnabled` (see the `agreement` fixture): with the flag on
-    the grant carries `cloudwatch:PutMetricData` and check 1 is what stands between that and a
-    fleet whose every export is an `AccessDenied` nothing reports.
     """
     boundary = agreement.boundary
     allows = [statement for statement in boundary if statement["Effect"] == "Allow"]
@@ -924,10 +866,6 @@ def test_the_boundary_permits_no_action_the_inline_policy_does_not_grant(
     wide is permission nobody reviewed. A wildcard Allow fails here even when a granted action
     matches it, because by construction it admits actions the inline policy does not spell --
     the classification and that rule both live in `tests/execution_boundary.py`.
-
-    Also run in both states of `otelMetricsEnabled`, which is the half that matters for the
-    metrics switch: a boundary widened for a grant that is off is dead surface, and this is
-    what says so.
     """
     boundary = agreement.boundary
     granted = execution_boundary.granted_actions(agreement.policy["Statement"])
@@ -961,10 +899,6 @@ def test_every_boundary_resource_is_the_grants_or_a_declared_widening(
     `execution_boundary.WIDER_RESOURCES` writes down. Resources are compared only inside a
     pair -- an Allow and the grant statements whose actions it permits -- because a resource
     means nothing without the action it is attached to.
-
-    `MayPublishAgentMetrics` is not a fourth: `cloudwatch:PutMetricData` supports no
-    resource-level permission, so `*` is the only legal resource on both sides and the grant
-    names it literally -- the same reason `MayAuthenticateToEcr` needs no declaration either.
     """
     boundary = agreement.boundary
 
@@ -999,11 +933,6 @@ def test_no_boundary_declaration_is_stale(agreement: _Agreement) -> None:
     `test_every_field_the_container_reads_is_sent_or_declared` treats `READ_NOT_SENT`: once
     the grant spells an action the boundary was excused for, or names a resource as wide as
     the ceiling, the entry stops describing a trade-off and starts hiding that there is none.
-
-    This is the test that refuses a `WIDER_RESOURCES` entry for `MayPublishAgentMetrics`' `*`,
-    and refusing it is correct: the grant names `*` literally too, because
-    `cloudwatch:PutMetricData` supports no resource-level permission, so there is no trade-off
-    to declare. `tests/execution_boundary.py` says so where the entry would go.
     """
     boundary = agreement.boundary
     granted = execution_boundary.granted_actions(agreement.policy["Statement"])

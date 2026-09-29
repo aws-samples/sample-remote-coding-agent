@@ -7,11 +7,8 @@ the transcript-versus-verdict rule are both asserted over hand-built dataclasses
 would take that whole property down with it, so `run_role` is only ever reached with
 `subagents.query` monkeypatched.
 
-The one thing `build_options` touches is the filesystem: `telemetry.exporter_env` stats
-the ADOT collector binary's path, which does not exist here, so every option surface below
-carries `CLAUDE_CODE_ENABLE_TELEMETRY: "0"` -- the container's interlock firing, and the
-reason no test here starts a collector or binds a port. `tests/test_agent_telemetry.py`
-owns that module; this file owns the wiring.
+`build_options` touches nothing at all -- no filesystem, no environment read -- so every
+option surface below is decided by the arguments the test passes in.
 
 The config these tests pass in is built by `_cfg`, which reads no environment at all.
 That is deliberate: this container has `AGENT_SKILL_PATHS` and `ANTHROPIC_MODEL` preset,
@@ -348,11 +345,10 @@ def test_build_options_stays_pure_with_a_memory_state(
 ) -> None:
     """`build_options` builds a memory server and still reaches no AWS.
 
-    The load-bearing one. `build_options` is documented as pure -- no session, no network,
-    and its only filesystem touch is `telemetry.exporter_env`'s probe for the collector
-    binary -- and every other test in this file depends on that: a server whose construction
-    reached AWS would take the whole offline test surface down with it, and in production it
-    would put an STS call on the critical path of every role session.
+    The load-bearing one. `build_options` is documented as pure -- no session, no network, no
+    filesystem -- and every other test in this file depends on that: a server whose
+    construction reached AWS would take the whole offline test surface down with it, and in
+    production it would put an STS call on the critical path of every role session.
 
     It holds because `TaskMemory` builds its boto3 client inside `record`/`search`, per call,
     so replacing `_client` with something that raises is a tripwire for a client built
@@ -440,9 +436,8 @@ def test_only_the_coding_role_can_fan_out(tmp_path: Path) -> None:
         assert options.agents is None, role
         assert options.max_budget_usd is None, role
         assert options.task_budget is None, role
-        # `CLAUDE_CODE_ENABLE_TELEMETRY: "0"` is `telemetry.exporter_env`'s interlock
-        # firing: these calls pass no `state` and run where no collector is installed, so
-        # the container exercises its one power over the exporter and switches it off.
+        # `CLAUDE_CODE_ENABLE_TELEMETRY: "0"` is a literal now rather than a probe's answer:
+        # the collector it used to depend on is gone, so nothing about the image can change it.
         assert options.env == {
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
             "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
@@ -489,38 +484,41 @@ def test_the_auto_memory_switch_survives_the_fanout_env_merge(tmp_path: Path) ->
     assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in subagents.FANOUT_ENV
 
 
-def test_the_exporter_env_is_splatted_into_the_session_environment(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """`build_options` really calls `telemetry.exporter_env`, rather than matching its output.
+def test_no_role_gets_an_otlp_exporter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The session environment turns the CLI's OTLP exporter off and configures none.
 
-    Everywhere these tests run there is no collector, so `exporter_env` returns
-    `{"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}` and an assertion on that value alone would
-    stay green on a `build_options` that stopped calling it and wrote the literal instead.
-    So the function is replaced with one returning a value nothing else in the tree
-    produces: that is the only way to tell "splatted" from "coincidentally equal".
+    This replaces a test that asserted the opposite direction. There used to be an
+    in-container ADOT collector that SigV4-signed the CLI's metrics to CloudWatch for Coding
+    Agent Insights, and `build_options` splatted a `telemetry.exporter_env` group in here
+    carrying `OTEL_EXPORTER_OTLP_ENDPOINT` and four siblings. That feature is gone --
+    `CLAUDE.md` records why -- and what remains is the one variable that turns OTLP on,
+    pinned off.
+
+    Asserted over every role, and as an absence rather than a value:
+    `CLAUDE_CODE_ENABLE_TELEMETRY=1` with no receiver makes every session retry against a
+    closed port, and an `OTEL_EXPORTER_OTLP_ENDPOINT` that named a real host would be an
+    egress destination invariant 33 has not sanctioned -- neither of which fails loudly.
     """
-    calls: list[tuple[str, Any]] = []
-    attributes = "team.id=owner/repo,task.id=task-1,role=code"
-
-    def fake_exporter_env(role: str, state: TaskState | None) -> dict[str, str]:
-        calls.append((role, state))
-        return {"OTEL_RESOURCE_ATTRIBUTES": attributes}
-
-    monkeypatch.setattr(subagents.telemetry, "exporter_env", fake_exporter_env)
+    cfg = _cfg()
     state: TaskState = {"taskId": "task-1", "repository": "owner/repo"}
-
-    options = subagents.build_options("code", cwd=tmp_path, cfg=_cfg(), state=state)
-
-    assert options.env["OTEL_RESOURCE_ATTRIBUTES"] == attributes
-    # Both arguments arrive. The attributes are PER-TURN, so a call that dropped the role
-    # or the state would dimension every metric in the fleet identically.
-    assert calls == [("code", state)]
-    # And the merge leaves the two groups that own their own reasons intact: the
-    # cross-tenant auto-memory literal, and the fan-out blast-radius pair.
-    assert options.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
-    for name, value in subagents.FANOUT_ENV.items():
-        assert options.env[name] == value, name
+    for role in ("plan", "replan", "code", "review"):
+        options = subagents.build_options(role, cwd=tmp_path, cfg=cfg, state=state)
+        assert options.env["CLAUDE_CODE_ENABLE_TELEMETRY"] == "0", (
+            f"{role} must carry the exporter switch explicitly off: it is the only variable "
+            f"that turns the CLI's OTLP export on, and this deployment runs no receiver"
+        )
+        exporter = sorted(name for name in options.env if name.startswith("OTEL_"))
+        assert exporter == [], (
+            f"{role} carries {exporter}, which configures an OTLP exporter. Reintroducing one "
+            f"means choosing an endpoint, a receiver and an egress destination first -- see "
+            f"`CLAUDE.md` on why Coding Agent Insights was removed rather than left wired up"
+        )
+    # `code` is the fan-out role, and the implementer inherits its parent's environment rather
+    # than getting one of its own, so a fan-out session cannot export what its parent may not.
+    assert not any(name.startswith("OTEL_") for name in subagents.FANOUT_ENV), (
+        "FANOUT_ENV is merged in after the literals above, so an OTEL_ name there would reach "
+        "the coding role and its implementer while every other role stayed clean"
+    )
 
 
 def test_the_fanout_prompt_offers_rather_than_requires() -> None:

@@ -18,7 +18,7 @@ from typing import Any
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
-from . import graph, store, telemetry
+from . import graph, store
 from .state import TaskState
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -89,15 +89,4 @@ def invoke(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    # Inside `__main__` and never at import: `tests/test_server.py` imports this module,
-    # and a `Popen` at module scope would spawn a process on every collection. It also
-    # belongs to the *serving* container rather than to the package -- a `local_run` has
-    # no collector and wants none.
-    #
-    # The handle is kept rather than discarded so a reader can see the collector is a
-    # child of this process and not a daemon someone else reaps, and it is deliberately
-    # unsupervised: `start_collector` returns `None` when the image carries no collector,
-    # which is the shipped default, and `telemetry.exporter_env` switches the CLI's
-    # exporter off to match.
-    collector = telemetry.start_collector()
     app.run()
