@@ -132,10 +132,17 @@ _SSH_REPOSITORY = re.compile(
 # way, and one definition of "looks like a fine-grained PAT" in the bundle beats two.
 _FINE_GRAINED = re.compile(r"^github_pat_[A-Za-z0-9_]{6,}$")
 
-# Not the gate any more, the *reason*: the `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` prefixes and
-# the 40-hex shape of a pre-2021 token are the refusals worth explaining specifically.
-_CLASSIC_PREFIX = re.compile(r"^gh[pousr]_")
+# A classic personal access token: the `ghp_` prefix, or the bare 40-hex shape of a
+# pre-2021 one. **Accepted**, with a warning -- see `_require_supported_token`.
+_CLASSIC_PREFIX = re.compile(r"^ghp_")
 _CLASSIC_HEX = re.compile(r"^[0-9a-f]{40}$")
+
+# The three GitHub App token prefixes, which stay refused. Not a security judgement: they
+# expire an hour after they are issued and nothing in this codebase refreshes one, so an
+# accepted `ghs_` registers fine and then fails inside a container an hour later, which is
+# the worst failure shape available. `gho_` is an OAuth user token and is refused with them
+# -- accepting it buys nothing a `ghp_` does not, and it cannot be scoped either.
+_EXPIRING_OR_OAUTH_PREFIX = re.compile(r"^gh[osur]_")
 
 
 def _new_config_id() -> str:
@@ -158,42 +165,60 @@ def _repository_from_url(url: str) -> str:
     return f"{match.group('owner')}/{match.group('repo')}"
 
 
-def _require_supported_token(token: str) -> None:
-    """PLAN Tier 0 #2, the offline half: the shape of the one credential this system
-    supports, checked without a network call.
+def _require_supported_token(token: str) -> bool:
+    """The shape of a credential this system can use, checked without a network call.
+    Returns `True` when the token is a classic one, so the caller can warn.
 
-    An allowlist rather than a denylist. A classic personal access token cannot be scoped
-    to a single repository, so a stolen one grants everything the operator can reach
-    rather than what the agent legitimately needs -- but refusing only the shapes we
-    happened to think of admits the rest, and every one of those is discovered 25 minutes
-    later as a `git clone`/push failure inside a container. So the two classic patterns
-    now decide the *message*, not the verdict.
+    **A classic PAT is accepted, and that is a deliberate trade.** It cannot be scoped to a
+    single repository, so a stolen one reaches everything its owner can -- but it takes three
+    decisions to create where a fine-grained token takes about nine, and the setup churn was
+    turning people away before they ever saw the agent run. The bound that matters is stated
+    in `README.md` instead and is the same one this system already relies on for AWS: a
+    dedicated, disposable account. On an account that owns only the demo repository the
+    distinction is academic; on an account that owns real work it is not, which is why the
+    README says so in as many words rather than leaving it implied.
 
-    Free, and first: the live push check (`_require_pushable`) must never be reached by a
-    token this can already refuse.
+    Still an allowlist, and two shapes stay out:
+
+    * `ghs_`/`ghu_`/`ghr_` GitHub App tokens, because they expire an hour after issue and
+      nothing here refreshes one. Accepting one means registration succeeds and every task an
+      hour later fails inside a container -- later and more confusing than refusing it now.
+    * `gho_` OAuth user tokens, for the same expiry reason and because they buy nothing a
+      classic PAT does not.
+
+    Anything unrecognised is refused rather than passed through, for the reason the allowlist
+    has always had: an unknown shape is discovered 25 minutes later as a `git clone` failure
+    inside a provisioned container.
+
+    Free, and first: `_require_pushable` must never be reached by a token this can refuse.
     """
     if _FINE_GRAINED.match(token):
-        return
+        return False
     if _CLASSIC_PREFIX.match(token) or _CLASSIC_HEX.match(token):
+        LOG.warning(
+            "a classic personal access token was accepted; it cannot be scoped to one "
+            "repository, so its blast radius is every repository its owner can reach"
+        )
+        return True
+    if _EXPIRING_OR_OAUTH_PREFIX.match(token):
         raise ApiError(
             400,
-            "ClassicTokenRejected",
-            "that is a classic personal access token, and a classic PAT cannot be scoped "
-            "to one repository -- a stolen one would reach every repository you can. Use "
-            "a fine-grained token (github_pat_...) scoped to this repository alone with "
-            "contents: write and pull_requests: write. A ghs_/ghu_/ghr_ GitHub App "
-            "installation token is refused here for a different reason: the API accepts "
-            "it, it expires an hour later, and this codebase has no refresh path, so an "
-            "accepted one fails inside a container an hour after you registered.",
+            "ExpiringTokenRejected",
+            "that is a GitHub App installation or OAuth token. The API would accept it and "
+            "it expires an hour later, and this codebase has no refresh path -- so it would "
+            "register cleanly and then fail inside a container an hour from now. Use a "
+            "personal access token: fine-grained (github_pat_...) scoped to this repository "
+            "with contents: write and pull_requests: write, or a classic one (ghp_...), "
+            "which is accepted and is not scoped to a single repository.",
         )
     raise ApiError(
         400,
         "UnsupportedTokenType",
-        "that does not look like a GitHub fine-grained personal access token. This "
-        "system supports exactly one credential: a fine-grained token (github_pat_...) "
-        "scoped to this repository alone with contents: write and pull_requests: write. "
-        "The check is an allowlist on purpose -- anything else is accepted here and then "
-        "fails inside a provisioned container, half an hour after the mistake was made.",
+        "that does not look like a GitHub personal access token. This system takes a "
+        "fine-grained token (github_pat_...) scoped to this repository with contents: write "
+        "and pull_requests: write, or a classic one (ghp_...). The check is an allowlist on "
+        "purpose -- anything else is accepted here and then fails inside a provisioned "
+        "container, half an hour after the mistake was made.",
     )
 
 

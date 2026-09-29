@@ -36,8 +36,10 @@ it does not make untrusted code safe. A runtime or publishing failure may produc
 
 - A dedicated AWS account, with credentials for your intended profile and region.
 - Docker running, Python ≥ 3.11 (tested with 3.12), `uv`, Node ≥ 20, and the AWS CLI.
-- A trusted, disposable repository and a **fine-grained GitHub PAT** scoped to it with
-  `contents: write` and `pull requests: write`. Classic PATs are refused.
+- A trusted, disposable repository and a **GitHub PAT**. A classic token with the `repo`
+  scope is the quickest — the console links to a page with it pre-ticked — but it is not
+  limited to one repository; see [Token scope](#token-scope-read-this). A fine-grained token
+  with `contents: write` and `pull requests: write` is the tighter choice.
 
 Preflight checks AgentCore/model availability and prints any required CDK bootstrap command.
 The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI works without it.
@@ -182,9 +184,52 @@ Run `make setup`, `make test`, and `make lint`. Local tests use fake AWS service
 See [contribution guidelines](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md),
 and [maintainer reference](CLAUDE.md). Keep diagrams and previews in sync with UI changes.
 
+## Token scope: read this
+
+The console offers two credentials and they are **not** equivalent.
+
+| | classic PAT (`ghp_…`) | fine-grained PAT (`github_pat_…`) |
+|---|---|---|
+| to create | ~3 decisions, scope pre-ticked from the console link | ~9 decisions, no prefill possible |
+| reach if leaked | **every repository its owner can access** | the one repository you selected |
+| scope to set | `repo`, or `public_repo` for a public repository | `contents: write`, `pull requests: write` |
+
+A classic token **cannot be limited to one repository.** GitHub does not offer that, so a
+classic token registered here can read and write everything its owner can reach. This system
+runs an arbitrary repository's own setup and test commands with a model pointed at them, and
+it does not prevent prompt injection — so treat the token as reachable by that code.
+
+Both are accepted because the fine-grained flow was turning people away before they saw a
+single run: nine decisions in a list of about fifty permissions, none of which can be
+pre-filled from a link. The classic page can be, so it is one click from Generate.
+
+**If you use a classic token, use a GitHub account that owns nothing you mind losing.** That
+is the same bound this sample already asks for on the AWS side — a dedicated account — and it
+is what makes the wider scope survivable rather than merely convenient. For anything else,
+spend the extra clicks on a fine-grained token.
+
+GitHub App and OAuth tokens (`ghs_`, `ghu_`, `ghr_`, `gho_`) are refused, and not on security
+grounds: they expire an hour after issue and nothing here refreshes one, so registration
+would succeed and every task an hour later would fail inside a container.
+
+## Limitations
+
+- **The token is minted by hand.** GitHub has no API to create a PAT, so this cannot be
+  automated. The alternative is a GitHub App, which needs an App registered and installed
+  before the first repository can be added — more setup than it saves for one repository.
+- **A classic token's blast radius is its owner's whole account**, as above.
+- **Commit attribution** defaults to an address that matches no GitHub account, so checks
+  that gate on it will refuse the agent's pull requests. Pass `-c gitAuthorName=` and
+  `-c gitAuthorEmail=` at deploy time to fix it.
+- **AgentCore Runtime V2 only**, so deployment is limited to `us-east-1`, `us-east-2`,
+  `us-west-2`, `eu-west-1` and `ap-northeast-1`.
+- **Memory is implemented and undemonstrated**: no run has yet shown one task recalling what
+  another wrote, and events expire after 90 days.
+
 ## Security
 
-Use a fine-grained PAT for one trusted repository and protect its default branch.
+Protect the default branch of the repository you register. Read [Token scope](#token-scope-read-this)
+before choosing a credential.
 The account boundary does not stop repository code from making outbound HTTPS requests.
 [Remaining exposure](CLAUDE.md#what-remains-exposed)
 

@@ -50,9 +50,19 @@ from conftest import REPO_ROOT
 README = REPO_ROOT / "README.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 
-# ~180 lines is the target; 200 is the ceiling, so a step gained or a gap named does not
+# ~230 lines is the target; 250 is the ceiling, so a step gained or a gap named does not
 # fail the suite but a section does.
-_README_MAX_LINES = 200
+#
+# Raised from 200 deliberately, once, for `## Token scope -- read this` and `## Limitations`.
+# The ceiling exists to stop the README becoming a reference manual, and those two sections
+# are the opposite of reference material: a classic PAT is now accepted, it cannot be limited
+# to one repository, and a reader has to know that **before** choosing a credential. Putting
+# it in `CLAUDE.md` would be putting it where the person making the choice is not looking.
+#
+# The README was sitting at exactly 200 when this was raised -- no headroom at all -- so the
+# alternative was deleting a walkthrough step to make room for a security warning, which is
+# the wrong trade. Raise this again only for something that changes what an operator does.
+_README_MAX_LINES = 250
 
 # Required navigation, not an exact editorial outline. Keep the entry page short.
 _README_HEADINGS = ["## Quick start", "## Architecture", "## Costs and cleanup"]

@@ -195,31 +195,58 @@ def test_an_unrecognised_repository_url_names_the_accepted_forms(aws: Any, url: 
     "token",
     [
         "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-        "gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        # A pre-2021 classic token: bare 40 hex characters, no prefix at all.
         "0123456789abcdef0123456789abcdef01234567",
-        # A GitHub App installation token. Already caught by the prefix class, and the
-        # point of pinning it here is that it *stays* caught: the API accepts one, it
-        # expires an hour later, and this codebase has no refresh path.
-        "ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
     ],
 )
-def test_a_classic_pat_is_refused_with_the_reason(
+def test_a_classic_pat_is_accepted(aws: Any, github: _FakeGitHub, token: str) -> None:
+    """A classic PAT registers, and that is a deliberate trade rather than an oversight.
+
+    It cannot be scoped to one repository, so a stolen one reaches everything its owner can.
+    What bought the change is setup churn: three decisions to create one against roughly nine
+    for a fine-grained token, and people were giving up before they saw the agent run. The
+    bound is stated in `README.md` -- a dedicated, disposable account -- which is the same
+    bound this system already relies on for AWS.
+
+    The live push check still runs, so an under-permissioned classic token is still caught in
+    milliseconds rather than inside a container.
+    """
+    common, _provisioner, configurations = _load("provisioner", "configurations")
+    response = _register(configurations, token=token)
+    assert response["statusCode"] == 201, _body(response)
+    stored = common.config_table.scan()["Items"]
+    assert len(stored) == 1
+    # It was proved pushable before it was stored, exactly as a fine-grained one is.
+    assert github.calls, "the live push probe must run for a classic token too"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        # GitHub App installation and user-to-server tokens, and an OAuth user token. All
+        # refused for the same non-security reason: they expire an hour after issue and
+        # nothing here refreshes one, so accepting one moves the failure into a container an
+        # hour later instead of reporting it now.
+        "ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        "ghu_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        "ghr_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        "gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    ],
+)
+def test_a_token_that_expires_in_an_hour_is_refused_with_the_reason(
     aws: Any, github: _FakeGitHub, token: str
 ) -> None:
-    """PLAN Tier 0 #2: the refusal has to say *why*, or the operator retries with the
-    same class of token."""
+    """The refusal has to say *why*, or the operator retries with the same class of token."""
     common, _provisioner, configurations = _load("provisioner", "configurations")
     response = _register(configurations, token=token)
     assert response["statusCode"] == 400
 
     body = _body(response)
-    assert body["error"] == "ClassicTokenRejected"
-    assert "one repository" in body["message"]
+    assert body["error"] == "ExpiringTokenRejected"
+    assert "expires an hour later" in body["message"]
     assert "github_pat_" in body["message"]
-    assert "contents: write" in body["message"]
-    assert "pull_requests: write" in body["message"]
-    # Nothing was written on the way to the refusal, and nothing was asked of GitHub:
-    # the shape check is offline and comes first.
+    # Nothing was written on the way to the refusal, and nothing was asked of GitHub: the
+    # shape check is offline and comes first.
     assert common.config_table.scan()["Items"] == []
     assert common.secrets.list_secrets()["SecretList"] == []
     assert github.calls == []
@@ -228,9 +255,9 @@ def test_a_classic_pat_is_refused_with_the_reason(
 @pytest.mark.parametrize(
     ("token", "error"),
     [
-        # An App installation token: refused by the classic branch, which explains the
-        # one-hour expiry there is no refresh path for.
-        ("ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "ClassicTokenRejected"),
+        # An App installation token: refused for its one-hour expiry, which there is no
+        # refresh path for.
+        ("ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "ExpiringTokenRejected"),
         ("xoxb-slack-not-github-000000", "UnsupportedTokenType"),
         ("glpat-ABCDEFGHIJKLMNOPQRST", "UnsupportedTokenType"),
         ("just-a-string-someone-pasted", "UnsupportedTokenType"),
@@ -974,7 +1001,14 @@ def test_rotation_refuses_a_body_carrying_any_other_key(aws: Any, body: dict[str
     assert "PATCH /configurations/" in _body(response)["message"]
 
 
-def test_rotation_also_refuses_a_classic_pat(aws: Any) -> None:
+def test_rotation_refuses_a_token_that_expires_in_an_hour(aws: Any) -> None:
+    """Rotation runs the same shape check as registration, so it cannot widen what
+    registration narrowed -- nor accept a shape registration would not.
+
+    A classic PAT is now accepted on both routes; what stays refused is the App/OAuth family,
+    because nothing here refreshes an hour-long token and an accepted one would fail inside a
+    container long after the rotation looked successful.
+    """
     common, _provisioner, configurations = _load("provisioner", "configurations")
     _seed(common)
     response = configurations.rotate_token(
@@ -982,12 +1016,12 @@ def test_rotation_also_refuses_a_classic_pat(aws: Any) -> None:
             _CONFIG_ID,
             "PUT",
             "/configurations/{configId}/github-token",
-            body={"githubToken": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"},
+            body={"githubToken": "ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"},
         ),
         None,
     )
     assert response["statusCode"] == 400
-    assert _body(response)["error"] == "ClassicTokenRejected"
+    assert _body(response)["error"] == "ExpiringTokenRejected"
 
 
 def test_rotation_refuses_a_token_that_cannot_push_and_keeps_the_old_secret(

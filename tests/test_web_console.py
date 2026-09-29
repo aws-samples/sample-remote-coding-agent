@@ -504,48 +504,45 @@ def test_the_example_configuration_names_no_real_deployment() -> None:
     )
 
 
-def test_the_register_view_links_to_the_token_page_and_names_the_repository() -> None:
-    """The register view builds a GitHub token-page link from whatever is typed above it.
+def test_the_register_view_prefills_the_token_scope_and_warns_about_it() -> None:
+    """The register view links at a token page with the scope already ticked, and says what
+    that scope costs.
 
-    This is the console's answer to the step that actually confuses people. The path is
-    Settings -> Developer settings -> Personal access tokens -> Fine-grained, four levels
-    deep, and it is where the *wrong kind* of token gets chosen -- a classic one, which
-    `configurations._require_supported_token` then refuses. A link removes the navigation and
-    the guess.
+    The link points at the **classic** page, and that is the whole reason it can prefill:
+    `/settings/tokens/new` honours `scopes` and `description`, while GitHub documents no query
+    parameters for `/settings/personal-access-tokens/new` and ignores them. Getting a classic
+    token is ~3 decisions against ~9 in a list of about fifty permissions, which is the churn
+    this removes.
 
-    Asserted as text over the module rather than by executing it, like every other contract in
-    this file: there is no DOM here. What is pinned is the shape a reviewer would otherwise
-    have to take on trust -- that the link is built from the repository field, that it cannot
-    pre-select the permissions (GitHub documents no query parameters for that page, so the two
-    are named beside it instead), and that it opens with `noopener`, because it opens a page
-    where a credential is about to be created.
+    What it must not do is remove the churn quietly. A classic token cannot be limited to one
+    repository, so the view has to say so where the operator is choosing, and the fine-grained
+    page has to stay offered as the tighter option. Asserted as text over the module, like
+    every other contract here: there is no DOM in this suite.
     """
     source = (WEB / "js" / "views" / "register.js").read_text(encoding="utf-8")
 
+    assert "https://github.com/settings/tokens/new" in source, (
+        "the primary link must be the classic token page -- it is the only one that honours "
+        "`?scopes=`, which is what makes a prefilled link possible at all."
+    )
+    assert "scopes: scope" in source or "scopes=" in source, (
+        "the link must pass the scope as a query parameter, or nothing is prefilled and the "
+        "operator is back to picking from a list."
+    )
     assert "https://github.com/settings/personal-access-tokens/new" in source, (
-        "register.js must link to the fine-grained token page. Describing the path in prose is "
-        "what it replaced."
+        "the fine-grained page must stay offered: it is the only shape that limits a leaked "
+        "token to one repository."
     )
-    assert "repositorySlug" in source and "tokenPageUrl" in source, (
-        "the link's target is derived from the repository field, so both helpers must exist; a "
-        "hard-coded href would stop naming the operator's repository."
+    assert "not" in source and "limited to one repository" in source, (
+        "a classic token reaches every repository its owner can. The view must say so at the "
+        "point of choice, not only in the README."
     )
-    assert 'urlField.addEventListener("input"' in source, (
-        "the link has to track the repository field as it is typed, or it names the wrong "
-        "repository for anyone who edits the URL after first render."
-    )
-    assert "noopener" in source, (
-        "the token link opens a page where a credential is created, so it must carry rel=noopener."
-    )
-    # The two permissions are named in the view because a URL cannot select them.
-    for permission in ("Contents: Read and write", "Pull requests: Read and write"):
-        assert permission in source, (
-            f"register.js must name {permission!r} beside the link. GitHub documents no query "
-            "parameters for the fine-grained token page -- the unofficial `?scopes=` works only "
-            "on the *classic* page -- so the permissions cannot be pre-selected and have to be "
-            "spelled out where the operator is looking."
+    for scope in ("repo", "public_repo"):
+        assert scope in source, (
+            f"the view must name the {scope!r} scope: `repo` is what the link pre-ticks, and "
+            "`public_repo` is the tighter answer for a public repository, which a URL cannot "
+            "know."
         )
-    assert "Only select repositories" in source, (
-        "the repository-access choice is the one that decides whether a leaked token reaches "
-        "one repository or all of them, so the view names it."
+    assert "noopener" in source, (
+        "the token links open pages where a credential is created, so they must carry rel=noopener."
     )

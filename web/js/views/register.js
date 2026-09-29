@@ -93,21 +93,32 @@ export function repositorySlug(value) {
   return match ? `${match[1]}/${match[2]}` : "";
 }
 
-// Where a fine-grained token is made. The page is linked rather than described because the
-// path through Settings -> Developer settings -> Personal access tokens -> Fine-grained is
-// four levels deep and is where the wrong token type gets chosen.
+// Where a token is made. The **classic** page, not the fine-grained one, and that is the
+// whole reason this link can prefill at all: `/settings/tokens/new` honours `scopes` and
+// `description` query parameters, while GitHub documents no parameters for
+// `/settings/personal-access-tokens/new` and ignores them. So a classic token arrives
+// pre-ticked and one click from Generate, where a fine-grained one is nine decisions in a
+// list of about fifty permissions.
 //
-// Only `description` is passed, and it is **best-effort**: GitHub documents no query
-// parameters for this page -- the long-standing `?scopes=` on the *classic* page is
-// unofficial and there is no fine-grained equivalent -- so the repository and the two
-// permissions cannot be pre-selected from a URL. They are spelled out beside the link
-// instead. If GitHub ignores `description`, nothing breaks; the link still lands on the
-// right page, which is most of what was confusing.
-const TOKEN_PAGE = "https://github.com/settings/personal-access-tokens/new";
+// `repo` is the scope. The agent needs to read the tree, push a branch and open a pull
+// request; `repo` covers all three on a private repository, and `public_repo` is the tighter
+// choice when the repository is public -- the hint beside the link says so, because this URL
+// cannot know which it is.
+//
+// The trade is real and is stated in `README.md`: a classic token is not scoped to one
+// repository, so it reaches everything its owner can. That is why the fine-grained page is
+// still offered as the second link rather than dropped.
+const CLASSIC_TOKEN_PAGE = "https://github.com/settings/tokens/new";
+const FINE_GRAINED_TOKEN_PAGE = "https://github.com/settings/personal-access-tokens/new";
 
-export function tokenPageUrl(slug) {
-  if (!slug) return TOKEN_PAGE;
-  return `${TOKEN_PAGE}?description=${encodeURIComponent(`remote coding agent -- ${slug}`)}`;
+export function tokenPageUrl(slug, { scope = "repo" } = {}) {
+  const description = slug ? `remote coding agent -- ${slug}` : "remote coding agent";
+  const query = new URLSearchParams({ scopes: scope, description });
+  return `${CLASSIC_TOKEN_PAGE}?${query}`;
+}
+
+export function fineGrainedTokenPageUrl() {
+  return FINE_GRAINED_TOKEN_PAGE;
 }
 
 export function mount(root, { configId }) {
@@ -147,31 +158,50 @@ function mountRegister(root) {
   // `--ink-faint` overrode `a`'s `--accent` and the anchor rendered as 12px grey text
   // indistinguishable from the paragraph above it. It was there and nobody could see it,
   // which for a link is the same as not being there.
+  // `field-link`, NOT `field-hint`: a class beats an element in CSS, so `.field-hint`'s
+  // `--ink-faint` overrode `a`'s `--accent` and the anchor rendered as 12px grey text
+  // indistinguishable from the paragraph above it. It was there and nobody could see it,
+  // which for a link is the same as not being there.
   const tokenLink = ui.el("a", {
     class: "field-link",
-    href: TOKEN_PAGE,
+    href: tokenPageUrl(""),
     target: "_blank",
     // `noopener` because this opens a page where a credential is about to be created.
     rel: "noopener noreferrer",
   });
   const tokenScope = ui.el("span", { class: "field-hint" });
+  // The tighter option, offered second rather than dropped: it cannot be prefilled, but it is
+  // the only shape that limits a leaked token to one repository.
+  const fineGrainedLink = ui.el("a", {
+    class: "field-link",
+    href: fineGrainedTokenPageUrl(),
+    target: "_blank",
+    rel: "noopener noreferrer",
+    text: "Or create a fine-grained token, scoped to one repository (not prefillable)",
+  });
 
   function refreshTokenLink() {
     const slug = repositorySlug(urlField.value);
     tokenLink.setAttribute("href", tokenPageUrl(slug));
     tokenLink.textContent = slug
-      ? `Create a fine-grained token for ${slug} on GitHub`
-      : "Create a fine-grained token on GitHub";
+      ? `Create a token for ${slug} on GitHub -- scope prefilled`
+      : "Create a token on GitHub -- scope prefilled";
     ui.empty(tokenScope);
     ui.append(tokenScope, [
-      "On that page: Repository access -> ",
-      ui.el("strong", {}, "Only select repositories"),
-      slug ? ` -> ${slug}. Then Repository permissions -> ` : " -> your repository. Then Repository permissions -> ",
-      ui.el("strong", {}, "Contents: Read and write"),
-      " and ",
-      ui.el("strong", {}, "Pull requests: Read and write"),
-      ". Nothing else. If the owner is an organisation, choose it as Resource owner -- " +
-        "organisations have to enable fine-grained tokens before that appears.",
+      "That page opens with ",
+      ui.el("strong", {}, "repo"),
+      " already ticked, which is what the agent needs to read the tree, push a branch and " +
+        "open a pull request. Set an expiry and press Generate. For a ",
+      ui.el("strong", {}, "public"),
+      " repository ",
+      ui.el("strong", {}, "public_repo"),
+      " alone is enough -- untick ",
+      ui.el("strong", {}, "repo"),
+      " and tick that instead. A classic token is ",
+      ui.el("strong", {}, "not"),
+      " limited to one repository: it reaches every repository its owner can, so use an " +
+        "account that owns nothing you mind. The fine-grained link below is the way to " +
+        "limit it to this repository alone.",
     ]);
   }
   urlField.addEventListener("input", refreshTokenLink);
@@ -274,6 +304,7 @@ function mountRegister(root) {
           tokenField,
           tokenLink,
           tokenScope,
+          fineGrainedLink,
           ui.el(
             "span",
             { class: "field-hint" },
