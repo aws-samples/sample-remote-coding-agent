@@ -10,7 +10,7 @@ the provisioner nor listed below as a deliberate default with a reason.
 The direction is **one-way on purpose**: reads are a subset of forwarded plus declared,
 and never the converse. A variable that is forwarded and not yet read is fine and is
 expected -- `CLAUDE_CODE_USE_BEDROCK` is read by the Claude Code CLI rather than by our
-own code, and `CONFIG_ID`/`CREDENTIAL_PROVIDER_NAME` reach the graph through the payload --
+own code, and `CONFIG_ID`/`SECRET_ARN` reach the graph through the invocation payload --
 so asserting the converse would fail on all three and teach nobody anything.
 
 Both sides are read with `ast` and neither is imported. `provisioner.py` cannot be
@@ -432,7 +432,7 @@ def test_the_two_fleet_policy_knobs_are_classified_as_fleet() -> None:
         )
     # And the two that genuinely vary per repository, asserted the other way round so the
     # classification cannot be satisfied by putting everything in one group.
-    for name in ("CONFIG_ID", "CREDENTIAL_PROVIDER_NAME"):
+    for name in ("CONFIG_ID", "SECRET_ARN"):
         assert name in per_configuration and name not in fleet, (
             f"{name} names one configuration's own runtime, so it is a create-time default that "
             f"loses to the live value, not fleet policy"

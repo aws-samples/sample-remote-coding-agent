@@ -48,10 +48,8 @@ def _seed_config(common: Any) -> dict[str, Any]:
         "verifyCommand": "make test",
         "setupCommand": "make setup",
         # The container's only route to a GitHub token: it is read by `nodes/checkout.py`
-        # and `nodes/submit.py`, so the payload test asserts it is forwarded. A provider
-        # *name* and not an ARN -- the container asks Identity for the credential that name
-        # resolves to for its workload, and never holds a secret ARN.
-        "credentialProviderName": "rca_cfg_0123456789ab",
+        # and `nodes/submit.py`, so the payload test asserts it is forwarded.
+        "secretArn": "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:rca/github/cfg_0123456789ab-AbCdEf",
         "agentRuntimeArn": RUNTIME_ARN,
         "agentRuntimeId": "rca_cfg_0123456789ab-ABC123",
         "createdAt": SEEDED_AT,
@@ -314,7 +312,7 @@ def test_the_payload_is_the_contract_the_agent_reads(
         "defaultBranch",
         "verifyCommand",
         "setupCommand",
-        "credentialProviderName",
+        "secretArn",
     ):
         assert sent[key] == config[key]
     assert sent["resume"] is False

@@ -149,15 +149,13 @@ WIDER_RESOURCES: dict[tuple[str, str], str] = {
         "work at all."
     ),
     (
-        "MayUseOwnCredential",
-        f"arn:aws:bedrock-agentcore:{REGION}:{ACCOUNT}:"
-        f"token-vault/*/apikeycredentialprovider/{APP_NAME}_*",
+        "MayReadOneSecret",
+        f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{APP_NAME}/github/*",
     ): (
-        "One ceiling spans every configuration's credential provider because the boundary is "
-        "minted once per deploy, before any configuration exists, while the grant names one "
-        "literal provider ARN per role. The vault id is a wildcard because a deploy does not "
-        "choose it -- it is the account's own vault -- and the name wildcard is the "
-        "`rca_<configId>` namespace `configurations._provider_name` writes under."
+        "One ceiling spans every configuration's secret because the boundary is minted once "
+        "per deploy while the grant names one literal ARN per role, and the trailing `*` "
+        "also absorbs the six-character suffix Secrets Manager appends to every secret ARN "
+        "-- an ARN ending at the name matches nothing at all."
     ),
     # `/aws/bedrock-agentcore/runtimes` spelled out rather than imported from
     # `agent_stack.RUNTIME_LOG_GROUP_PREFIX`: this module imports nothing.

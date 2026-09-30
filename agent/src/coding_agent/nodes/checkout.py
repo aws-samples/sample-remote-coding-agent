@@ -174,11 +174,7 @@ async def checkout(state: TaskState) -> dict[str, Any]:
     if not (repo_dir / ".git").exists():
         # A resume finds the clone already there and must not re-clone over it.
         source = state.get("cloneSource") or f"https://github.com/{state['repository']}.git"
-        token = (
-            store.github_token(state["credentialProviderName"])
-            if state.get("credentialProviderName")
-            else None
-        )
+        token = store.github_token(state["secretArn"]) if state.get("secretArn") else None
         log.info("cloning %s", state.get("repository") or source)
         git_ops.clone(source, repo_dir, token=token)
     else:

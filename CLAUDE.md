@@ -92,9 +92,6 @@ one is the failure mode:
 - `observability.session_id` is the one owner of session ids -- a second session means
   two branches and two pull requests (invariant 18).
 - `_common` is the only place a boto3 client is built.
-- `configurations._provider_name` is the one owner of a configuration's credential provider
-  name, which is the identifier the container is given -- a second spelling is a runtime
-  asking Identity for a credential that does not exist.
 - `git_ops` is every git invocation in the container.
 - `agentcore_memory` is the one owner of the keying rule (D6) and of every
   `bedrock-agentcore` data-plane call in the container -- `memory_tools`' two tools and
@@ -215,8 +212,8 @@ for `rca-console` — the second one fails at `CreateUserPoolDomain`. And the MC
 follows a renamed fleet through its existing optional `stack_name` user config, i.e.
 `RCA_STACK_NAME`: `mcp/src/rca_mcp/client.py::DEFAULT_STACK_NAME` is pinned to the
 *default* `SampleCodingAgentApi` and stays there. `APP_NAME = "rca"` is not part of the
-prefix, so two fleets in one account still share the `/rca/` IAM path and the `rca_*`
-credential-provider namespace in the account's AgentCore Identity token vault.
+prefix, so two fleets in one account still share the `/rca/` IAM path and the
+`rca/github/*` secret namespace.
 
 ### What the walkthrough touches, and where it lives
 
@@ -267,8 +264,8 @@ Everything the walkthrough used to attribute inline lives here, in the order an 
 - **Deregistration is console-only.** `DELETE /configurations/{configId}` is reachable from neither
   the plugin (`ApiClient.ALLOWED_METHODS` is `{"GET", "POST"}`) nor the `aws` CLI, which cannot
   SigV4-sign an arbitrary `execute-api` URL. It returns `202` and stays `DELETING` while
-  `provisioner._delete` removes the runtime, the `/rca/` role and its policy, the credential
-  provider, and the item **last** — **1-3 min** each. A `cdk destroy` first orphans all three.
+  `provisioner._delete` removes the runtime, the `/rca/` role and its policy, the secret, and the
+  item **last** — **1-3 min** each. A `cdk destroy` first orphans all three.
 - **The five names the teardown step spells out** are `infra/app.py::stack_names` at the default
   prefix. The account stack is one per consuming region, suffixed as `infra/app.py::region_suffix`
   spells it (`eu-west-1` → `…AccountEuWest1`); `STACK_PREFIX=Foo` renames all five, so a renamed
@@ -278,8 +275,8 @@ Everything the walkthrough used to attribute inline lives here, in the order an 
 
 The order is the whole instruction, and `README.md` carries only the order — the commands live
 here. **Destroying the stacks first orphans the AgentCore runtime, the per-configuration IAM
-role at `/rca/` and the AgentCore Identity credential provider**: nothing in CloudFormation
-owns them, they are created per API call, and the runtime keeps costing money.
+role at `/rca/` and the Secrets Manager secret**: nothing in CloudFormation owns them, they are
+created per API call, and the runtime keeps costing money.
 
 1. **Deregister every repository.** In the console: the repository's settings page →
    **Deregister** → two clicks, the second armed only after a moment
@@ -287,8 +284,8 @@ owns them, they are created per API call, and the runtime keeps costing money.
    /configurations/{configId}` is a method no plugin tool can send
    (`ApiClient.ALLOWED_METHODS` is `{"GET", "POST"}`) and the `aws` CLI cannot SigV4-sign an
    arbitrary `execute-api` URL. It returns `202`, then stays `DELETING` while
-   `provisioner._delete` removes the runtime, the role and its policy, the credential
-   provider, and the item **last**. **1–3 min** each.
+   `provisioner._delete` removes the runtime, the role and its policy, the secret, and the item
+   **last**. **1–3 min** each.
 2. **Destroy the five stacks by name**, with the same pinned CLI `make deploy` uses:
 
    ```bash
@@ -365,24 +362,6 @@ the code it governs and a regression test.
 4. **The PAT never enters the container env, the `origin` URL, or a command
    line** — all network git through `_run_authenticated` / `_askpass`;
    `_base_env()` omits the token. Every coding subagent has `Bash`.
-4c. **The container is given a credential *name*, never a secret ARN** — the GitHub token
-   lives in AgentCore Identity, and `store.github_token` exchanges the invocation's
-   workload access token for it (`GetResourceApiKey`) at the moment it is needed. Three
-   things hold that together, and each fails on its own:
-
-   * **The dispatcher must send `runtimeUserId`.** AgentCore mints the workload access
-     token for that id and delivers it to the container as a request header; with no id
-     there is no token and no credential. It is the **configuration id**, so the identity
-     is the repository rather than the run.
-   * **`server.invoke` must run the graph inside `contextvars.copy_context()`.** The SDK
-     puts the token in a `ContextVar`, and a bare thread starts with an empty context — so
-     without the copy the token is visible at the entry point and invisible to every node.
-   * **Calling `GetWorkloadAccessToken` is not an alternative.** A runtime's own workload
-     identity is service-linked, and an exchange initiated by the caller is refused.
-
-   The grant is `bedrock-agentcore:GetResourceApiKey` on one literal provider ARN, so the
-   cross-repository fence is the same shape memory's is (invariant 31). No
-   `secretsmanager:` action reaches the container at all.
 4b. **The commit identity is configurable, and the default is known to fail a
    real check** — `git_ops`' default is `agentcore-coding-agent
    <agent@localhost>`, and `agent@localhost` matches no GitHub account, so
@@ -613,7 +592,7 @@ the code it governs and a regression test.
     Removing a fleet variable is not the inverse of adding one. `_desired_runtime` merges
     `{**create-time, **live, **fleet}`, so a key dropped from `_fleet_environment` stops
     being converged and the live value is carried forward for the rest of the runtime's
-    life. `provisioner.RETIRED_ENVIRONMENT_KEYS` is the tombstone list that removes one, and the
+    life. `provisioner.RETIRED_FLEET_KEYS` is the tombstone list that removes one, and the
     five `OTEL_*` names are in it.
 33. **No role may reach the network, and no vendor endpoint may be reached** —
     `WebFetch`/`WebSearch` stay out of `ALLOWED_TOOLS`, the CLI's suppression
@@ -645,10 +624,10 @@ the code it governs and a regression test.
     (`Makefile` `setup:`/`bootstrap:`, `package.json` `scripts.setup`), never
     `install:`, and `""` otherwise.
 36. **A replacement registration retires the stale `FAILED` item *before* it mints the
-    new credential** — `configId` is random, so a replacement gets a new role name and a new
-    credential provider name; the other order orphans an IAM role at `/rca/` and an AgentCore
-    Identity credential provider holding a live GitHub token when the retirement write fails.
-    The stale provider is never reused for a new token.
+    new secret** — `configId` is random, so a replacement gets a new role name and a new
+    secret name; the other order orphans an IAM role at `/rca/` and a Secrets Manager
+    secret holding a live GitHub token when the retirement write fails. The stale secret
+    is never reused for a new token.
 37. **A VPC-mode runtime needs `iam:CreateServiceLinkedRole`, and a permanent
     authorization failure is terminal and reported as itself** — `CreateAgentRuntime` with
     `networkMode: VPC` (invariant 30) makes AgentCore create a service-linked role of its
@@ -1030,48 +1009,19 @@ declared setup and test commands. No prompt engineering changes that. Everything
 this heading exists to bound the blast radius to the one repository the agent is
 supposed to be working on — not to remove it.
 
-### Prefer a fine-grained PAT, scoped to one repository
+### The GitHub token must be a fine-grained PAT, scoped to one repository
 
 `contents: write` plus `pull requests: write`, nothing else, on exactly the repository
 being registered. That is what makes a stolen token survivable: it then grants precisely
-the access the agent already legitimately has, and a container that leaks its credential
+the access the agent already legitimately has, and a container that leaks its secret
 still cannot reach a second repository.
 
-A **classic** PAT is accepted, with a warning, because it is the only shape GitHub lets the
-console pre-fill a scope for — `README.md`'s `## Token scope: read this` states the trade
-where an operator meets it. A classic token cannot be scoped to one repository at all, so
-the bound becomes the account that owns it rather than the token itself. Tokens that expire
-within the hour and have no refresh path here (`ghs_`/`ghu_`/`ghr_`/`gho_`) are refused, and
-not on security grounds: they would register cleanly and fail inside a container later. The
-check is `api/src/handlers/configurations.py::_require_supported_token`, and
+`POST /configurations` refuses a classic PAT with a 400 `ClassicTokenRejected` and says
+why in the message — a classic PAT cannot be scoped to one repository at all, so
+accepting one would silently trade the whole control away. The check is
+`api/src/handlers/configurations.py::_require_supported_token`, and
 `PUT /configurations/{id}/github-token` runs it too, so a rotation cannot widen what
 registration narrowed.
-
-### Where the token is kept: AgentCore Identity, backed by Secrets Manager
-
-The credential is registered as an Identity **API-key credential provider**, one per
-configuration, named by `configurations._provider_name` as `rca_<configId>`.
-
-Identity is a credential **broker** rather than a store, and the split matters because it is
-easy to describe wrongly. What you supply — an API key, or an OAuth client secret — is held
-in **Secrets Manager**, in this account, as a *service-linked* secret that Identity owns.
-What Identity mints or fetches itself — OAuth tokens, workload access tokens — lives in its
-own encrypted **token vault** (`GetTokenVault`, `SetTokenVaultCMK` for a customer-managed
-key). So this is not "no secret": it is a secret this code neither names nor writes.
-
-Three consequences follow from that ownership, and each one is why some piece of this code
-looks the way it does:
-
-| | |
-|---|---|
-| `secretsmanager:PutSecretValue` on it is **refused** | rotation is `UpdateApiKeyCredentialProvider`, not a new secret version |
-| `secretsmanager:DeleteSecret` on it is **refused** | `provisioner._delete` deletes the *provider*, and the secret goes with it |
-| the secret is still **readable** | Identity adds no confidentiality here; the fence is that the container is granted one provider ARN and no `secretsmanager:` action at all |
-
-The container's half is invariant 4c. `api/` holds only the three write actions
-(`Create`/`Update`/`DeleteApiKeyCredentialProvider`) scoped to the `rca_*` provider
-namespace; it cannot read a credential back, and `GetApiKeyCredentialProvider` would not
-return one in any case.
 
 ### Turn on branch protection on the default branch
 
@@ -1262,7 +1212,7 @@ than one that does not. Four things are still true after everything above.
   for both runners, the verify command and the setup command. It defeats the
   environment-variable credential path. It does **not** defeat an attacker who hardcodes
   the container credentials endpoint. Within the permissions boundary, stolen credentials
-  reach exactly **four** things: this one repository's GitHub credential, this one configuration's task
+  reach exactly **four** things: this one repository's secret, this one configuration's task
   items, Bedrock, and a read-only pull of the agent image from one ECR repository — the
   runtime cannot be created at all without that last one, which is why it is granted. The
   `dynamodb:LeadingKeys` fences on both table statements are what shrink that list to *this*

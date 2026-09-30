@@ -145,10 +145,6 @@ class FakeAgentCore:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.runtimes: dict[str, dict[str, Any]] = dict(runtimes or {})
         self.memories: dict[str, dict[str, Any]] = {}
-        # Credential providers, keyed by name, holding the API key last written. The stored
-        # key is what makes a rotation assertion possible: a test can check the *value*
-        # Identity would hand a container, not merely that the call happened.
-        self.credential_providers: dict[str, dict[str, Any]] = {}
         self.responses: dict[str, Any] = dict(responses or {})
         self.errors: dict[str, list[BaseException]] = {
             k: list(v) for k, v in (errors or {}).items()
@@ -241,17 +237,6 @@ class FakeAgentCore:
             return {"statusCode": 200, "contentType": "application/json"}
         if operation == "StopRuntimeSession":
             return {"runtimeSessionId": kwargs["runtimeSessionId"]}
-        memory_answer = self._memory(operation, kwargs)
-        if memory_answer is not None:
-            return memory_answer
-        credentials = self._credentials(operation, kwargs)
-        if credentials is not None:
-            return credentials
-        return {}
-
-    def _memory(self, operation: str, kwargs: dict[str, Any]) -> dict[str, Any] | None:
-        """The AgentCore Memory arms, split out of `_default` for the same reason
-        `_credentials` is. `None` means "not one of mine"."""
         if operation in ("RetrieveMemoryRecords", "ListMemoryRecords"):
             # One `memoryRecordSummaries` entry, in the real response's shape: the text lives
             # at `content.text`, `createdAt` is a timestamp botocore parses into an aware
@@ -288,71 +273,7 @@ class FakeAgentCore:
         if operation == "DeleteMemory":
             self.memories.pop(kwargs["memoryId"], None)
             return {"memoryId": kwargs["memoryId"], "status": "DELETING"}
-        return None
-
-    def _credentials(self, operation: str, kwargs: dict[str, Any]) -> dict[str, Any] | None:
-        """The AgentCore Identity arms, split out of `_default` so neither is too long to
-        read. `None` means "not one of mine", which is how `_default` knows to fall through.
-        """
-        if operation == "CreateApiKeyCredentialProvider":
-            name = kwargs["name"]
-            if name in self.credential_providers:
-                raise client_error(
-                    "ConflictException",
-                    f"credential provider {name} already exists",
-                    status=409,
-                    operation=operation,
-                )
-            # `apiKeySecretArn` is returned as a NESTED structure -- `{"secretArn": ...}` --
-            # and the name carries the service-linked `!` marker, because that is the real
-            # response. It is echoed here so a test can assert the honest thing: Identity
-            # holds this credential in a Secrets Manager secret in the caller's own account,
-            # which `api/` may read but may not write.
-            item = {
-                "name": name,
-                "credentialProviderArn": (
-                    f"arn:aws:bedrock-agentcore:{_REGION}:123456789012:"
-                    f"token-vault/default/apikeycredentialprovider/{name}"
-                ),
-                "apiKeySecretArn": {
-                    "secretArn": (
-                        f"arn:aws:secretsmanager:{_REGION}:123456789012:secret:"
-                        f"bedrock-agentcore-identity!default/apikey/{name}-abc123-AbCdEf"
-                    )
-                },
-                "apiKeySecretSource": "MANAGED",
-                "apiKey": kwargs.get("apiKey", ""),
-            }
-            self.credential_providers[name] = item
-            return {k: v for k, v in item.items() if k != "apiKey"}
-        if operation in ("GetApiKeyCredentialProvider", "UpdateApiKeyCredentialProvider"):
-            name = kwargs["name"]
-            found = self.credential_providers.get(name)
-            if found is None:
-                raise client_error(
-                    "ResourceNotFoundException",
-                    f"credential provider {name} not found",
-                    status=404,
-                    operation=operation,
-                )
-            if operation == "UpdateApiKeyCredentialProvider":
-                found["apiKey"] = kwargs.get("apiKey", found["apiKey"])
-            return {k: v for k, v in found.items() if k != "apiKey"}
-        if operation == "DeleteApiKeyCredentialProvider":
-            self.credential_providers.pop(kwargs["name"], None)
-            return {}
-        if operation == "GetResourceApiKey":
-            name = kwargs["resourceCredentialProviderName"]
-            found = self.credential_providers.get(name)
-            if found is None:
-                raise client_error(
-                    "ResourceNotFoundException",
-                    f"credential provider {name} not found",
-                    status=404,
-                    operation=operation,
-                )
-            return {"apiKey": found["apiKey"]}
-        return None
+        return {}
 
 
 def install(

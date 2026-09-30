@@ -28,7 +28,7 @@ REQUIRED: tuple[str, ...] = ("taskId", "configId", "prompt", "repository")
 OPTIONAL: tuple[str, ...] = (
     "repositoryUrl",
     "defaultBranch",
-    "credentialProviderName",
+    "secretArn",
     "verifyCommand",
     "setupCommand",
     "resume",
@@ -42,7 +42,7 @@ def payload(**overrides: Any) -> dict[str, Any]:
     """Every field the dispatcher sends, with a plausible value for each.
 
     The shapes are the ones already seeded across the suite -- a `tsk_`-prefixed task id, a
-    credential provider name of the shape `configurations.py` mints, and a `sessionId` over
+    Secrets Manager ARN of the shape `provisioner.py` mints, and a `sessionId` over
     botocore's client-side 33-character minimum (invariant 18) -- so nothing here looks
     invented.
     """
@@ -53,7 +53,7 @@ def payload(**overrides: Any) -> dict[str, Any]:
         "repository": "acme/widgets",
         "repositoryUrl": "https://github.com/acme/widgets",
         "defaultBranch": "main",
-        "credentialProviderName": "rca_cfg_0123456789ab",
+        "secretArn": "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:rca/github/cfg_0123456789ab-AbCdEf",
         "verifyCommand": "make test",
         "setupCommand": "make setup",
         "resume": False,

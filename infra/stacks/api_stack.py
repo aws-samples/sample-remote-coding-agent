@@ -96,7 +96,7 @@ _CAPABILITIES: frozenset[str] = frozenset(
         "tasks:write",
         "cards:read",
         "cards:write",
-        "credentials:write",
+        "secrets:write",
         "tasks-queue:send",
         "provision-queue:send",
         "agentcore:control",
@@ -126,7 +126,7 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("configurations", "create"): (
         "config:read",
         "config:write",
-        "credentials:write",
+        "secrets:write",
         "provision-queue:send",
     ),
     ("configurations", "list_"): ("config:read",),
@@ -134,7 +134,7 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("configurations", "patch"): ("config:read", "config:write"),
     ("configurations", "delete"): ("config:read", "config:write", "provision-queue:send"),
     ("configurations", "runtime_update"): ("config:read", "provision-queue:send"),
-    ("configurations", "rotate_token"): ("config:read", "credentials:write"),
+    ("configurations", "rotate_token"): ("config:read", "secrets:write"),
     # The one read route that reaches a second data plane: the records an operator is asking
     # about exist only in AgentCore Memory, so `config:read` alone could answer with nothing
     # but the `memoryId` the console already prints. `tests/test_api_grant_contract.py`'s
@@ -169,7 +169,7 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("provisioner", "lambda_handler"): (
         "config:read",
         "config:write",
-        "credentials:write",
+        "secrets:write",
         "provision-queue:send",
         "agentcore:control",
         "iam:mint-execution-roles",
@@ -628,33 +628,22 @@ class ApiStack(cdk.Stack):
                 data.task_queue.grant_send_messages(fn)
             elif capability == "provision-queue:send":
                 data.provision_queue.grant_send_messages(fn)
-            elif capability == "credentials:write":
-                # The GitHub credential, held by AgentCore Identity. Scoped to the provider
-                # namespace `configurations._provider_name` writes under (`rca_<configId>`)
-                # in the account's own token vault -- never the vault as a whole, which is
-                # shared per account and region and may hold credentials this deployment
-                # did not create.
-                #
-                # No `secretsmanager:` action: Identity stores the credential in a
-                # service-linked Secrets Manager secret that it alone may write, so
-                # `CreateSecret`/`PutSecretValue`/`DeleteSecret` are neither needed nor
-                # accepted on it. Rotation is `UpdateApiKeyCredentialProvider` and teardown
-                # is `DeleteApiKeyCredentialProvider`, which removes the secret with it.
-                #
-                # `GetApiKeyCredentialProvider` is **absent**: nothing here reads a provider
-                # back, and the API key is not returned by it in any case. Reading the
-                # credential is the container's business, under a different action
-                # (`GetResourceApiKey`) on a different role.
+            elif capability == "secrets:write":
+                # Scoped to the one prefix `configurations.create` writes under
+                # (`rca/github/<configId>`), never the account's whole secret namespace.
+                # The trailing `*` is not slack: a secret ARN carries a six-character
+                # random suffix, so the name alone never matches.
                 fn.add_to_role_policy(
                     iam.PolicyStatement(
                         actions=[
-                            "bedrock-agentcore:CreateApiKeyCredentialProvider",
-                            "bedrock-agentcore:UpdateApiKeyCredentialProvider",
-                            "bedrock-agentcore:DeleteApiKeyCredentialProvider",
+                            "secretsmanager:CreateSecret",
+                            "secretsmanager:PutSecretValue",
+                            "secretsmanager:DeleteSecret",
+                            "secretsmanager:TagResource",
                         ],
                         resources=[
-                            f"arn:aws:bedrock-agentcore:{self.region}:{self.account}"
-                            f":token-vault/*/apikeycredentialprovider/{self._app_name}_*"
+                            f"arn:aws:secretsmanager:{self.region}:{self.account}"
+                            f":secret:{self._app_name}/github/*"
                         ],
                     )
                 )

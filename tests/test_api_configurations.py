@@ -4,7 +4,7 @@ Registration is the one route that writes a credential, so most of what is pinne
 is about the token: that a shape outside the allowlist is refused offline with the
 reason, that a token which *reads* but cannot push is refused in GitHub's own words, that
 the value reaches neither the item nor the response nor a log line, and that rotation
-updates the one credential provider the execution role is allowed to read.
+writes a new *version* of the one secret the execution role is allowed to read.
 
 Handler modules build their clients at import, so `_load` reloads them inside `mock_aws`
 -- see `test_api_fakes.load_handlers`. `provisioner` is reloaded first because
@@ -23,7 +23,6 @@ import json
 import logging
 from typing import Any
 
-import boto3
 import pytest
 from botocore.exceptions import ClientError
 from conftest import (
@@ -92,46 +91,6 @@ def github(monkeypatch: pytest.MonkeyPatch) -> _FakeGitHub:
     return fake
 
 
-# The Identity control plane the autouse fixture below installs, readable from a test
-# without taking the fixture as a parameter. A plain module global rather than a fixture
-# argument because most assertions here are "nothing was written", and threading one more
-# parameter through every refusal test would say less than `_providers() == {}` does.
-_IDENTITY: list[FakeAgentCore] = []
-
-
-def _providers() -> dict[str, dict[str, Any]]:
-    """The credential providers this test created, by name."""
-    return _IDENTITY[-1].credential_providers
-
-
-@pytest.fixture(autouse=True)
-def identity(monkeypatch: pytest.MonkeyPatch) -> FakeAgentCore:
-    """An AgentCore Identity control plane, installed for every test in this file.
-
-    Autouse because *every* successful registration now creates a credential provider --
-    the GitHub token lives in AgentCore Identity rather than in a secret this code writes.
-    moto has no `bedrock-agentcore-control` backend, so without this a registration answers
-    500 with `NotImplementedError` from deep inside botocore.
-
-    Patched on `boto3.Session.client` rather than on `_common.agentcore_control`, and that is
-    not a preference: `test_api_fakes.load_handlers` calls `importlib.reload(_common)` inside
-    each test body, which rebuilds every module attribute and would discard a patch applied
-    by a fixture beforehand. `Session.client` is a class method the reload does not touch, so
-    the interception survives. Every other service falls through to moto.
-    """
-    fake = FakeAgentCore("bedrock-agentcore-control")
-    original = boto3.Session.client
-
-    def client(self: Any, service_name: str, *args: Any, **kwargs: Any) -> Any:
-        if service_name == "bedrock-agentcore-control":
-            return fake
-        return original(self, service_name, *args, **kwargs)
-
-    monkeypatch.setattr(boto3.Session, "client", client)
-    _IDENTITY.append(fake)
-    return fake
-
-
 def _body(response: dict[str, Any]) -> dict[str, Any]:
     return json.loads(response["body"])
 
@@ -146,10 +105,8 @@ def _seed(common: Any, **overrides: Any) -> dict[str, Any]:
         "status": "READY",
         "statusReason": "",
         "verifyCommand": "make test",
-        "credentialProviderName": f"rca_{_CONFIG_ID}",
-        "credentialProviderArn": (
-            f"arn:aws:bedrock-agentcore:ap-southeast-1:123456789012:"
-            f"token-vault/default/apikeycredentialprovider/rca_{_CONFIG_ID}"
+        "secretArn": (
+            f"arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:rca/github/{_CONFIG_ID}-AbCdEf"
         ),
         "createdAt": "2026-01-01T00:00:00.000Z",
         "updatedAt": "2026-01-01T00:00:00.000Z",
@@ -198,7 +155,7 @@ def test_create_registers_the_repository_and_queues_the_provisioner(aws: Any) ->
     assert body["status"] == "PENDING"
     assert body["verifyCommand"] == "make test"
     assert body["configId"].startswith("cfg_")
-    assert body["credentialProviderArn"]
+    assert body["secretArn"]
 
     stored = common.config_table.get_item(Key={"configId": body["configId"]})["Item"]
     assert stored["repositoryUrl"] == _URL
@@ -301,7 +258,7 @@ def test_a_token_that_expires_in_an_hour_is_refused_with_the_reason(
     # Nothing was written on the way to the refusal, and nothing was asked of GitHub: the
     # shape check is offline and comes first.
     assert common.config_table.scan()["Items"] == []
-    assert _providers() == {}
+    assert common.secrets.list_secrets()["SecretList"] == []
     assert github.calls == []
 
 
@@ -332,7 +289,7 @@ def test_a_token_outside_the_supported_shape_is_refused_without_a_network_call(
     # with GitHub unreachable, and a registration attempt costs GitHub nothing.
     assert github.calls == []
     assert common.config_table.scan()["Items"] == []
-    assert _providers() == {}
+    assert common.secrets.list_secrets()["SecretList"] == []
 
 
 def test_a_token_that_reads_but_cannot_push_is_refused_in_githubs_own_words(
@@ -358,7 +315,7 @@ def test_a_token_that_reads_but_cannot_push_is_refused_in_githubs_own_words(
     assert body["repository"] == "owner/repo"
     # Nothing was written on the way to the refusal.
     assert common.config_table.scan()["Items"] == []
-    assert _providers() == {}
+    assert common.secrets.list_secrets()["SecretList"] == []
     # The read really did succeed first: this is the whole reason the probe is a write.
     assert [call["method"] for call in github.calls] == ["GET", "POST"]
 
@@ -391,13 +348,13 @@ def test_an_unreachable_github_does_not_fail_registration(
         raise github_probe.ProbeUnavailable("Name or service not known")
 
     monkeypatch.setattr(github_probe, "_request", unreachable)
-    _common, _provisioner, configurations = _load("provisioner", "configurations")
+    common, _provisioner, configurations = _load("provisioner", "configurations")
     caplog.set_level(logging.WARNING, logger="handlers")
 
     response = _register(configurations)
     assert response["statusCode"] == 201
     stored = _body(response)
-    assert _providers()[f"rca_{stored['configId']}"]["apiKey"] == _TOKEN
+    assert common.secrets.get_secret_value(SecretId=stored["secretArn"])["SecretString"] == _TOKEN
 
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert "owner/repo" in logged, (
@@ -439,19 +396,21 @@ def test_the_token_is_never_stored_on_the_item_or_echoed(
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert _TOKEN not in logged
     assert "***" in logged, "the registration line is logged, scrubbed"
-    # Identity is where it went, and reading it back is a deliberate act.
-    assert _providers()[f"rca_{stored['configId']}"]["apiKey"] == _TOKEN
+    # The secret is where it went, and reading it back is a deliberate act.
+    assert common.secrets.get_secret_value(SecretId=stored["secretArn"])["SecretString"] == _TOKEN
 
 
 def test_registering_the_same_repository_twice_is_a_conflict(aws: Any) -> None:
-    _common, _provisioner, configurations = _load("provisioner", "configurations")
+    common, _provisioner, configurations = _load("provisioner", "configurations")
     first = _body(_register(configurations))
     response = _register(configurations)
     assert response["statusCode"] == 409
     body = _body(response)
     assert body["error"] == "RepositoryAlreadyRegistered"
     assert body["configId"] == first["configId"]
-    assert len(_providers()) == 1, "the second attempt created no credential provider"
+    assert len(common.secrets.list_secrets()["SecretList"]) == 1, (
+        "the second attempt wrote no secret"
+    )
 
 
 def test_a_repository_being_torn_down_can_be_registered_again(aws: Any) -> None:
@@ -486,7 +445,7 @@ def test_a_failed_registration_can_be_registered_again(aws: Any) -> None:
     retired = common.config_table.get_item(Key={"configId": _CONFIG_ID})["Item"]
     assert retired["status"] == "DELETING"
     fresh = common.config_table.get_item(Key={"configId": body["configId"]})["Item"]
-    assert fresh["credentialProviderName"] != stale["credentialProviderName"]
+    assert fresh["secretArn"] != stale["secretArn"]
 
     # Sorted: SQS does not promise order, and this is the first request that sends two.
     assert sorted(_provision_messages(aws), key=lambda message: message["phase"]) == [
@@ -495,30 +454,32 @@ def test_a_failed_registration_can_be_registered_again(aws: Any) -> None:
     ]
 
 
-def test_re_registering_stores_the_new_token_in_a_new_credential_provider(aws: Any) -> None:
-    """`configId` is random, so a replacement gets its own provider name. The stale provider
+def test_re_registering_stores_the_new_token_in_a_new_secret(aws: Any) -> None:
+    """`configId` is random, so a replacement gets its own secret name. The stale secret
     is neither reused for the new token nor mutated -- it belongs to the configuration
     being torn down, and the runtime that could read it is going away with it."""
     common, _provisioner, configurations = _load("provisioner", "configurations")
-    stale_name = f"rca_{_CONFIG_ID}"
-    _IDENTITY[-1].credential_providers[stale_name] = {"name": stale_name, "apiKey": "stale-token"}
-    _seed(common, status="FAILED")
+    stale_arn = common.secrets.create_secret(
+        Name=f"rca/github/{_CONFIG_ID}", SecretString="stale-token"
+    )["ARN"]
+    _seed(common, status="FAILED", secretArn=stale_arn)
 
     new_token = FAKE_FINE_GRAINED_REPLACEMENT_PAT
     body = _body(_register(configurations, token=new_token))
-    assert f"rca_{body['configId']}" != stale_name
-    assert _providers()[f"rca_{body['configId']}"]["apiKey"] == new_token
-    assert _providers()[stale_name]["apiKey"] == "stale-token"
+    assert body["secretArn"] != stale_arn
+    assert common.secrets.get_secret_value(SecretId=body["secretArn"])["SecretString"] == new_token
+    assert common.secrets.get_secret_value(SecretId=stale_arn)["SecretString"] == "stale-token"
 
 
 def test_the_provisioner_tears_the_replaced_configuration_down(aws: Any) -> None:
     """The no-orphans half, end to end: the role at `ROLE_PATH`, its inline policy, the
-    credential provider holding the operator's old token and the item all go, and the
-    replacement is untouched."""
+    secret holding the operator's old token and the item all go, and the replacement is
+    untouched."""
     common, provisioner, configurations = _load("provisioner", "configurations")
-    stale_name = f"rca_{_CONFIG_ID}"
-    _IDENTITY[-1].credential_providers[stale_name] = {"name": stale_name, "apiKey": "stale-token"}
-    stale = _seed(common, status="FAILED")
+    stale_arn = common.secrets.create_secret(
+        Name=f"rca/github/{_CONFIG_ID}", SecretString="stale-token"
+    )["ARN"]
+    stale = _seed(common, status="FAILED", secretArn=stale_arn)
     # Minted the way a failed CREATE minted it, rather than by hand, so the teardown is
     # tested against the real role name, path and inline policy.
     provisioner._ensure_role(_CONFIG_ID, stale)
@@ -532,17 +493,15 @@ def test_the_provisioner_tears_the_replaced_configuration_down(aws: Any) -> None
     )
 
     assert common.config_table.get_item(Key={"configId": _CONFIG_ID}).get("Item") is None
-    assert stale_name not in _providers(), (
-        "the replaced configuration's credential provider goes with it -- and with the "
-        "provider goes the service-linked secret underneath, which nothing here names"
-    )
+    with pytest.raises(ClientError):
+        common.secrets.get_secret_value(SecretId=stale_arn)
     with pytest.raises(ClientError) as raised:
         common.iam.get_role(RoleName=role_name)
     assert raised.value.response["Error"]["Code"] == "NoSuchEntity"
 
     fresh = common.config_table.get_item(Key={"configId": body["configId"]})["Item"]
     assert fresh["status"] == "PENDING"
-    assert _providers()[fresh["credentialProviderName"]]["apiKey"] == _TOKEN
+    assert common.secrets.get_secret_value(SecretId=fresh["secretArn"])["SecretString"] == _TOKEN
 
 
 def test_a_repository_being_torn_down_is_not_torn_down_twice(aws: Any) -> None:
@@ -582,7 +541,7 @@ def test_a_live_configuration_still_wins_over_a_stale_failed_one(
     # against GitHub on its way to a conflict it could see locally.
     assert _provision_messages(aws) == []
     assert github.calls == []
-    assert _providers() == {}
+    assert common.secrets.list_secrets()["SecretList"] == []
     assert (
         common.config_table.get_item(Key={"configId": "cfg_ffffffffffff"})["Item"]["status"]
         == "FAILED"
@@ -1003,11 +962,10 @@ def test_runtime_update_requires_ready_and_queues_update(aws: Any) -> None:
     assert common.config_table.get_item(Key={"configId": _CONFIG_ID})["Item"]["status"] == "READY"
 
 
-def test_rotation_updates_the_one_credential_provider(aws: Any) -> None:
-    _common, _provisioner, configurations = _load("provisioner", "configurations")
+def test_rotation_writes_a_new_version_of_the_one_secret(aws: Any) -> None:
+    common, _provisioner, configurations = _load("provisioner", "configurations")
     created = _body(_register(configurations))
-    provider_name = f"rca_{created['configId']}"
-    assert _providers()[provider_name]["apiKey"] == _TOKEN
+    before = common.secrets.get_secret_value(SecretId=created["secretArn"])
     rotated_token = FAKE_FINE_GRAINED_REPLACEMENT_PAT
 
     response = configurations.rotate_token(
@@ -1024,15 +982,14 @@ def test_rotation_updates_the_one_credential_provider(aws: Any) -> None:
     assert body["rotated"] is True
     assert rotated_token not in response["body"], "the credential body is never reflected back"
 
-    assert _providers()[provider_name]["apiKey"] == rotated_token
-    # One provider, updated in place. A second provider would not be reachable by the
-    # execution role at all -- its inline policy names this literal provider ARN. It is also
-    # the only way to write this credential: the secret Identity keeps underneath is
-    # service-linked, and `secretsmanager:PutSecretValue` on it is refused.
-    assert list(_providers()) == [provider_name]
-    assert _IDENTITY[-1].calls_to("UpdateApiKeyCredentialProvider") == [
-        {"name": provider_name, "apiKey": rotated_token}
-    ]
+    after = common.secrets.get_secret_value(SecretId=created["secretArn"])
+    assert after["SecretString"] == rotated_token
+    assert after["VersionId"] != before["VersionId"]
+    assert body["versionId"] == after["VersionId"]
+    # One secret, a new version of it. A second secret would not be readable by the
+    # execution role at all -- its inline policy names this literal ARN.
+    assert len(common.secrets.list_secrets()["SecretList"]) == 1
+    assert common.secrets.list_secrets()["SecretList"][0]["ARN"] == created["secretArn"]
 
 
 @pytest.mark.parametrize(
@@ -1077,16 +1034,17 @@ def test_rotation_refuses_a_token_that_expires_in_an_hour(aws: Any) -> None:
     assert _body(response)["error"] == "ExpiringTokenRejected"
 
 
-def test_rotation_refuses_a_token_that_cannot_push_and_keeps_the_old_credential(
+def test_rotation_refuses_a_token_that_cannot_push_and_keeps_the_old_secret(
     aws: Any, github: _FakeGitHub
 ) -> None:
     """Rotation is the other route that writes a credential, and it refuses before the
     write: the operator rotating *because* a token was wrong must not be left with a
     second one that cannot push either."""
     common, _provisioner, configurations = _load("provisioner", "configurations")
-    provider_name = f"rca_{_CONFIG_ID}"
-    _IDENTITY[-1].credential_providers[provider_name] = {"name": provider_name, "apiKey": _TOKEN}
-    _seed(common)
+    secret_arn = common.secrets.create_secret(Name=f"rca/github/{_CONFIG_ID}", SecretString=_TOKEN)[
+        "ARN"
+    ]
+    _seed(common, secretArn=secret_arn)
     github.create_ref = (
         403,
         {"message": "Resource not accessible by personal access token"},
@@ -1105,7 +1063,7 @@ def test_rotation_refuses_a_token_that_cannot_push_and_keeps_the_old_credential(
     assert response["statusCode"] == 400
     assert _body(response)["error"] == "TokenCannotPush"
     assert "Resource not accessible by personal access token" in _body(response)["message"]
-    assert _providers()[provider_name]["apiKey"] == _TOKEN
+    assert common.secrets.get_secret_value(SecretId=secret_arn)["SecretString"] == _TOKEN
 
 
 def test_the_provisioner_writes_only_declared_statuses(aws: Any) -> None:

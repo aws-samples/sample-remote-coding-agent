@@ -175,10 +175,10 @@ async def submit(state: TaskState) -> dict[str, Any]:
     #
     # The `GITHUB_TOKEN` arm is the developer-machine path that `local_run.py` uses. In the
     # container there is no such variable and there must not be: a secret ARN is named on
-    # the state and the value is fetched from AgentCore Identity here, at the last moment.
+    # the state and the value is read out of Secrets Manager here, at the last moment.
     token = (
-        store.github_token(state["credentialProviderName"])
-        if state.get("credentialProviderName")
+        store.github_token(state["secretArn"])
+        if state.get("secretArn")
         else os.environ.get("GITHUB_TOKEN", "")
     )
     branch = state["branch"]
