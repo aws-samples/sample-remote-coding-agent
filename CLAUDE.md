@@ -1023,6 +1023,46 @@ accepting one would silently trade the whole control away. The check is
 `PUT /configurations/{id}/github-token` runs it too, so a rotation cannot widen what
 registration narrowed.
 
+### Why the credential is a Secrets Manager secret and not AgentCore Identity
+
+Identity's API-key credential provider was implemented, deployed and measured end to end,
+then reverted. It works — a task cloned and pushed through it — and it costs privilege
+without buying confidentiality, so this is a record of the measurement rather than an
+invitation to try again.
+
+Identity is a **broker, not a store**. `apiKeySecretSource` is `MANAGED` or `EXTERNAL` and
+both are Secrets Manager; the token vault has only `GetTokenVault` and `SetTokenVaultCMK`, so
+no API writes to it. The vault holds what Identity **obtains** (OAuth tokens it can re-fetch),
+never what you **hand** it. A PAT cannot be obtained — GitHub has no API that mints one — so
+it must be stored, and Secrets Manager is where Identity stores it.
+
+The access that costs, measured against a live runtime one denial at a time:
+
+| | Secrets Manager (shipped) | Identity |
+|---|---|---|
+| Container actions | `secretsmanager:GetSecretValue` | `GetResourceApiKey` **and** `secretsmanager:GetSecretValue` |
+| Container resources | one literal secret ARN | **five** — the workload identity, `workload-identity-directory/default`, the credential provider, `token-vault/default`, and the secret |
+| `api/` actions | 4 | 7 |
+| Paths to the credential | 1 | 2 |
+
+Three findings worth keeping, because each was invisible until it failed:
+
+* **Identity performs the Secrets Manager work with the *caller's* permissions.** The
+  container needs `secretsmanager:GetSecretValue` on a secret its code never names, so
+  Identity does not insulate it from the store — and because the container holds that grant,
+  it can bypass the broker and read the secret directly. Two paths where there was one.
+* **Two of the five resources are account-level singletons** (`workload-identity-directory/default`,
+  `token-vault/default`), so they cannot be fenced per configuration. Invariant 31's
+  one-literal-ARN fence does not survive.
+* **`runtimeUserId` changes the dispatcher's permission** from `InvokeAgentRuntime` to
+  `InvokeAgentRuntimeForUser`. Without it every task sits in `QUEUED` and nothing in the
+  container's log says why.
+
+The one design where Identity would earn its place is **OAuth**: there the per-repository
+credential is one Identity obtains and refreshes, it lives in the vault, and the container
+needs no Secrets Manager grant at all. The price is a GitHub OAuth App per deployment, which
+is more setup than this sample saves.
+
 ### Turn on branch protection on the default branch
 
 The agent only ever pushes `agent/<taskId>` and opens a pull request, so protection is
