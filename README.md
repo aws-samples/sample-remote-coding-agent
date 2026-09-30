@@ -37,9 +37,9 @@ it does not make untrusted code safe. A runtime or publishing failure may produc
 - A dedicated AWS account, with credentials for your intended profile and region.
 - Docker running, Python ≥ 3.11 (tested with 3.12), `uv`, Node ≥ 20, and the AWS CLI.
 - A trusted, disposable repository and a **GitHub PAT**. A classic token with the `repo`
-  scope is the quickest — the console links to a page with it pre-ticked — but it is not
-  limited to one repository; see [Token scope](#token-scope-read-this). A fine-grained token
-  with `contents: write` and `pull requests: write` is the tighter choice.
+  scope is the quickest, but it is not limited to one repository; see
+  [Token scope](#token-scope-read-this). A fine-grained token with `contents: write` and
+  `pull requests: write` is the tighter choice. Step 3 links straight to either page.
 
 Preflight checks AgentCore/model availability and prints any required CDK bootstrap command.
 The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI works without it.
@@ -62,8 +62,12 @@ The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI work
 
 2. **Sign in at the console URL.** Cognito emails a temporary password to `EMAIL`; check spam and change it on first sign-in.
 
-3. **Register a disposable repository** with **+ Add repository**. Enter its URL and PAT;
-   leave Advanced folded. Wait **8–12 min** for `READY`; starting sooner returns `409 ConfigurationNotReady`.
+3. **Register a disposable repository** with **+ Add repository**. Enter the repository URL
+   first, then use the **Create a token for … on GitHub — scope prefilled** link under the
+   token field: it opens GitHub with `repo` already ticked and the description naming that
+   repository, so you set an expiry and press Generate. Paste the token back and leave
+   Advanced folded. Wait **8–12 min** for `READY`; starting sooner returns
+   `409 ConfigurationNotReady`.
 
    The agent pushes branches and opens PRs. Start with a small repository whose tests already
    pass. Declare setup/test entry points so verification can run:
