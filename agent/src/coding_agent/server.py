@@ -12,6 +12,7 @@ is deliberately busy; the `threading.Thread` is what keeps the entrypoint free t
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import threading
 from typing import Any
@@ -79,9 +80,17 @@ def invoke(payload: dict[str, Any]) -> dict[str, Any]:
     # Registered *before* the thread starts, so there is no window in which the graph is
     # running and the runtime believes the container is idle.
     async_task_id = app.add_async_task("coding-task", {"taskId": payload["taskId"]})
+    # The thread runs inside a COPY of this request's context, and that is load-bearing
+    # rather than tidy. AgentCore delivers the workload access token as a request header,
+    # which `bedrock_agentcore`'s ASGI handler puts into a `ContextVar`
+    # (`BedrockAgentCoreContext`). A `ContextVar` is per-context, and a bare
+    # `threading.Thread` starts with an empty one -- so without this copy the token is
+    # visible here and invisible to every node, and `store.github_token` would fail on a
+    # credential the container was given. `copy_context()` is a shallow copy of the
+    # mapping, so invariant 1's "return in milliseconds" is unaffected.
+    context = contextvars.copy_context()
     threading.Thread(
-        target=_run,
-        args=(payload, async_task_id),
+        target=lambda: context.run(_run, payload, async_task_id),
         daemon=True,
         name=f"coding-task-{payload['taskId']}",
     ).start()

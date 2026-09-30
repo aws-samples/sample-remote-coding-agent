@@ -28,6 +28,7 @@ from decimal import Decimal
 from typing import Any
 
 import boto3
+from bedrock_agentcore.runtime.context import BedrockAgentCoreContext
 from botocore.exceptions import BotoCoreError, ClientError
 
 from .state import TaskState, TaskStatus, VerifyResult
@@ -122,8 +123,8 @@ def get_configuration(config_id: str) -> dict[str, Any] | None:
     return dict(item) if item else None
 
 
-def github_token(secret_arn: str) -> str:
-    """Fetch the repository's PAT from Secrets Manager.
+def github_token(credential_provider_name: str) -> str:
+    """Fetch the repository's PAT from AgentCore Identity.
 
     The return value is *passed as an argument* -- to `git_ops.push`, to
     `github.create_pull_request` -- and is never written to `os.environ` and never
@@ -132,13 +133,38 @@ def github_token(secret_arn: str) -> str:
     model can print. `git_ops` reaches git through a `GIT_ASKPASS` script for the
     same reason.
 
+    The credential is named rather than located: this takes a provider *name*, and
+    Identity decides which credential that name resolves to for the workload asking.
+    The container never holds a secret ARN, and the execution role's grant is
+    `bedrock-agentcore:GetResourceApiKey` on one provider ARN (invariant 31).
+
+    **The workload access token comes from the request, not from an API call.** AgentCore
+    mints it for the `runtimeUserId` the dispatcher sends and delivers it as a request
+    header, which the SDK puts in a `ContextVar`; `server.invoke` copies that context onto
+    the worker thread so it is readable here. A missing token means the dispatcher sent no
+    `runtimeUserId`, and the message says so -- calling `GetWorkloadAccessToken` instead
+    would not help, because a runtime's own identity is service-linked and refuses a
+    caller-initiated exchange.
+
     `.strip()` because a PAT pasted into the console picks up a trailing newline and
     an HTTP header carrying one fails as an unrelated-looking 400.
     """
-    if not secret_arn:
+    if not credential_provider_name:
         return ""
-    secrets = boto3.client("secretsmanager")
-    return (secrets.get_secret_value(SecretId=secret_arn).get("SecretString") or "").strip()
+    workload_token = BedrockAgentCoreContext.get_workload_access_token()
+    if not workload_token:
+        raise RuntimeError(
+            "no workload access token reached this task, so the GitHub credential cannot "
+            "be fetched. AgentCore supplies one only when the invocation carries a "
+            "runtimeUserId (`api/src/handlers/dispatcher.py`), and it is readable on this "
+            "thread only because `server.invoke` copies the request context onto it."
+        )
+    identity = boto3.client("bedrock-agentcore")
+    answer = identity.get_resource_api_key(
+        workloadIdentityToken=workload_token,
+        resourceCredentialProviderName=credential_provider_name,
+    )
+    return (answer.get("apiKey") or "").strip()
 
 
 def set_status(

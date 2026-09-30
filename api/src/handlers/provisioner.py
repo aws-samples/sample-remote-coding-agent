@@ -131,8 +131,9 @@ SESSION_NAMESPACE = "/rca/{actorId}/session/{sessionId}"
 MAX_CHECK_ATTEMPTS = 60
 CHECK_DELAY_SECONDS = 30
 
-# Fleet environment variables this code used to send and now actively **removes** from every
-# runtime it updates. A tombstone list, and it exists because deletion is not the inverse of
+# Environment variables this code used to send and now actively **removes** from every
+# runtime it updates -- fleet keys and per-configuration keys alike, since the merge carries
+# both forward. A tombstone list, and it exists because deletion is not the inverse of
 # addition here: `_desired_runtime` merges `{**create-time, **live, **fleet}`, so a key
 # dropped from `_fleet_environment` merely stops being converged and the live value is carried
 # forward forever (invariant 24's carry-forward rule, working exactly as intended and against
@@ -148,8 +149,12 @@ CHECK_DELAY_SECONDS = 30
 # An entry is safe to delete from this list only once no live runtime can still carry the key,
 # which in practice means never: a runtime created before the retirement outlives the deploy
 # that retired it. Leaving them costs one `pop` each.
-RETIRED_FLEET_KEYS = frozenset(
+RETIRED_ENVIRONMENT_KEYS = frozenset(
     {
+        # The Secrets Manager ARN, retired when the GitHub credential moved to AgentCore
+        # Identity: the container is given a provider *name* now and never a secret ARN,
+        # and a stale ARN on a runtime is a value that still resolves and must not.
+        "SECRET_ARN",
         "OTEL_METRICS_EXPORTER",
         "OTEL_LOGS_EXPORTER",
         "OTEL_EXPORTER_OTLP_PROTOCOL",
@@ -333,8 +338,9 @@ def _role_name(config_id: str) -> str:
 
 def _account_and_region(config: Mapping[str, Any]) -> tuple[str, str]:
     """The account and region for the trust policy's `aws:SourceAccount` and the table
-    ARNs in `_execution_role_policy`, read off the configuration's own `secretArn`
-    (`arn:aws:secretsmanager:<region>:<account>:secret:...`).
+    ARNs in `_execution_role_policy`, read off the configuration's own
+    `credentialProviderArn`
+    (`arn:aws:bedrock-agentcore:<region>:<account>:token-vault/...`).
 
     Deliberately **not** `sts:GetCallerIdentity`: this Lambda's grant surface is exactly
     the table `infra/stacks/api_stack.py` declares, and an STS client would widen it for
@@ -342,7 +348,7 @@ def _account_and_region(config: Mapping[str, Any]) -> tuple[str, str]:
     `_ensure_role` off `iam:GetRole`. `AWS_REGION` and a `*` account are the fallbacks,
     so a half-written configuration still produces a policy IAM will accept.
     """
-    parts = str(config.get("secretArn") or "").split(":")
+    parts = str(config.get("credentialProviderArn") or "").split(":")
     region, account = (parts[3], parts[4]) if len(parts) > 5 else ("", "")
     return account or "*", region or os.environ.get("AWS_REGION", "") or "*"
 
@@ -350,7 +356,8 @@ def _account_and_region(config: Mapping[str, Any]) -> tuple[str, str]:
 def _asset_repository_arn(image_uri: str) -> str:
     """The ECR repository ARN the agent image lives in, read off `AGENT_IMAGE_URI`
     (`<account>.dkr.ecr.<region>.amazonaws.com/<repository>[:<tag>|@<digest>]`) in the
-    same spirit as `_account_and_region` reading the account off `secretArn`: the value
+    same spirit as `_account_and_region` reading the account off `credentialProviderArn`:
+    the value
     is derivable from something every deploy already carries, so it needs no second
     environment variable and no `ecr:DescribeRepositories` grant.
 
@@ -458,6 +465,34 @@ def _execution_role_policy(config: Mapping[str, Any]) -> dict[str, Any]:
         if repository_arn
         else []
     )
+    # The GitHub credential, gated per configuration for the same reason the memory
+    # statement is: an item that carries no provider gets no statement at all rather than an
+    # Allow whose `Resource` is the empty string, which IAM rejects outright as
+    # `MalformedPolicyDocument` and which would fail the whole `PutRolePolicy` -- taking the
+    # table and log grants down with it. A configuration registered before the credential
+    # moved to Identity is exactly that item, and it must still provision.
+    use_credential: list[dict[str, Any]] = (
+        [
+            {
+                "Sid": "UseOwnCredential",
+                "Effect": "Allow",
+                "Action": ["bedrock-agentcore:GetResourceApiKey"],
+                # The **literal** provider ARN, which is why rotation updates this provider
+                # in place and never creates a second one: a second provider would not be
+                # reachable by this role at all.
+                #
+                # This is the cross-repository fence, the same division of labour the memory
+                # grant uses (invariant 31): the permissions boundary spans
+                # `apikeycredentialprovider/rca_*` because it is minted before any
+                # configuration exists, and only this literal ARN says "this one". No
+                # `secretsmanager:` action anywhere -- the container never holds a secret ARN,
+                # and Identity resolves a provider name for the workload that asks.
+                "Resource": str(config.get("credentialProviderArn") or ""),
+            }
+        ]
+        if config.get("credentialProviderArn")
+        else []
+    )
     # The same shape as `image_pull` above, gated per configuration rather than per fleet: a configuration
     # whose `CreateMemory` failed carries no `memoryId` and gets no statement at all, which
     # is the control-plane half of the container's no-op path -- a memory that could not be
@@ -539,15 +574,7 @@ def _execution_role_policy(config: Mapping[str, Any]) -> dict[str, Any]:
                 "Resource": tasks_arn,
                 "Condition": own_partition,
             },
-            {
-                "Sid": "ReadOwnSecret",
-                "Effect": "Allow",
-                "Action": ["secretsmanager:GetSecretValue"],
-                # The **literal** ARN, which is why rotation writes a new *version* of
-                # this secret and never a second secret: a second one would not be
-                # readable by this role at all.
-                "Resource": str(config.get("secretArn") or ""),
-            },
+            *use_credential,
             {
                 "Sid": "WriteRuntimeLogs",
                 "Effect": "Allow",
@@ -838,7 +865,7 @@ def _configuration_environment(config: Mapping[str, Any]) -> dict[str, str]:
     has been using."""
     return {
         "CONFIG_ID": str(config.get("configId", "")),
-        "SECRET_ARN": str(config.get("secretArn") or ""),
+        "CREDENTIAL_PROVIDER_NAME": str(config.get("credentialProviderName") or ""),
     }
 
 
@@ -896,7 +923,7 @@ def _desired_runtime(live: Mapping[str, Any] | None, config: Mapping[str, Any]) 
     # `0`, and all five `OTEL_*` names were still on the runtime afterwards -- so the
     # invariant's own claim that no `OTEL_*` variable is set anywhere was false for every
     # existing runtime, with nothing failing.
-    for name in RETIRED_FLEET_KEYS:
+    for name in RETIRED_ENVIRONMENT_KEYS:
         environment.pop(name, None)
     desired: dict[str, Any] = {
         "agentRuntimeArtifact": {"containerConfiguration": {"containerUri": AGENT_IMAGE_URI}},
@@ -1460,14 +1487,18 @@ def _delete(config_id: str) -> None:
             raise
         LOG.info("role %s was already gone", role_name)
 
-    secret_arn = str(config.get("secretArn") or "")
-    if secret_arn:
+    provider_name = str(config.get("credentialProviderName") or "")
+    if provider_name:
         try:
-            _common.secrets.delete_secret(SecretId=secret_arn, ForceDeleteWithoutRecovery=True)
+            # Deleting the provider is what deletes the credential: the Secrets Manager
+            # secret underneath is service-linked, so `secretsmanager:DeleteSecret` on it is
+            # refused outright and Identity removes it as part of this call. That is why
+            # this teardown names no secret and why `api/` needs no Secrets Manager grant.
+            _common.agentcore_control().delete_api_key_credential_provider(name=provider_name)
         except ClientError as err:
             if not _is_gone(err):
                 raise
-            LOG.info("secret for config %s was already gone", config_id)
+            LOG.info("credential provider for config %s was already gone", config_id)
 
     _common.config_table.delete_item(Key={"configId": config_id})
     LOG.info("config %s torn down", config_id)

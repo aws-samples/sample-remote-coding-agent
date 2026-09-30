@@ -166,7 +166,7 @@ def _payload(task: Mapping[str, Any], config: Mapping[str, Any], resume: bool) -
         # Read by `nodes/checkout.py` and `nodes/submit.py` through `store.github_token`,
         # and sent by nothing at all until the contract test asked who consumed it: a
         # container without it clones no private repository and opens no pull request.
-        "secretArn": config.get("secretArn", ""),
+        "credentialProviderName": config.get("credentialProviderName", ""),
         "verifyCommand": config.get("verifyCommand", ""),
         "setupCommand": config.get("setupCommand", ""),
         "resume": resume,
@@ -188,6 +188,16 @@ def _invoke(task: Mapping[str, Any], config: Mapping[str, Any], *, resume: bool)
         # repository creates another endpoint, so this is the only qualifier there is.
         qualifier=observability.ENDPOINT_NAME,
         runtimeSessionId=session,
+        # The workload the credential belongs to, and the reason the container can fetch a
+        # GitHub token at all. AgentCore mints a workload access token for this id and
+        # delivers it to the container as a request header; without it
+        # `store.github_token` has nothing to exchange, because a runtime's own identity is
+        # service-linked and refuses a caller-initiated `GetWorkloadAccessToken`.
+        #
+        # The **configuration id**, so the identity is the repository rather than the run:
+        # one credential provider serves every task against that repository, and a task id
+        # here would mint a fresh identity per run for a credential that does not vary.
+        runtimeUserId=str(task["configId"]),
         contentType="application/json",
         accept="application/json",
         payload=json.dumps(_payload(task, config, resume)).encode(),

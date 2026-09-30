@@ -82,11 +82,13 @@ _GRANTS: dict[tuple[str, str], set[str]] = {
         "config_table.query",
         "config_table.put_item",
         # `_retire_failed`: a stale `FAILED` configuration is marked `DELETING` so
-        # `provisioner._delete` can take its role and its secret. Already covered by the
+        # `provisioner._delete` can take its role and its credential. Already covered by the
         # `config:write` `create` holds in `infra/stacks/api_stack.py`.
         "config_table.update_item",
-        "secrets.create_secret",
-        "secrets.delete_secret",
+        "agentcore_control.create_api_key_credential_provider",
+        # The rollback arm: a `put_item` that loses its condition deletes the provider
+        # it created a line earlier, so the id is free for the next registration.
+        "agentcore_control.delete_api_key_credential_provider",
         "sqs.send_message",
     },
     ("configurations", "list_"): {"config_table.scan"},
@@ -98,7 +100,10 @@ _GRANTS: dict[tuple[str, str], set[str]] = {
         "sqs.send_message",
     },
     ("configurations", "runtime_update"): {"config_table.get_item", "sqs.send_message"},
-    ("configurations", "rotate_token"): {"config_table.get_item", "secrets.put_secret_value"},
+    ("configurations", "rotate_token"): {
+        "config_table.get_item",
+        "agentcore_control.update_api_key_credential_provider",
+    },
     ("configurations", "memory"): {
         "config_table.get_item",
         # The two read-only data-plane operations, granted by `memory:read` in
@@ -148,7 +153,7 @@ _GRANTS: dict[tuple[str, str], set[str]] = {
         "config_table.update_item",
         "config_table.delete_item",
         "sqs.send_message",
-        "secrets.delete_secret",
+        "agentcore_control.delete_api_key_credential_provider",
         "iam.create_role",
         "iam.put_role_policy",
         "iam.delete_role_policy",
@@ -369,7 +374,11 @@ def test_observability_imports_no_boto3() -> None:
 _CONFIG = {
     "configId": "cfg_0123456789ab",
     "repository": "owner/repo",
-    "secretArn": "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:rca/github/cfg_0123456789ab-AbCdEf",
+    "credentialProviderName": "rca_cfg_0123456789ab",
+    "credentialProviderArn": (
+        "arn:aws:bedrock-agentcore:ap-southeast-1:123456789012:"
+        "token-vault/default/apikeycredentialprovider/rca_cfg_0123456789ab"
+    ),
     # The one AgentCore Memory this repository owns, spelled the way the service does:
     # `<name>-<10 service-generated characters>`, which is botocore's own `memoryId` pattern.
     # This fixture is what closes the boundary's second set difference -- without a
@@ -450,13 +459,17 @@ def _resources(statement: dict[str, Any]) -> list[str]:
 def test_the_execution_role_can_neither_mint_a_role_nor_dispatch_a_runtime(
     policy: dict[str, Any],
 ) -> None:
-    """The blanket "no `bedrock-agentcore:` anywhere" this test used to assert is false by
-    design now that `UseOwnMemory` grants six data-plane actions on the repository's own
-    memory. What that substring was really protecting is stated here as itself: the role may
-    not mint an IAM role, may not reach S3, and may not dispatch a run -- no `*AgentRuntime`,
-    no `Invoke*`, no session action -- because a container that can call the AgentCore
-    control plane can invoke its own runtime and turn one compromised task into an unbounded
-    fan-out."""
+    """A blanket "no `bedrock-agentcore:` anywhere" would be false by design: `UseOwnMemory`
+    grants six data-plane actions on the repository's own memory, and `UseOwnCredential`
+    grants one on its own credential provider. What that substring was really protecting is
+    stated here as itself: the role may not mint an IAM role, may not reach S3, and may not
+    dispatch a run -- no `*AgentRuntime`, no `Invoke*`, no session action -- because a
+    container that can call the AgentCore control plane can invoke its own runtime and turn
+    one compromised task into an unbounded fan-out.
+
+    The enumeration is exact rather than a prefix check, so a future AgentCore grant costs a
+    line here with a reason.
+    """
     text = json.dumps(policy)
     for forbidden in ("iam:", "s3:"):
         assert forbidden not in text, (
@@ -478,9 +491,14 @@ def test_the_execution_role_can_neither_mint_a_role_nor_dispatch_a_runtime(
         "bedrock-agentcore:RetrieveMemoryRecords",
         "bedrock-agentcore:ListMemoryRecords",
         "bedrock-agentcore:GetMemoryRecord",
+        # The GitHub credential, on this configuration's own provider ARN. Read-only, and
+        # there is no companion write action: rotation is the control plane's, on a role
+        # this container does not have.
+        "bedrock-agentcore:GetResourceApiKey",
     }, (
         f"the only AgentCore actions this role may carry are the six `UseOwnMemory` data-plane "
-        f"actions, on its own memory's literal ARN, got {sorted(agentcore)}"
+        f"actions on its own memory's literal ARN, plus `GetResourceApiKey` on its own "
+        f"credential provider's literal ARN, got {sorted(agentcore)}"
     )
     for action in agentcore:
         for reachable in ("AgentRuntime", "Invoke", "Session"):
@@ -563,14 +581,24 @@ def test_configurations_access_is_get_item_only(policy: dict[str, Any]) -> None:
     )
 
 
-def test_the_secret_statement_names_the_literal_arn(policy: dict[str, Any]) -> None:
-    """Which is why `PUT /configurations/{id}/github-token` writes a new *version* of
-    that secret and never a second secret: a second one would be unreadable here."""
-    (statement,) = _statements(policy, "ReadOwnSecret")
-    assert _actions(statement) == ["secretsmanager:GetSecretValue"]
+def test_the_credential_statement_names_the_literal_provider_arn(policy: dict[str, Any]) -> None:
+    """Which is why `PUT /configurations/{id}/github-token` updates that provider in place
+    and never creates a second one: a second provider would be unreachable here.
+
+    It is also the whole cross-repository fence for the GitHub credential. The permissions
+    boundary spans the `rca_*` provider namespace because it is minted before any
+    configuration exists; only this literal ARN says "this repository's credential".
+    """
+    (statement,) = _statements(policy, "UseOwnCredential")
+    assert _actions(statement) == ["bedrock-agentcore:GetResourceApiKey"]
     assert _resources(statement) == [
-        "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:rca/github/cfg_0123456789ab-AbCdEf"
+        "arn:aws:bedrock-agentcore:ap-southeast-1:123456789012:"
+        "token-vault/default/apikeycredentialprovider/rca_cfg_0123456789ab"
     ]
+    assert "secretsmanager:" not in json.dumps(policy), (
+        "the container reaches its GitHub credential through Identity and holds no secret "
+        "ARN; a secretsmanager action here would be a second path to the same token"
+    )
 
 
 def test_log_creation_is_scoped_to_the_runtime_log_groups(policy: dict[str, Any]) -> None:
@@ -668,10 +696,18 @@ def test_a_policy_for_a_configuration_with_no_memory_omits_the_memory_statement(
             "a configuration with no memory gets no memory statement -- not an Allow with an "
             "empty resource, and not one with an empty action list"
         )
-        assert "bedrock-agentcore:" not in json.dumps(document), (
-            "with no `memoryId` the per-configuration execution role must carry no AgentCore "
-            "permission at all: an ARN ending at `memory/` matches nothing an operator "
-            "intended, and this is the state a swallowed `CreateMemory` failure produces"
+        memory_actions = {
+            action
+            for statement in document["Statement"]
+            for action in _actions(statement)
+            if action.startswith("bedrock-agentcore:") and ("Memory" in action or "Event" in action)
+        }
+        assert memory_actions == set(), (
+            f"with no `memoryId` the per-configuration execution role must carry no memory "
+            f"permission at all: an ARN ending at `memory/` matches nothing an operator "
+            f"intended, and this is the state a swallowed `CreateMemory` failure produces. "
+            f"Got {sorted(memory_actions)}. `GetResourceApiKey` is unaffected -- the GitHub "
+            f"credential does not depend on whether a memory was created."
         )
 
 

@@ -94,10 +94,10 @@ def test_the_only_egress_the_agent_security_group_allows_is_443(template: Templa
     or a widened one, is invisible in a deploy log.
 
     The group is selected by its `GroupDescription` and never as "the only one": each of the
-    six interface endpoints gets a security group of its own, so the template carries seven.
+    five interface endpoints gets a security group of its own, so the template carries six.
     """
     groups = _properties(template, "AWS::EC2::SecurityGroup")
-    assert len(groups) == 7, (
+    assert len(groups) == 6, (
         f"{len(groups)} security groups: the interface endpoints bring their own, so a "
         f"test that assumes one silently asserts against an endpoint's group instead"
     )
@@ -131,12 +131,11 @@ def test_every_aws_call_that_carries_content_has_a_vpc_endpoint(template: Templa
     halves of ECR are load-bearing -- `ecr.api` hands out the auth token and `ecr.dkr`
     serves the layers, and one without the other fails the image pull, which presents as a
     runtime that never reaches `READY`."""
-    template.resource_count_is("AWS::EC2::VPCEndpoint", 8)
+    template.resource_count_is("AWS::EC2::VPCEndpoint", 7)
     endpoints = _properties(template, "AWS::EC2::VPCEndpoint")
     names = [_service_name(endpoint["ServiceName"]) for endpoint in endpoints]
     for suffix in (
         ".bedrock-runtime",
-        ".secretsmanager",
         ".ecr.api",
         ".ecr.dkr",
         ".logs",
@@ -147,6 +146,13 @@ def test_every_aws_call_that_carries_content_has_a_vpc_endpoint(template: Templa
         ".bedrock-agentcore",
     ):
         assert any(name.endswith(suffix) for name in names), f"no endpoint for {suffix}: {names}"
+    # And no Secrets Manager endpoint, because the container makes no Secrets Manager call:
+    # the GitHub credential comes from AgentCore Identity over the data-plane endpoint above
+    # (invariant 4c), and the secret Identity keeps underneath is read by Identity rather than
+    # from this VPC. An endpoint with no client is an ENI in every AZ for nothing.
+    assert not any(name.endswith(".secretsmanager") for name in names), (
+        f"a Secrets Manager endpoint is back with nothing in the VPC to use it: {names}"
+    )
     # Gateway endpoints, and free: an ECR layer *is* an S3 object, which is why S3 is here.
     for suffix in (".dynamodb", ".s3"):
         assert any(name.endswith(suffix) for name in names), f"no endpoint for {suffix}: {names}"

@@ -85,7 +85,7 @@ PAYLOAD_TO_STATE: Mapping[str, str] = {
 # Read when present. `cloneSource`/`baseBranch` are an override channel nothing sends
 # today -- see the declaration tables in tests/test_invoke_payload_contract.py.
 OPTIONAL_PAYLOAD_FIELDS: tuple[str, ...] = (
-    "secretArn",
+    "credentialProviderName",
     "cloneSource",
     "baseBranch",
     "verifyCommand",

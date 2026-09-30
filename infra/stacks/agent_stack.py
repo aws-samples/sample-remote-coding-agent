@@ -162,15 +162,19 @@ def add_agent_network(scope: Construct, *, app_name: str, alert_email: str) -> A
     security_group.add_egress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(443), "443 only")
 
     # The endpoints are what make the in-boundary claim *demonstrable* rather than
-    # asserted: the calls carrying prompts and repository content -- Bedrock, the
-    # GitHub token out of Secrets Manager, the task rows, the log lines, the memory a
+    # asserted: the calls carrying prompts and repository content -- Bedrock, the GitHub
+    # credential out of AgentCore Identity, the task rows, the log lines, the memory a
     # later task reads back -- resolve to a private address in these subnets and never
     # traverse the internet. Without them the same traffic works fine over the NAT
     # gateway, and the claim becomes a sentence in a document that nothing enforces.
     private_subnets = ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
     for name, service in (
         ("BedrockRuntime", ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME),
-        ("SecretsManager", ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER),
+        # No `SECRETS_MANAGER` endpoint, and its absence is deliberate: the container makes
+        # no Secrets Manager call at all now that the GitHub credential is fetched from
+        # AgentCore Identity (invariant 4c). The secret Identity keeps underneath is read by
+        # Identity, not by this VPC. An endpoint with no client is an ENI in every AZ for
+        # nothing -- the same reason there is no `bedrock-agentcore-control` endpoint here.
         # Both halves of an image pull: `ECR` is the API that hands out the auth token,
         # `ECR_DOCKER` is the registry that serves the layers. One without the other
         # fails the pull, which presents as a runtime that never reaches `READY`.
@@ -347,7 +351,7 @@ def execution_role_boundary_statements(
     reading the classification in `tests/execution_boundary.py` for the second.
 
     The *resource* dimension is deliberately wider in four statements -- `MayTouchOwnRows`,
-    `MayReadOneSecret`, `MayWriteRuntimeLogs` and `MayUseOwnMemory`, each for the reason its
+    `MayUseOwnCredential`, `MayWriteRuntimeLogs` and `MayUseOwnMemory`, each for the reason its
     own comment below gives -- and each of the four is declared in
     `execution_boundary.WIDER_RESOURCES`, so widening a fifth costs a line in that table with
     a reason rather than passing as a silent change. Same idiom as
@@ -407,14 +411,23 @@ def execution_role_boundary_statements(
             resources=[f"arn:aws:dynamodb:{region}:{account}:table/*"],
         ),
         iam.PolicyStatement(
-            sid="MayReadOneSecret",
+            sid="MayUseOwnCredential",
             effect=iam.Effect.ALLOW,
-            actions=["secretsmanager:GetSecretValue"],
-            # The prefix `configurations.create` writes under (`rca/github/<configId>`).
-            # The trailing `*` is doing two jobs: it spans configurations, and it absorbs
-            # the six-character suffix Secrets Manager appends to every secret ARN -- an
-            # ARN ending at the name matches nothing at all.
-            resources=[f"arn:aws:secretsmanager:{region}:{account}:secret:{app_name}/github/*"],
+            actions=["bedrock-agentcore:GetResourceApiKey"],
+            # The credential provider namespace `configurations.create` writes under
+            # (`rca_<configId>`), in the account's own token vault. The permissions
+            # boundary is minted once per deploy, before any configuration exists, so
+            # there is nothing narrower to name -- the same position `MayUseOwnMemory` is
+            # in. The per-configuration fence is the literal provider ARN on the *grant*
+            # (`provisioner._execution_role_policy`), never this pattern.
+            #
+            # No `secretsmanager:` action anywhere in this boundary: the GitHub credential
+            # lives in AgentCore Identity, which holds it in a service-linked Secrets
+            # Manager secret the container has no ARN for and no grant on.
+            resources=[
+                f"arn:aws:bedrock-agentcore:{region}:{account}:"
+                f"token-vault/*/apikeycredentialprovider/{app_name}_*"
+            ],
         ),
         iam.PolicyStatement(
             sid="MayWriteRuntimeLogs",
@@ -482,7 +495,7 @@ def execution_role_boundary_statements(
             # narrower to name here. The trailing `*` also absorbs the ten-character suffix
             # AgentCore appends to every memory id -- botocore's own `memoryId` pattern is
             # `[a-zA-Z][a-zA-Z0-9-_]{0,99}-[a-zA-Z0-9]{10}` -- so an ARN ending at the name
-            # would match nothing at all, the trap `MayReadOneSecret` already documents. The
+            # would match nothing at all. The
             # fence that stops one repository reaching another's memory is the literal ARN
             # `provisioner._execution_role_policy` names (invariant 31's division of labour).
             resources=[f"arn:aws:bedrock-agentcore:{region}:{account}:memory/*"],

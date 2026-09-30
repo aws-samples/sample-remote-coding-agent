@@ -111,7 +111,7 @@ def test_the_graph_turns_the_wire_payload_into_the_state_the_nodes_read() -> Non
     assert state["description"] == payload["prompt"]
     for wire, key in graph.PAYLOAD_TO_STATE.items():
         assert state[key] == payload[wire], f"{wire} did not reach the state as {key}"
-    assert state["secretArn"] == payload["secretArn"]
+    assert state["credentialProviderName"] == payload["credentialProviderName"]
     assert state["verifyCommand"] == payload["verifyCommand"]
     assert state["setupCommand"] == payload["setupCommand"]
     # The payload has no say in this one; `run_task` re-asserts it off the checkpoint.
@@ -152,9 +152,9 @@ def test_every_field_the_dispatcher_sends_is_classified() -> None:
 
 
 def test_every_field_the_container_reads_is_sent_or_declared() -> None:
-    """The direction that would have caught `secretArn`, which the container read from the
-    payload and the dispatcher sent under no spelling at all -- so every container clone
-    was anonymous and no pull request could be opened."""
+    """The direction that catches a field the container reads and the dispatcher sends under
+    no spelling at all -- which for the GitHub credential means every clone is anonymous and
+    no pull request can be opened."""
     read = set(graph.PAYLOAD_TO_STATE) | set(graph.OPTIONAL_PAYLOAD_FIELDS)
     sent = set(invoke_payload.FIELDS)
 

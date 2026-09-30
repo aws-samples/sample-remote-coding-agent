@@ -44,7 +44,11 @@ _IMAGE = f"{_ACCOUNT}.dkr.ecr.{_REGION}.amazonaws.com/rca:latest"
 _OLD_IMAGE = f"{_ACCOUNT}.dkr.ecr.{_REGION}.amazonaws.com/rca:2f9c1aa"
 # An f-string rather than one literal: this names a secret, it is not one, and the name is what
 # a scanner reads.
-_SECRET_ARN = f"arn:aws:secretsmanager:{_REGION}:{_ACCOUNT}:secret:rca/github/cfg_abc123-AbCdEf"
+_PROVIDER_NAME = "rca_cfg_abc123"
+_PROVIDER_ARN = (
+    f"arn:aws:bedrock-agentcore:{_REGION}:{_ACCOUNT}:"
+    f"token-vault/default/apikeycredentialprovider/{_PROVIDER_NAME}"
+)
 _PLAN_MODEL = "global.anthropic.claude-opus-4-5-20251101-v1:0"
 _CODE_MODEL = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
 _HAIKU_MODEL = "apac.anthropic.claude-haiku-4-5-20251001-v1:0"
@@ -83,7 +87,8 @@ def _seed(common: Any, **overrides: Any) -> dict[str, Any]:
         "repositoryUrl": "https://github.com/owner/repo",
         "status": "PENDING",
         "statusReason": "",
-        "secretArn": _SECRET_ARN,
+        "credentialProviderName": _PROVIDER_NAME,
+        "credentialProviderArn": _PROVIDER_ARN,
         "createdAt": "2026-01-01T00:00:00.000Z",
         "updatedAt": "2026-01-01T00:00:00.000Z",
     }
@@ -203,7 +208,7 @@ def test_create_sends_the_mount_the_lifetime_and_the_work_root(
     assert call["networkConfiguration"] == {"networkMode": "PUBLIC"}
     # The container reads its own configuration and its own secret; it is told which.
     assert call["environmentVariables"]["CONFIG_ID"] == _CONFIG_ID
-    assert call["environmentVariables"]["SECRET_ARN"] == _SECRET_ARN
+    assert call["environmentVariables"]["CREDENTIAL_PROVIDER_NAME"] == _PROVIDER_NAME
     assert call["environmentVariables"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == _CODE_MODEL
     assert call["environmentVariables"]["CLAUDE_CODE_USE_BEDROCK"] == "1"
 
@@ -981,12 +986,13 @@ def test_the_role_is_created_under_one_path_behind_a_boundary(
 def test_the_trust_policy_fences_the_source_account_when_it_is_known(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The account comes off the configuration's own `secretArn` -- deliberately not from
+    """The account comes off the configuration's own `credentialProviderArn` -- deliberately
+    not from
     `sts:GetCallerIdentity`, which would widen this Lambda's grant surface for a value
     every provisioned configuration already carries."""
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    assert provisioner._account_and_region({"secretArn": _SECRET_ARN}) == (
+    assert provisioner._account_and_region({"credentialProviderArn": _PROVIDER_ARN}) == (
         "123456789012",
         "ap-southeast-1",
     )
@@ -1008,7 +1014,9 @@ def test_the_execution_role_policy_is_fenced_to_one_configuration(
     `verifyCommand` is remote code execution in that container."""
     _fleet(monkeypatch)
     common, provisioner = _load("provisioner")
-    policy = provisioner._execution_role_policy({"configId": _CONFIG_ID, "secretArn": _SECRET_ARN})
+    policy = provisioner._execution_role_policy(
+        {"configId": _CONFIG_ID, "credentialProviderArn": _PROVIDER_ARN}
+    )
     statements = {statement["Sid"]: statement for statement in policy["Statement"]}
 
     for sid in ("ReadOwnConfiguration", "OwnTasks"):
@@ -1025,7 +1033,7 @@ def test_the_execution_role_policy_is_fenced_to_one_configuration(
         "dynamodb:Query",
     }
     # The literal secret ARN, which is why rotation writes a new *version*.
-    assert statements["ReadOwnSecret"]["Resource"] == _SECRET_ARN
+    assert statements["UseOwnCredential"]["Resource"] == _PROVIDER_ARN
     assert statements["WriteRuntimeLogs"]["Resource"].startswith(
         "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes"
     )
@@ -1038,17 +1046,19 @@ def test_the_execution_role_policy_is_fenced_to_one_configuration(
     )
 
     granted = json.dumps(policy)
-    # The configuration this policy was built from carries no `memoryId`, which is why the
-    # `"bedrock-agentcore:` clause below holds -- stated rather than left as a check that
-    # passes for a reason nobody wrote down.
+    # The configuration this policy was built from carries no `memoryId`, so there is no
+    # memory statement -- stated rather than left as a check that passes for a reason nobody
+    # wrote down. The six data-plane memory actions a configuration *with* a `memoryId`
+    # carries are asserted in tests/test_api_grant_contract.py, which builds from a fixture
+    # that has one.
     assert "UseOwnMemory" not in statements
-    for forbidden in ('"iam:', '"s3:', '"bedrock-agentcore:'):
-        assert forbidden not in granted, (
-            f"{forbidden} is not on the container's list. The `bedrock-agentcore:` clause "
-            f"holds because this configuration has no memory: the six data-plane actions a "
-            f"configuration *with* a `memoryId` carries are asserted in "
-            f"tests/test_api_grant_contract.py, which builds from a fixture that has one."
-        )
+    for forbidden in ('"iam:', '"s3:'):
+        assert forbidden not in granted, f"{forbidden} is not on the container's list"
+    # The one AgentCore action this configuration does carry, on its own provider ARN. Named
+    # here rather than covered by a prefix check, so a second AgentCore grant appearing in
+    # this policy fails a test.
+    assert statements["UseOwnCredential"]["Action"] == ["bedrock-agentcore:GetResourceApiKey"]
+    assert statements["UseOwnCredential"]["Resource"] == _PROVIDER_ARN
     # `AuthenticateToEcr` is the *only* statement allowed a wildcard resource, because
     # `ecr:GetAuthorizationToken` supports no resource types and a scoped ARN there matches
     # no authorization at all. Every other statement names what it may touch, so the next
@@ -1067,7 +1077,9 @@ def test_the_bedrock_grant_is_not_region_scoped(aws: Any, monkeypatch: pytest.Mo
     the CLI inside the container, nowhere near this policy."""
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    policy = provisioner._execution_role_policy({"configId": _CONFIG_ID, "secretArn": _SECRET_ARN})
+    policy = provisioner._execution_role_policy(
+        {"configId": _CONFIG_ID, "credentialProviderArn": _PROVIDER_ARN}
+    )
     (invoke,) = [s for s in policy["Statement"] if s["Sid"] == "InvokeClaude"]
     assert "arn:aws:bedrock:*::foundation-model/anthropic.*" in invoke["Resource"]
     assert any(resource.endswith("inference-profile/*") for resource in invoke["Resource"])
@@ -1094,7 +1106,7 @@ def test_the_role_and_its_policy_are_rewritten_on_a_second_create(
     document = json.loads(document) if isinstance(document, str) else document
     assert {statement["Sid"] for statement in document["Statement"]} >= {
         "InvokeClaude",
-        "ReadOwnSecret",
+        "UseOwnCredential",
         "OwnTasks",
     }
 
@@ -1335,7 +1347,7 @@ def test_a_configured_vpc_is_fleet_policy_not_carry_forward(
             "securityGroups": ["sg-0ccc"],
         },
     }
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN}
+    config = {"configId": _CONFIG_ID, "credentialProviderArn": _PROVIDER_ARN}
     live = runtime(agentRuntimeId=_RUNTIME_ID, networkConfiguration={"networkMode": "PUBLIC"})
     desired = provisioner._desired_runtime(live, config)
     assert desired["networkConfiguration"]["networkMode"] == "VPC"
@@ -1370,7 +1382,7 @@ def test_an_unset_subnet_list_never_moves_a_live_runtime_back_to_public_egress(
     This test is the only thing between that and a deploy nobody would look twice at."""
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN}
+    config = {"configId": _CONFIG_ID, "credentialProviderArn": _PROVIDER_ARN}
     vpc = {
         "networkMode": "VPC",
         "networkModeConfig": {
@@ -1466,7 +1478,11 @@ def test_each_converged_field_on_its_own_is_enough_to_issue_an_update(
     absent from this list on purpose -- they are carried forward, so they cannot drift."""
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    config = {
+        "configId": _CONFIG_ID,
+        "credentialProviderArn": _PROVIDER_ARN,
+        "repository": "owner/repo",
+    }
 
     converged = runtime(agentRuntimeId=_RUNTIME_ID)
     converged["environmentVariables"] = provisioner._desired_runtime(converged, config)[
@@ -1554,7 +1570,9 @@ def test_an_invalid_mount_path_is_refused_before_the_call(
     _common, provisioner = _load("provisioner")
     monkeypatch.setattr(provisioner, "MOUNT_PATH", "/mnt/workspace/nested")
     with pytest.raises(ValueError, match="mount path"):
-        provisioner._desired_runtime(None, {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN})
+        provisioner._desired_runtime(
+            None, {"configId": _CONFIG_ID, "credentialProviderArn": _PROVIDER_ARN}
+        )
 
 
 # -- DELETE -----------------------------------------------------------------------
@@ -1564,14 +1582,15 @@ def test_delete_tears_down_in_dependency_order_and_removes_the_item_last(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Invariant 22: this is the teardown path, not `cdk destroy` -- the tables are
-    `RETAIN`, so nothing else removes a configuration's runtime, role or secret."""
+    `RETAIN`, so nothing else removes a configuration's runtime, role or credential."""
     _fleet(monkeypatch)
     common, provisioner = _load("provisioner")
-    secret = common.secrets.create_secret(
-        Name=f"rca/github/{_CONFIG_ID}", SecretString="github_pat_x"
-    )
-    _seed(common, secretArn=secret["ARN"])
+    _seed(common)
     control = FakeAgentCore("bedrock-agentcore-control")
+    control.credential_providers[_PROVIDER_NAME] = {
+        "name": _PROVIDER_NAME,
+        "apiKey": "github_pat_x",
+    }
     install(monkeypatch, common, control=control)
     _spy_sqs(monkeypatch, common)
 
@@ -1596,14 +1615,17 @@ def test_delete_tears_down_in_dependency_order_and_removes_the_item_last(
     assert control.runtimes == {}
     assert control.memories == {}
     assert common.iam.list_roles(PathPrefix=provisioner.ROLE_PATH)["Roles"] == []
-    assert common.secrets.list_secrets()["SecretList"] == []
+    # The credential goes with its provider, and so does the service-linked Secrets Manager
+    # secret Identity keeps underneath -- which is why nothing here names a secret and why
+    # `api/` holds no `secretsmanager:DeleteSecret` grant.
+    assert control.credential_providers == {}
     assert _status(common) is None, "the item goes last, so a crash mid-teardown is resumable"
 
 
 def test_teardown_is_replayable_over_what_a_previous_pass_removed(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A `DELETING` configuration whose runtime, role and secret are already gone is the
+    """A `DELETING` configuration whose runtime, role and credential are already gone is the
     normal state after a crash mid-teardown. The second pass must finish, not fail."""
     _fleet(monkeypatch)
     common, provisioner = _load("provisioner")
@@ -1639,9 +1661,11 @@ def test_teardown_is_replayable_over_what_a_previous_pass_removed(
 
     # And a redelivery of the same message, with the item now gone.
     _run(provisioner, "DELETE")
-    assert control.operations() == ["DeleteAgentRuntime", "DeleteMemory"], (
-        "the second pass asked nothing"
-    )
+    assert control.operations() == [
+        "DeleteAgentRuntime",
+        "DeleteMemory",
+        "DeleteApiKeyCredentialProvider",
+    ], "the second pass asked nothing"
 
 
 # -- the entry point --------------------------------------------------------------
@@ -1739,7 +1763,11 @@ def test_this_deployment_is_v2_only_and_says_so_without_an_environment_variable(
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
     assert provisioner.PLATFORM_VERSION == "V2"
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    config = {
+        "configId": _CONFIG_ID,
+        "credentialProviderArn": _PROVIDER_ARN,
+        "repository": "owner/repo",
+    }
     assert provisioner._desired_runtime(None, config)["platformVersion"] == "V2"
 
     # And it cannot be talked out of it from the environment.
@@ -1761,7 +1789,11 @@ def test_the_platform_version_is_fleet_policy_and_is_sent_on_create_and_update(
     """
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    config = {
+        "configId": _CONFIG_ID,
+        "credentialProviderArn": _PROVIDER_ARN,
+        "repository": "owner/repo",
+    }
 
     assert provisioner._desired_runtime(None, config)["platformVersion"] == "V2"
 
@@ -1788,7 +1820,11 @@ def test_a_runtime_that_reports_no_platform_version_is_drift_and_converges_once(
     """
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    config = {
+        "configId": _CONFIG_ID,
+        "credentialProviderArn": _PROVIDER_ARN,
+        "repository": "owner/repo",
+    }
 
     pre_v2 = runtime(agentRuntimeId=_RUNTIME_ID)
     pre_v2.pop("platformVersion")
@@ -1823,7 +1859,11 @@ def test_a_vendor_only_network_member_is_not_drift(
     subnets = "subnet-0aaa,subnet-0bbb"
     _fleet(monkeypatch, AGENT_SUBNET_IDS=subnets, AGENT_SECURITY_GROUP_IDS="sg-0ccc")
     _common, provisioner = _load("provisioner")
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    config = {
+        "configId": _CONFIG_ID,
+        "credentialProviderArn": _PROVIDER_ARN,
+        "repository": "owner/repo",
+    }
 
     live = runtime(agentRuntimeId=_RUNTIME_ID)
     live["networkConfiguration"] = {
@@ -1856,7 +1896,11 @@ def test_a_stale_member_this_code_wants_removed_is_still_drift(
     """
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    config = {
+        "configId": _CONFIG_ID,
+        "credentialProviderArn": _PROVIDER_ARN,
+        "repository": "owner/repo",
+    }
 
     live = runtime(agentRuntimeId=_RUNTIME_ID)
     live["networkConfiguration"] = {
@@ -1885,7 +1929,7 @@ def test_a_retired_fleet_variable_is_removed_from_a_live_runtime(
     still on the live runtime afterwards. Nothing failed, and invariant 32b's own claim that no
     `OTEL_*` variable is set anywhere was false for every runtime that predated the removal.
 
-    `RETIRED_FLEET_KEYS` is the tombstone list that fixes it, and this is what holds it: a
+    `RETIRED_ENVIRONMENT_KEYS` is the tombstone list that fixes it, and this is what holds it: a
     retired name is removed, while an unknown name beside it is still carried forward, because
     the second half is what stops the fix becoming a blanket "drop what the fleet does not
     send" rule -- which would silently discard per-configuration keys too.
@@ -1910,9 +1954,9 @@ def test_a_retired_fleet_variable_is_removed_from_a_live_runtime(
     desired = provisioner._desired_runtime(live, {"configId": "cfg_abc", "repository": "o/r"})
     environment = desired["environmentVariables"]
 
-    for name in provisioner.RETIRED_FLEET_KEYS:
+    for name in provisioner.RETIRED_ENVIRONMENT_KEYS:
         assert name not in environment, (
-            f"{name} is in RETIRED_FLEET_KEYS and must be removed from the runtime, not merely "
+            f"{name} is in RETIRED_ENVIRONMENT_KEYS and must be removed from the runtime, not merely "
             f"absent from the fleet group -- `UpdateAgentRuntime` is a full replace, so a key "
             f"left in this dict is a key the runtime keeps"
         )

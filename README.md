@@ -142,7 +142,7 @@ It writes status/activity to DynamoDB; the console polls through the API. AgentC
 is created at registration and deleted at deregistration. Tasks can retrieve earlier lessons;
 a repository without memory runs without it.
 
-VPC endpoints connect runtime traffic to **Bedrock, AgentCore, Secrets Manager,
+VPC endpoints connect runtime traffic to **Bedrock, AgentCore,
 DynamoDB, ECR API/Docker, S3, and CloudWatch Logs**. Lambda runs outside the agent VPC.
 GitHub receives source code through clone/push/PR traffic. Package installation reaches
 PyPI/npm, and the documentation tool reaches AWS documentation. These are intended destinations,
@@ -161,7 +161,7 @@ cap, and does not cover every service. Monitor your actual account charges.
 
 Deregister every repository in the console **first** — settings → **Deregister**, 1-3 min each —
 and only then destroy the stacks. The other order orphans the runtime, the IAM role and the
-secret, which no stack owns and which keep costing money. Follow the
+stored GitHub credential, which no stack owns and which keep costing money. Follow the
 [exact five-stack teardown commands](CLAUDE.md#tearing-a-fleet-down) for your prefix and region.
 Stack deletion retains tables, the Cognito pool, access logs, bootstrap ECR images, and runtime
 log groups. Review the [retained-resource cleanup table](CLAUDE.md#what-deliberately-survives-a-destroy)

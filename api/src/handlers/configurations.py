@@ -90,7 +90,7 @@ _PUBLIC_FIELDS = (
     "verifyCommand",
     "setupCommand",
     "defaultBranch",
-    "secretArn",
+    "credentialProviderArn",
     "executionRoleArn",
     "agentRuntimeArn",
     "agentRuntimeId",
@@ -147,6 +147,20 @@ _EXPIRING_OR_OAUTH_PREFIX = re.compile(r"^gh[osur]_")
 
 def _new_config_id() -> str:
     return f"cfg_{secrets_module.token_hex(6)}"
+
+
+# One credential provider per configuration, and this is the only place its name is
+# composed. The name is the identifier the *container* is given -- it never sees an ARN --
+# so a second spelling here would be a runtime asking Identity for a credential that does
+# not exist, reported as a `ResourceNotFoundException` at the first clone.
+#
+# `CreateApiKeyCredentialProvider`'s `name` pattern is `[a-zA-Z0-9\-_]+`, max 128. A
+# config id is `cfg_` plus twelve hex characters, so the `rca_` prefix keeps it inside both
+# and the whole name stays readable in a console listing. The prefix also keeps this
+# deployment's providers distinguishable from anything else using the account's token
+# vault, which is shared per account and region.
+def _provider_name(config_id: str) -> str:
+    return f"rca_{config_id}"
 
 
 def _repository_from_url(url: str) -> str:
@@ -446,13 +460,19 @@ def create(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
         _retire_failed(stale_id)
 
     config_id = _new_config_id()
-    # The secret is written **before** the item, so a stored configuration always has a
-    # resolvable `secretArn` -- the execution role's inline policy names that literal
-    # ARN, and an item pointing at nothing is a runtime that can never authenticate.
-    secret = _common.secrets.create_secret(
-        Name=f"rca/github/{config_id}",
-        SecretString=token,
-        Description=f"GitHub token for {repository}",
+    # The credential provider is created **before** the item, so a stored configuration
+    # always has a resolvable provider -- the execution role's inline policy names that
+    # literal ARN, and an item pointing at nothing is a runtime that can never
+    # authenticate.
+    #
+    # AgentCore Identity holds the token, and it does so by creating a **service-linked**
+    # Secrets Manager secret in this account that only Identity may write. So this is not
+    # "no secret": it is a secret this code neither names nor rotates directly, reached by
+    # provider name instead of by ARN. `bedrock-agentcore-control` and not
+    # `secretsmanager` is therefore the only credential client `api/` builds.
+    provider = _common.agentcore_control().create_api_key_credential_provider(
+        name=_provider_name(config_id),
+        apiKey=token,
     )
     stamp = _common.now_iso()
     item: dict[str, Any] = {
@@ -461,7 +481,8 @@ def create(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
         "repositoryUrl": repository_url,
         "status": "PENDING",
         "statusReason": "",
-        "secretArn": secret["ARN"],
+        "credentialProviderName": _provider_name(config_id),
+        "credentialProviderArn": provider["credentialProviderArn"],
         "createdAt": stamp,
         "updatedAt": stamp,
     }
@@ -474,10 +495,13 @@ def create(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
     try:
         _common.config_table.put_item(Item=item, ConditionExpression=Attr("configId").not_exists())
     except ClientError:
-        # Ordering the secret first buys a resolvable ARN at the cost of this arm: an
-        # orphan secret holds the name `rca/github/<configId>` and a scheduled deletion
-        # would make it unrecoverable for 7 days.
-        _common.secrets.delete_secret(SecretId=secret["ARN"], ForceDeleteWithoutRecovery=True)
+        # Ordering the credential provider first buys a resolvable ARN at the cost of this
+        # arm: an orphan provider holds the name `rca_<configId>`, so a later registration
+        # reusing that id would answer `ConflictException`. Deleting the provider takes the
+        # service-linked secret with it, which is why nothing here names a secret.
+        _common.agentcore_control().delete_api_key_credential_provider(
+            name=_provider_name(config_id)
+        )
         raise
 
     provisioner.enqueue(config_id, "CREATE")
@@ -708,12 +732,12 @@ def rotate_token(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
     _require_supported_token(token)
 
     config = _load_config(config_id)
-    secret_arn = config.get("secretArn")
-    if not secret_arn:
+    provider_name = config.get("credentialProviderName")
+    if not provider_name:
         raise ApiError(
             409,
-            "NoSecret",
-            "this configuration has no secret to rotate; re-register the repository",
+            "NoCredentialProvider",
+            "this configuration has no credential to rotate; re-register the repository",
             configId=config_id,
         )
     # The probe needs the repository, so it cannot run before the item is loaded -- but it
@@ -727,12 +751,16 @@ def rotate_token(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
         LOG.warning(
             "configuration %s carries no repository; rotating without the push check", config_id
         )
-    # A new **version** of the existing secret, never a second secret: the execution
-    # role's inline policy names this literal ARN, so a second secret would be
-    # unreadable by the runtime that needs it.
-    rotated = _common.secrets.put_secret_value(SecretId=secret_arn, SecretString=token)
+    # The existing provider, updated in place, never a second provider: the execution
+    # role's inline policy names this literal provider ARN, so a second one would be
+    # unreachable by the runtime that needs it. `update_api_key_credential_provider` is
+    # also the only way to write this credential at all -- the secret underneath is
+    # service-linked, and `secretsmanager:PutSecretValue` on it is refused.
+    _common.agentcore_control().update_api_key_credential_provider(
+        name=str(provider_name), apiKey=token
+    )
     LOG.info("rotated the github token for config %s", config_id)
-    return 200, {"rotated": True, "configId": config_id, "versionId": rotated.get("VersionId")}
+    return 200, {"rotated": True, "configId": config_id}
 
 
 # The one definition of this module's routes. `infra/stacks/api_stack.py` wires them up and

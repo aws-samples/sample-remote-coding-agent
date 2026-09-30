@@ -99,7 +99,7 @@ class TaskState(TypedDict, total=False):
     configId: str
     repository: str
     cloneSource: str
-    secretArn: str
+    credentialProviderName: str
     # The repository's AgentCore memory resource, resolved exactly once in
     # `graph.run_task` off the configuration item and read by nobody else. Absent on a
     # local run and on a repository with no memory resource, which is the signal
