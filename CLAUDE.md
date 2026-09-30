@@ -520,6 +520,20 @@ the code it governs and a regression test.
 20. **`bedrock-agentcore` needs a newer boto3 than Lambda ships** — bundle
     `api/requirements.txt`, floor `botocore>=1.43.0`.
 21. **`global.` inference profiles need a non-region-scoped model ARN.**
+22b. **A teardown asks whether the runtime exists before deleting it** —
+    `DeleteAgentRuntime` on a runtime that is already gone answers
+    **`AccessDeniedException`**, not `ResourceNotFoundException`. That was measured against
+    the live service with administrator credentials, so it is the service's answer for a
+    missing resource rather than anything about the caller, and the message is the bare
+    "is not authorized to perform: bedrock-agentcore:DeleteAgentRuntime" with no resource
+    clause. It breaks the replay `_delete` depends on: the item is deleted **last** so a
+    crash mid-teardown is finishable, but once the runtime is gone every replay raises and
+    the configuration stays `DELETING` for good -- and the watchdog's configuration sweep
+    (invariant 39) re-drives the same `DELETE` into the same failure. `_runtime_exists`
+    probes with `GetAgentRuntime`, which answers a missing runtime with a clean
+    `ResourceNotFoundException`. `_is_gone` is deliberately **not** widened to accept
+    `AccessDeniedException`, because a genuine missing grant presents identically and would
+    then look like a successful teardown while leaving a live runtime billing.
 22. **Tables are `RETAIN`** — `DELETE /configurations/{id}` is the teardown path,
     not `cdk destroy`. A `FAILED` configuration does not hold its repository name:
     `POST /configurations` retires it (`DELETING` + a `DELETE` message) and registers
@@ -725,11 +739,17 @@ mint a second memory; and `tags` as a **map**, `{"rca:configId": ..., "rca:repos
 — not `create_role`'s list of `{"Key": ..., "Value": ...}` pairs, because `CreateMemory`'s
 `tags` member really is a map in the service model.
 
-**Three things about memory are unmeasured, and this is where that is recorded.** No live run
-has shown a memory written by one task being recalled by another, so the feature is implemented
-and undemonstrated. The two strategies' extraction quality is a default nobody has judged. And
-the **90**-day `eventExpiryDuration` is a default too: a memory silently empties after a
-quarter, and no run has been alive long enough to see it happen.
+**What is demonstrated about memory, and what is still unmeasured.** Cross-task recall works:
+events written under one task's session are extracted into the repository's episodic namespace
+and retrieved by a later query against it, which is the whole point of D6's keying. Extraction
+is asynchronous, so a record does not appear the moment the task that wrote it finishes.
+
+Two defaults remain unjudged. The two strategies' extraction quality is whatever the service
+chooses. And the **90**-day `eventExpiryDuration` is a default nobody has tested: a memory
+silently empties after a quarter, and no deployment here has been alive long enough to see it.
+The prompt-injection path is deliberately silent on success -- `recall` returns `""` rather than
+raising -- so a role receiving a record is not separately observable; what is observable is the
+record, through `GET /configurations/{configId}/memory`.
 
 It runs **before** `provisioner._ensure_role`, because the inline policy that role gets has to
 name the memory's exact ARN. It is idempotent the way `_ensure_role` is: a stored `memoryId`

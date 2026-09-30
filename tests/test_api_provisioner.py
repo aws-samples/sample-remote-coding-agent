@@ -29,6 +29,7 @@ import re
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from test_api_fakes import FakeAgentCore, client_error, install, runtime
 from test_api_fakes import load_handlers as _load
 
@@ -1622,28 +1623,49 @@ def test_delete_tears_down_in_dependency_order_and_removes_the_item_last(
     assert _status(common) is None, "the item goes last, so a crash mid-teardown is resumable"
 
 
-def test_teardown_is_replayable_over_what_a_previous_pass_removed(
+def test_teardown_is_replayable_when_the_runtime_is_already_gone(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A `DELETING` configuration whose runtime, role and credential are already gone is the
-    normal state after a crash mid-teardown. The second pass must finish, not fail."""
+    normal state after a crash mid-teardown. The second pass must finish, not fail.
+
+    The fake answers `GetAgentRuntime` with `ResourceNotFoundException` and
+    `DeleteAgentRuntime` with **`AccessDeniedException`**, which is what the live service
+    does for a runtime that no longer exists -- measured, and with administrator credentials,
+    so it is the service's answer for a missing resource and not a statement about the
+    caller. It is also indistinguishable from a real missing grant, which is why `_is_gone`
+    must never accept that code: doing so would turn an absent permission into a teardown
+    that looks successful and leaves a live runtime billing.
+
+    So the delete is guarded by `_runtime_exists`, and the assertion is that
+    `DeleteAgentRuntime` is **never called** on this path. Without the guard the item is
+    never deleted, the configuration stays `DELETING` forever, and the watchdog's
+    configuration sweep re-drives the same `DELETE` into the same failure.
+    """
     _fleet(monkeypatch)
     common, provisioner = _load("provisioner")
     _seed(common, status=provisioner.DELETING, agentRuntimeId=_RUNTIME_ID, memoryId=_MEMORY_ID)
     control = FakeAgentCore(
         "bedrock-agentcore-control",
         errors={
-            "DeleteAgentRuntime": [
+            "GetAgentRuntime": [
                 client_error(
                     "ResourceNotFoundException",
                     "runtime not found",
                     status=404,
+                    operation="GetAgentRuntime",
+                )
+            ],
+            "DeleteAgentRuntime": [
+                client_error(
+                    "AccessDeniedException",
+                    "is not authorized to perform: bedrock-agentcore:DeleteAgentRuntime",
+                    status=403,
                     operation="DeleteAgentRuntime",
                 )
             ],
-            # The same shape for the memory: `ResourceNotFoundException` is the only code
-            # `DeleteMemory` uses for "already gone", so it is the only one a replay may
-            # swallow.
+            # `ResourceNotFoundException` is the only code `DeleteMemory` uses for "already
+            # gone", so it is the only one a replay may swallow there.
             "DeleteMemory": [
                 client_error(
                     "ResourceNotFoundException",
@@ -1657,15 +1679,55 @@ def test_teardown_is_replayable_over_what_a_previous_pass_removed(
     install(monkeypatch, common, control=control)
 
     _run(provisioner, "DELETE")
-    assert _status(common) is None
+    assert _status(common) is None, (
+        "the item must be deleted even though the runtime was already gone -- otherwise the "
+        "configuration is stuck DELETING with nothing able to finish it"
+    )
+    assert "DeleteAgentRuntime" not in control.operations(), (
+        "the existence probe must stop the delete: on a missing runtime the service answers "
+        "AccessDenied, which _is_gone rightly refuses to swallow"
+    )
 
     # And a redelivery of the same message, with the item now gone.
     _run(provisioner, "DELETE")
     assert control.operations() == [
-        "DeleteAgentRuntime",
+        "GetAgentRuntime",
         "DeleteMemory",
         "DeleteApiKeyCredentialProvider",
     ], "the second pass asked nothing"
+
+
+def test_a_permission_failure_on_the_runtime_delete_still_raises(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same decision, and the reason `_is_gone` was not widened.
+
+    Here the runtime *does* exist and the delete is genuinely denied. That must raise and
+    leave the item in place, so the message is redelivered and an operator eventually reads a
+    DLQ -- rather than completing quietly and abandoning a runtime that keeps billing.
+    """
+    _fleet(monkeypatch)
+    common, provisioner = _load("provisioner")
+    _seed(common, status=provisioner.DELETING, agentRuntimeId=_RUNTIME_ID)
+    control = FakeAgentCore(
+        "bedrock-agentcore-control",
+        runtimes={_RUNTIME_ID: runtime(agentRuntimeId=_RUNTIME_ID, status="READY")},
+        errors={
+            "DeleteAgentRuntime": [
+                client_error(
+                    "AccessDeniedException",
+                    "is not authorized to perform: bedrock-agentcore:DeleteAgentRuntime",
+                    status=403,
+                    operation="DeleteAgentRuntime",
+                )
+            ]
+        },
+    )
+    install(monkeypatch, common, control=control)
+
+    with pytest.raises(ClientError):
+        _run(provisioner, "DELETE")
+    assert _status(common) is not None, "the item stays, so the teardown is retried"
 
 
 # -- the entry point --------------------------------------------------------------

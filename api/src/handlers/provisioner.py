@@ -1426,6 +1426,42 @@ def _check(config_id: str, attempt: int) -> None:
         _set_config(config_id, status=FAILED, statusReason=f"the runtime reported {status}")
 
 
+def _runtime_exists(runtime_id: str) -> bool:
+    """Whether the runtime is still there, asked before `DeleteAgentRuntime` rather than
+    after.
+
+    **`DeleteAgentRuntime` on a runtime that no longer exists answers
+    `AccessDeniedException`, not `ResourceNotFoundException`** -- measured against the live
+    service, and with an administrator's credentials, so it is the service's answer for a
+    missing resource rather than anything about the caller's permissions. The message is the
+    bare "is not authorized to perform: bedrock-agentcore:DeleteAgentRuntime", with no
+    resource clause and no "because no identity-based policy allows".
+
+    That breaks the replay this teardown depends on. `_delete` deletes the item **last** so a
+    crash mid-teardown is finishable by the next `DELETE` message; but once the runtime is
+    gone, every replay raises `AccessDenied`, the item is never deleted, and the
+    configuration stays `DELETING` forever. Nothing recovers it -- `watchdog`'s
+    configuration sweep re-drives the same `DELETE`, which fails the same way.
+
+    `_is_gone` is deliberately **not** widened to accept `AccessDeniedException`: a real
+    permission failure presents identically, so that would turn a missing grant into a
+    silent, successful-looking teardown that leaves a live runtime billing. Asking
+    `GetAgentRuntime` first costs one call and needs no message matching --
+    `GetAgentRuntime` answers a missing runtime with a clean `ResourceNotFoundException`
+    (also measured). An error that is neither "not found" nor a success is left to raise,
+    because a control plane that cannot be read is not a control plane that should be
+    written.
+    """
+    try:
+        _common.agentcore_control().get_agent_runtime(agentRuntimeId=runtime_id)
+    except ClientError as err:
+        if _is_gone(err):
+            LOG.info("runtime %s is already gone; nothing to delete", runtime_id)
+            return False
+        raise
+    return True
+
+
 def _delete_memory(config_id: str, config: Mapping[str, Any]) -> None:
     """The memory teardown step, lifted out of `_delete` rather than written inline beside
     the other four: `_delete` already sits at the `ruff.toml` complexity ceiling of 12, which
@@ -1461,7 +1497,7 @@ def _delete(config_id: str) -> None:
         return
 
     runtime_id = str(config.get("agentRuntimeId") or "")
-    if runtime_id:
+    if runtime_id and _runtime_exists(runtime_id):
         try:
             _common.agentcore_control().delete_agent_runtime(agentRuntimeId=runtime_id)
         except ClientError as err:

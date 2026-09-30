@@ -223,8 +223,6 @@ would succeed and every task an hour later would fail inside a container.
   `-c gitAuthorEmail=` at deploy time to fix it.
 - **AgentCore Runtime V2 only**, so deployment is limited to `us-east-1`, `us-east-2`,
   `us-west-2`, `eu-west-1` and `ap-northeast-1`.
-- **Memory is implemented and undemonstrated**: no run has yet shown one task recalling what
-  another wrote, and events expire after 90 days.
 
 ## Security
 
