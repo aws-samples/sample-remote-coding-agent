@@ -243,7 +243,14 @@ def test_there_is_one_http_boundary_and_one_credential_module() -> None:
         f"one exception and is scoped deliberately -- a PKCE code exchange with Cognito is "
         f"not an API call and must not pass through the API's own bearer plumbing."
     )
-    offenders = _files_containing("Authorization")
+    # The **header**, not the word. A bare substring search matched
+    # `completeGitHubAuthorization` and would match any future OAuth-flavoured identifier --
+    # the console's vocabulary now genuinely contains "authorization" because the 3LO flow
+    # does. The lookarounds pin the header's own spelling (`{ Authorization: ... }`), which is
+    # what the claim below is actually about, so the test keeps its teeth without going off on
+    # a function name.
+    header = re.compile(r"(?<![A-Za-z])Authorization(?![A-Za-z])")
+    offenders = {name for name, text in _sources().items() if header.search(text)}
     assert offenders == {"js/api.js"}, (
         f"the bearer header is spelled in {sorted(offenders)}. One place attaches a "
         f"credential to a request, so there is one place to audit when the token type "
@@ -369,13 +376,15 @@ def test_the_router_is_hash_only_so_cloudfront_never_sees_a_deep_link() -> None:
         f"text/html -- in the same change that adds the route."
     )
     offenders = _files_containing("replaceState")
-    assert offenders == {"js/auth.js", "js/views/connect.js"}, (
-        f"`replaceState` appears in {sorted(offenders)}. The two permitted uses are the same "
-        f"shape: `auth.js` stripping Cognito's OAuth `?code=` out of the address bar, and "
-        f"`views/connect.js` stripping GitHub's app-manifest `?code=` out of it -- both "
-        f"single-use codes that must not survive a reload. Each rewrites the **query** and "
-        f"leaves `location.pathname` exactly as it was. Anywhere else it is a path-based "
-        f"route wearing a quieter name, and it costs the same thing: `web_stack.py` has no "
+    assert offenders == {"js/auth.js", "js/views/connect.js", "js/views/register.js"}, (
+        f"`replaceState` appears in {sorted(offenders)}. The three permitted uses are the "
+        f"same shape -- a single-use query parameter that must not survive a reload, removed "
+        f"without touching the path: Cognito's OAuth `?code=` in `auth.js`, GitHub's "
+        f"app-manifest `?code=` in `views/connect.js`, and AgentCore's `?session_id=` in "
+        f"`views/register.js`, which completes an authorisation and would report a failure "
+        f"for a successful one if it were spent twice. Each rewrites the **query** and leaves "
+        f"`location.pathname` exactly as it was. Anywhere else it is a path-based route "
+        f"wearing a quieter name, and it costs the same thing: `web_stack.py` has no "
         f"`error_responses` to catch the path, so the deep link is S3's "
         f"<Error><Code>AccessDenied</Code></Error> XML."
     )

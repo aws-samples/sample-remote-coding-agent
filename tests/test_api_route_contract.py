@@ -114,7 +114,7 @@ def test_no_two_modules_claim_the_same_method_and_path() -> None:
     # The nine routes `CLAUDE.md`'s control-plane description names plus the tenth
     # configurations route -- the memory read -- and the five task routes and the six card
     # routes.
-    assert len(seen) == 24, f"expected the 24 declared routes, got {sorted(seen)}"
+    assert len(seen) == 25, f"expected the 25 declared routes, got {sorted(seen)}"
 
 
 def test_the_declared_route_table_is_the_one_plan_md_names() -> None:
@@ -133,6 +133,11 @@ def test_the_declared_route_table_is_the_one_plan_md_names() -> None:
         # GitHub App serves the deployment and AgentCore Identity holds its credentials, so
         # what a repository needs is an authorisation it can start and a verdict it can read.
         ("POST", "/configurations/{configId}/github-authorize"),
+        # The return leg. A separate route rather than a flag on the one above, because the
+        # two carry different bodies and only one of them is reached by a browser coming back
+        # from GitHub -- and without it the vault stores nothing while every signal says the
+        # authorisation worked.
+        ("POST", "/configurations/{configId}/github-authorize/complete"),
         ("GET", "/configurations/{configId}/github-status"),
         ("GET", "/configurations/{configId}/memory"),
         # The deployment-wide GitHub App, in `github_app.py`. Four routes rather than one

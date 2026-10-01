@@ -133,6 +133,10 @@ export const authorizeGitHub = (configId, { force = false } = {}) =>
   request("POST", `/configurations/${seg(configId)}/github-authorize`, {
     body: { consoleOrigin: window.location.origin, force },
   });
+export const completeGitHubAuthorization = (configId, sessionUri) =>
+  request("POST", `/configurations/${seg(configId)}/github-authorize/complete`, {
+    body: { sessionUri },
+  });
 export const githubStatus = (configId) =>
   request("GET", `/configurations/${seg(configId)}/github-status`);
 

@@ -37,6 +37,12 @@ const KEY_STATE = "rca.oauthState";
 export const FOREIGN_FLOW_PARAM = "rca";
 export const FOREIGN_FLOW_VALUE = "github-app";
 
+// `github_app.AUTH_RETURN_PARAM`: what AgentCore puts on the console's own URL when it returns
+// the operator from the per-repository GitHub authorisation. Like the marker above it is a
+// `?`-parameter on this origin that is **not** a Cognito code, so `complete()` has to stand
+// aside for it or it strips the one value the return leg needs.
+export const AUTH_RETURN_PARAM = "session_id";
+
 // Where to come back to after a redirect that leaves the console. This module owns it for the
 // same reason it owns the PKCE verifier: both are small things that have to survive a
 // top-level navigation and die with the tab, and the token store is named in exactly one
@@ -159,6 +165,9 @@ export async function complete() {
   // code this is rather than a guess from which keys the token store happens to hold.
   // Returning before the strip below is the point: the query has to survive for `connect.js`.
   if (query.get(FOREIGN_FLOW_PARAM) === FOREIGN_FLOW_VALUE) return isSignedIn();
+  // The same reasoning for the authorisation return: its `session_id` is what completes the
+  // 3LO leg, and stripping the query below would throw it away before the settings view runs.
+  if (query.get(AUTH_RETURN_PARAM)) return isSignedIn();
   const code = query.get("code");
   const failure = query.get("error");
   if (!code && !failure) return isSignedIn();

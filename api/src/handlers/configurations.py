@@ -688,6 +688,43 @@ def github_authorize(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
 
 
 @handler
+def github_authorize_complete(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Finish the 3LO leg the operator has just approved, and report the result.
+
+    This route exists because the flow does not finish itself. AgentCore returns the browser
+    to the console with `?session_id=<sessionUri>` and **no error**, and the vault holds
+    nothing until that session is completed -- so without this call every visible signal says
+    the authorisation worked while `github_status` answers "not authorised" indefinitely.
+
+    The verdict is re-read rather than assumed, so the console shows what the vault actually
+    holds: a completion that succeeded and produced no token is a state worth seeing rather
+    than one worth reporting as success.
+    """
+    config_id = path_param(event, "configId")
+    body = parse_body(event)
+    (session_uri,) = require(body, "sessionUri")
+    _load_config(config_id)
+
+    try:
+        github_app.complete_authorization(config_id, str(session_uri))
+    except ClientError as err:
+        # An expired or already-spent session is the ordinary way this fails -- the operator
+        # reloaded, or came back twice -- and it is a 400 naming the action rather than a 500,
+        # because the fix is to authorise again and nothing is wrong with the deployment.
+        raise ApiError(
+            400,
+            "AuthorizationNotCompleted",
+            "that authorisation could not be completed; it is single-use and short-lived, so "
+            "press Authorise GitHub again. "
+            f"AgentCore says: {err.response.get('Error', {}).get('Message') or err}",
+            configId=config_id,
+        ) from err
+
+    answer = github_app.resolve_token(config_id)
+    return 200, {"configId": config_id, "authorized": bool(answer["accessToken"])}
+
+
+@handler
 def github_status(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
     """Is this repository authorised, and can that authorisation actually push to it?
 
@@ -750,6 +787,11 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
     ("DELETE", "/configurations/{configId}", "delete"),
     ("POST", "/configurations/{configId}/runtime-update", "runtime_update"),
     ("POST", "/configurations/{configId}/github-authorize", "github_authorize"),
+    (
+        "POST",
+        "/configurations/{configId}/github-authorize/complete",
+        "github_authorize_complete",
+    ),
     ("GET", "/configurations/{configId}/github-status", "github_status"),
     ("GET", "/configurations/{configId}/memory", "memory"),
 )

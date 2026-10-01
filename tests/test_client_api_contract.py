@@ -57,7 +57,7 @@ _SEG = re.compile(r"\$\{seg\(\s*(?P<name>[A-Za-z_$][\w$]*)\s*\)\}")
 
 # Anti-vacuity guards. Both scans read source text, so a reformat that stopped matching
 # would make every other assertion in this file pass over an empty set.
-_CONSOLE_CALL_COUNT = 22
+_CONSOLE_CALL_COUNT = 23
 _MCP_CALL_COUNT = 6
 
 # Two entries today: the console is the operator's whole surface on this API and calls 17 of
@@ -113,6 +113,12 @@ MCP_NOT_CALLED: dict[tuple[str, str], str] = {
         "Starts the 3LO leg for one repository and returns a URL a human has to open and "
         "approve. A model cannot approve it, and the URL is single-use and expires in ten "
         "minutes -- so a tool would mostly hand back expired URLs."
+    ),
+    ("POST", "/configurations/{configId}/github-authorize/complete"): (
+        "The return leg of that flow, and it is reachable only from the browser AgentCore "
+        "redirected: its `sessionUri` arrives as a query parameter on the console's own "
+        "landing page and exists nowhere a chat window can see. A tool would have nothing to "
+        "pass it."
     ),
     ("GET", "/configurations/{configId}/github-status"): (
         "It reaches a verdict by **writing** a throwaway ref to the repository, which is the "

@@ -95,7 +95,7 @@ def test_the_route_table_api_stack_wires_is_the_one_the_handlers_declare() -> No
         f"module declares and ApiStack does not wire up answers 403 with no route, and one "
         f"ApiStack wires up with no handler is a 500 at the first request"
     )
-    assert len(api_stack.ROUTES) == 24, "the 24 declared routes"
+    assert len(api_stack.ROUTES) == 25, "the 25 declared routes"
 
 
 def test_every_entry_point_has_a_declared_grant_set() -> None:
@@ -109,8 +109,8 @@ def test_every_entry_point_has_a_declared_grant_set() -> None:
         f"_ENTRY_POINT_GRANTS covers {sorted(set(api_stack._ENTRY_POINT_GRANTS) ^ expected)} "
         f"differently from the entry points ApiStack creates"
     )
-    assert len(expected) == 28, (
-        "24 routes plus the provisioner, dispatcher, DLQ handler and watchdog"
+    assert len(expected) == 29, (
+        "25 routes plus the provisioner, dispatcher, DLQ handler and watchdog"
     )
     for entry, capabilities in api_stack._ENTRY_POINT_GRANTS.items():
         unknown = set(capabilities) - api_stack._CAPABILITIES

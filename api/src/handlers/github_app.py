@@ -113,6 +113,13 @@ _MANIFEST_FORM_URL = "https://github.com/settings/apps/new"
 # conversion simply never happens.
 MANIFEST_RETURN_PARAM = "rca"
 MANIFEST_RETURN_VALUE = "github-app"
+
+# The query parameter AgentCore puts on `resourceOauth2ReturnUrl` when it sends the operator's
+# browser back from the 3LO leg. Its value is the same `sessionUri` the authorize call handed
+# out, and `complete_authorization` has to be called with it before the vault holds anything --
+# see that function. Named here because the console reads it (`web/js/views/register.js`) and
+# `tests/test_web_console.py` holds the two spellings together.
+AUTH_RETURN_PARAM = "session_id"
 _INSTALL_URL_TEMPLATE = "https://github.com/apps/{slug}/installations/new"
 
 # The app's own permission request, and it is the tightest pair that can clone, push a
@@ -478,6 +485,29 @@ def resolve_token(config_id: str, *, return_url: str = "", force: bool = False) 
         "accessToken": str(answer.get("accessToken") or ""),
         "authorizationUrl": str(answer.get("authorizationUrl") or ""),
     }
+
+
+def complete_authorization(config_id: str, session_uri: str) -> None:
+    """Finish the 3LO leg that the operator has just approved in their browser.
+
+    **Without this call the vault stores nothing**, and that is the part the flow does not
+    advertise. GitHub redirects to AgentCore's callback, AgentCore redirects to
+    `resourceOauth2ReturnUrl` with `?session_id=<sessionUri>` and **no error** -- so every
+    signal an operator or a server-side probe can see says the authorisation succeeded, while
+    `GetResourceOauth2Token` goes on answering with an `authorizationUrl` forever. Measured
+    the hard way: a live authorisation looked complete, the vault had no token, and the same
+    `sessionUri` passed to `CompleteResourceTokenAuth` produced one immediately.
+
+    `userIdentifier` is a **structure** (`{"userId": ...}`) rather than a string, which is the
+    second thing to get wrong and costs a `ParamValidationError` inside botocore.
+
+    `userId` is the configuration id, the same keying rule the rest of this module uses, so a
+    session can only be completed for the repository it was started for.
+    """
+    _common.agentcore_data().complete_resource_token_auth(
+        userIdentifier={"userId": config_id}, sessionUri=session_uri
+    )
+    LOG.info("completed the GitHub authorisation for configuration %s", config_id)
 
 
 def _needs_a_return_url(err: ClientError) -> bool:

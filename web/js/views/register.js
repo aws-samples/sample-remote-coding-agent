@@ -426,6 +426,39 @@ function mountSettings(root, configId) {
     }
   }
 
+  /** Finish an authorisation the operator has just approved, if this load is that return.
+   *
+   * **The flow does not finish itself**, which is the whole reason this exists. AgentCore
+   * redirects here with `?session_id=<sessionUri>` and no error, and until that session is
+   * completed the vault holds nothing -- so GitHub says yes, this panel says "not authorised",
+   * and nothing anywhere explains the gap.
+   *
+   * The parameter is cleared whatever happens: it is single-use, so a reload that tried to
+   * spend it again would report a failure for an authorisation that actually succeeded.
+   */
+  async function completeAuthorizationIfReturning() {
+    const query = new URLSearchParams(window.location.search);
+    const sessionUri = query.get(auth.AUTH_RETURN_PARAM);
+    if (!sessionUri) return;
+
+    const url = new URL(window.location.href);
+    url.searchParams.delete(auth.AUTH_RETURN_PARAM);
+    url.searchParams.delete("state");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+
+    try {
+      const answer = await api.completeGitHubAuthorization(configId, sessionUri);
+      ui.toast(
+        answer.authorized
+          ? "this repository is authorised."
+          : "GitHub returned, but no credential was stored -- try authorising again.",
+        answer.authorized ? "good" : "warn",
+      );
+    } catch (error) {
+      ui.toast(error.message, "bad");
+    }
+  }
+
   /** Re-read the authorisation verdict. Never throws: a failure is a banner, not a crash. */
   async function refreshAuth() {
     try {
@@ -729,7 +762,9 @@ function mountSettings(root, configId) {
   // Authorise, or this tab regaining focus after the operator came back from GitHub. It is
   // deliberately **not** on the six-second poll: the check makes three calls to GitHub, so
   // polling it would be a write probe against someone's repository every six seconds.
-  void refreshAuth();
+  // Completed before the first status read, so the panel's first render already reflects it
+  // rather than showing "not authorised" and correcting itself a moment later.
+  void completeAuthorizationIfReturning().then(refreshAuth);
   document.addEventListener("visibilitychange", onVisible);
   configs.load().then(render).catch(() => {
     // The settings page works without the cache -- it reads its own configuration

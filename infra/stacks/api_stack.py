@@ -62,6 +62,12 @@ ROUTES: tuple[tuple[str, str, str, str], ...] = (
     ("DELETE", "/configurations/{configId}", "configurations", "delete"),
     ("POST", "/configurations/{configId}/runtime-update", "configurations", "runtime_update"),
     ("POST", "/configurations/{configId}/github-authorize", "configurations", "github_authorize"),
+    (
+        "POST",
+        "/configurations/{configId}/github-authorize/complete",
+        "configurations",
+        "github_authorize_complete",
+    ),
     ("GET", "/configurations/{configId}/github-status", "configurations", "github_status"),
     ("GET", "/configurations/{configId}/memory", "configurations", "memory"),
     ("GET", "/github-app", "github_app", "get"),
@@ -159,6 +165,9 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
     # stored `githubAuthorized` flag anywhere -- a flag would be a second, staler answer to
     # a question the vault already answers.
     ("configurations", "github_authorize"): ("config:read", "github:credential"),
+    # The return leg of the 3LO flow. Same capability as starting it: completing a session is
+    # `CompleteResourceTokenAuth`, which lives in the same grant as the exchange it finishes.
+    ("configurations", "github_authorize_complete"): ("config:read", "github:credential"),
     ("configurations", "github_status"): ("config:read", "github:credential"),
     # The one read route that reaches a second data plane: the records an operator is asking
     # about exist only in AgentCore Memory, so `config:read` alone could answer with nothing
@@ -701,6 +710,9 @@ class ApiStack(cdk.Stack):
                         actions=[
                             "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
                             "bedrock-agentcore:GetResourceOauth2Token",
+                            # The return leg: without it the operator approves on GitHub, every
+                            # signal says success, and the vault stores nothing.
+                            "bedrock-agentcore:CompleteResourceTokenAuth",
                         ],
                         resources=[
                             f"arn:aws:bedrock-agentcore:{self.region}:{self.account}"
