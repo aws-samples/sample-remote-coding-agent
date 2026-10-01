@@ -30,6 +30,13 @@ const KEY_EXPIRES = "rca.expiresAt";
 const KEY_VERIFIER = "rca.pkceVerifier";
 const KEY_STATE = "rca.oauthState";
 
+// `github_app.MANIFEST_RETURN_PARAM` / `MANIFEST_RETURN_VALUE`, which the API puts on the
+// GitHub App manifest's `redirect_url`. Held together by
+// `tests/test_web_console.py::test_the_manifest_return_marker_is_the_handlers_spelling` --
+// a mismatch is silent, because sign-in keeps working and only the app conversion stops.
+export const FOREIGN_FLOW_PARAM = "rca";
+export const FOREIGN_FLOW_VALUE = "github-app";
+
 // Refresh two minutes before expiry rather than on the 401: a board holds several
 // requests in flight at once, and letting them all fail first turns one silent refresh
 // into five visible errors.
@@ -134,6 +141,18 @@ export async function signIn() {
  */
 export async function complete() {
   const query = new URLSearchParams(window.location.search);
+  // `?code=` is **not ours alone**. `views/connect.js` brings the operator back from
+  // GitHub's app-manifest flow on this same origin, also with a `code`, and this function
+  // runs first at boot -- so without this guard it claimed GitHub's single-use code, stripped
+  // the query before the connect view could read it, and then threw "that sign-in did not
+  // start in this tab" because the sign-in state was consumed by the real sign-in long ago.
+  // The app was created on GitHub and the conversion could never happen.
+  //
+  // The marker is on the `redirect_url` this deployment hands GitHub
+  // (`github_app.MANIFEST_RETURN_PARAM`/`_VALUE`), so it is a positive statement of whose
+  // code this is rather than a guess from which keys the token store happens to hold.
+  // Returning before the strip below is the point: the query has to survive for `connect.js`.
+  if (query.get(FOREIGN_FLOW_PARAM) === FOREIGN_FLOW_VALUE) return isSignedIn();
   const code = query.get("code");
   const failure = query.get("error");
   if (!code && !failure) return isSignedIn();

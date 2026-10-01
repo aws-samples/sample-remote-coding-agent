@@ -195,11 +195,17 @@ async function boot() {
 
   shell = sidebar.mount(rail);
   window.addEventListener("hashchange", navigate);
-  // A return from GitHub's app-manifest flow arrives as `?code=...` on the bare origin with
-  // whatever hash the operator left on. It has to reach `#/connect` regardless, because that
-  // is the only view that knows how to spend the code -- and the code expires in an hour and
-  // is single-use, so a boot that routed somewhere else would lose the whole setup step.
-  if (new URLSearchParams(window.location.search).has("code")) {
+  // A return from GitHub's app-manifest flow arrives on the bare origin carrying the marker
+  // and a `code`. It has to reach `#/connect` regardless of whatever hash the operator left
+  // on, because that is the only view that knows how to spend the code -- and the code is
+  // single-use and expires in an hour, so a boot that routed somewhere else loses the whole
+  // setup step.
+  //
+  // Keyed on the **marker** and not on `code` alone: Cognito's own sign-in returns a `code`
+  // to this same origin, `auth.complete()` above has already claimed and stripped that one,
+  // and a check on `code` here would be reading a query that no longer exists.
+  const returned = new URLSearchParams(window.location.search);
+  if (returned.get(auth.FOREIGN_FLOW_PARAM) === auth.FOREIGN_FLOW_VALUE) {
     window.location.hash = "#/connect";
   }
   await navigate();

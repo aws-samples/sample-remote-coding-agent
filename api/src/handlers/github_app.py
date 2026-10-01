@@ -97,6 +97,22 @@ _PLACEHOLDER_CLIENT_ID = "pending-github-app-creation"
 # GitHub's manifest endpoints. The creation one is a browser form target and not an API
 # call, so it is `github.com` rather than `api.github.com`.
 _MANIFEST_FORM_URL = "https://github.com/settings/apps/new"
+
+# The marker on the manifest's `redirect_url`, and it exists because **`?code=` is not ours
+# alone**. Cognito's PKCE sign-in returns to this same origin with a `code`, and
+# `web/js/auth.js::complete` runs at boot, claims it, and strips the query -- so GitHub's
+# single-use manifest code was consumed and thrown away before the connect view could read
+# it, and the operator was told "that sign-in did not start in this tab" instead. Two
+# unrelated flows on one redirect URI need something to tell them apart, and the parameter
+# belongs on the URL we hand GitHub rather than being inferred from which keys happen to be
+# in sessionStorage.
+#
+# Spelled here and matched in `web/js/auth.js` and `web/js/app.js`;
+# `tests/test_web_console.py::test_the_manifest_return_marker_is_the_handlers_spelling`
+# holds the three together, because a mismatch is silent: sign-in keeps working and the app
+# conversion simply never happens.
+MANIFEST_RETURN_PARAM = "rca"
+MANIFEST_RETURN_VALUE = "github-app"
 _INSTALL_URL_TEMPLATE = "https://github.com/apps/{slug}/installations/new"
 
 # The app's own permission request, and it is the tightest pair that can clone, push a
@@ -262,11 +278,12 @@ def _manifest(*, console_origin: str, callback_url: str) -> dict[str, Any]:
         # AgentCore's callback, never ours: the authorisation code has to land in the token
         # vault, and this URL is the only thing that puts it there.
         "callback_urls": [callback_url],
-        # Where GitHub sends the operator once the app exists, with `?code=` appended. The
-        # console reads that query parameter on boot regardless of its hash route, which is
-        # why this is the bare origin and not a `#/...` URL -- GitHub appends the query
-        # before the fragment and the result would not parse.
-        "redirect_url": console_origin,
+        # Where GitHub sends the operator once the app exists, with `&code=` appended. Two
+        # things about this URL are load-bearing. It carries no fragment, because GitHub
+        # appends the query *before* a fragment and `?code=` inside a `#/...` route is
+        # invisible to `location.search`. And it carries the marker above, which is what
+        # stops `auth.js` mistaking GitHub's code for a Cognito one and spending it.
+        "redirect_url": f"{console_origin}/?{MANIFEST_RETURN_PARAM}={MANIFEST_RETURN_VALUE}",
         "public": False,
         "default_permissions": dict(APP_PERMISSIONS),
         "default_events": [],

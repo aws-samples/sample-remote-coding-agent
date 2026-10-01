@@ -549,6 +549,60 @@ def test_the_register_view_asks_for_no_credential_and_says_why() -> None:
     )
 
 
+def test_the_manifest_return_marker_is_the_handlers_spelling() -> None:
+    """`?code=` is not the console's alone, and the marker that tells the two apart is spelled
+    in three files.
+
+    Cognito's PKCE sign-in returns to the console origin with a `code`, and so does GitHub's
+    app-manifest flow. `auth.complete()` runs first at boot, and without a way to tell whose
+    code it is, it claimed GitHub's, stripped the query before `views/connect.js` could read
+    it, and reported "that sign-in did not start in this tab" -- so the app was created on
+    GitHub and the conversion could never run. Measured on the live deployment.
+
+    The API owns the spelling because it owns the `redirect_url` it hands GitHub. This asserts
+    the two browser files agree with it, because a mismatch is **silent in the direction that
+    matters**: sign-in keeps working, and only the app conversion stops happening.
+    """
+    from handlers import github_app
+
+    param = github_app.MANIFEST_RETURN_PARAM
+    value = github_app.MANIFEST_RETURN_VALUE
+
+    auth_js = (JS / "auth.js").read_text(encoding="utf-8")
+    assert f'FOREIGN_FLOW_PARAM = "{param}"' in auth_js, (
+        f"auth.js does not define the marker parameter as {param!r}, so it will claim and "
+        f"spend GitHub's manifest code"
+    )
+    assert f'FOREIGN_FLOW_VALUE = "{value}"' in auth_js
+
+    # The guard has to come **before** the query is stripped, or the marker changes nothing.
+    # Asserted as presence first, so removing the guard fails with this sentence rather than
+    # with a `ValueError` from `str.index` that says nothing about what broke.
+    needle = "FOREIGN_FLOW_PARAM) === FOREIGN_FLOW_VALUE"
+    assert needle in auth_js, (
+        "auth.js has no marker guard in complete(), so it will claim GitHub's manifest code, "
+        "strip the query, and the app conversion can never run"
+    )
+    guard = auth_js.index(needle)
+    strip = auth_js.index("window.history.replaceState")
+    assert guard < strip, (
+        "auth.js strips the query before checking the marker, so GitHub's code is destroyed "
+        "before views/connect.js can read it -- the exact failure this marker exists to stop"
+    )
+
+    app_js = (JS / "app.js").read_text(encoding="utf-8")
+    assert "auth.FOREIGN_FLOW_PARAM" in app_js, (
+        "app.js must route a marked return to #/connect, and must key on the marker rather "
+        "than on `code`: auth.complete() has already stripped a Cognito code by then, so a "
+        "check on `code` alone is dead"
+    )
+    connect_js = (JS / "views" / "connect.js").read_text(encoding="utf-8")
+    assert "auth.FOREIGN_FLOW_PARAM" in connect_js, (
+        "connect.js must clear the marker with the spent code, or auth.complete() stands "
+        "aside forever in this tab and a real sign-in return is never claimed"
+    )
+
+
 def test_the_connect_view_is_the_only_place_a_github_app_is_created() -> None:
     """One click, and the three things that make it one.
 

@@ -30,6 +30,7 @@
  */
 
 import * as api from "../api.js";
+import * as auth from "../auth.js";
 import * as configs from "../configs.js";
 import * as ui from "../ui.js";
 
@@ -55,11 +56,16 @@ export function manifestCode(search = window.location.search) {
   return new URLSearchParams(String(search || "")).get("code") || "";
 }
 
-/** Take the spent code out of the address bar without reloading or adding a history entry. */
+/** Take the spent code out of the address bar without reloading or adding a history entry.
+ *
+ * The marker goes with it: left behind, `auth.complete()` would keep standing aside on every
+ * later boot in this tab, so a genuine Cognito sign-in return would never be claimed.
+ */
 function clearCode() {
   const url = new URL(window.location.href);
   url.searchParams.delete("code");
   url.searchParams.delete("state");
+  url.searchParams.delete(auth.FOREIGN_FLOW_PARAM);
   window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
