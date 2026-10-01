@@ -400,7 +400,10 @@ function mountSettings(root, configId) {
    */
   async function startAuthorize(force) {
     const button = force ? reauthorize : authorize;
-    ui.setRefusal(button, "asking GitHub for an authorisation URL");
+    // The label, not just a refusal: a dimmed button with a tooltip is no feedback to someone
+    // who has just clicked it, and this one's work ends in a page navigation that takes a
+    // visible moment.
+    ui.setBusy(button, "Contacting GitHub…");
     try {
       const answer = await api.authorizeGitHub(configId, { force });
       if (answer.authorized) {
@@ -418,14 +421,22 @@ function mountSettings(root, configId) {
         // Remembered before leaving, consumed by `app.js` on the way back: the operator
         // returns to the repository they were authorising rather than to the board.
         auth.rememberDestination(`#/register/${encodeURIComponent(configId)}`);
+        // **Returns without clearing the busy state, and without re-reading the status.**
+        // `assign` does not block, so anything after it runs while the browser is still
+        // leaving: clearing the label here put the button back to looking idle with the
+        // navigation still pending, which is what invited a second click. The label stays
+        // until the page is replaced, and if the navigation somehow fails the operator is
+        // looking at a button that says it is still working, which is the truth.
+        ui.setBusy(button, "Opening GitHub…");
         window.location.assign(answer.authorizationUrl);
+        return;
       }
     } catch (error) {
       ui.toast(error.message, "bad");
-    } finally {
-      ui.setRefusal(button, null);
-      await refreshAuth();
     }
+    // Only reached when nothing navigated: an already-authorised repository, or a failure.
+    ui.setBusy(button, null);
+    await refreshAuth();
   }
 
   /** Finish an authorisation the operator has just approved, if this load is that return.

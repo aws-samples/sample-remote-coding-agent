@@ -643,6 +643,40 @@ def test_the_authorisation_panel_comes_before_everything_it_blocks() -> None:
     )
 
 
+def test_the_authorise_button_stays_busy_until_the_page_is_replaced() -> None:
+    """A button whose work ends in a navigation must not go back to looking idle.
+
+    Reported from a live walkthrough: clicking Authorise appeared to do nothing, so it was
+    clicked again -- the server log shows two authorisation sessions a minute apart. The cause
+    was in the view, not the API: `window.location.assign` does not block, so the `finally`
+    that cleared the control ran while the browser was still leaving, and `setRefusal` alone
+    only dims and sets a tooltip, which someone mid-click never sees.
+
+    Two things are asserted. The label changes, because that is the feedback visible without
+    hovering. And the navigation path **returns** rather than falling through to the cleanup,
+    so nothing clears the label or issues another request behind a page that is going away.
+    """
+    source = (JS / "views" / "register.js").read_text(encoding="utf-8")
+    start = source.index("async function startAuthorize")
+    end = source.index("async function refreshAuth", start)
+    body = source[start:end]
+
+    assert "ui.setBusy(" in body, (
+        "the authorise button has to change its label while it works: `setRefusal` dims it and "
+        "writes a tooltip, which is no feedback to someone who has just clicked"
+    )
+    assign = body.index("window.location.assign")
+    assert "return;" in body[assign : assign + 120], (
+        "the navigation path must return immediately after `assign`. Anything after it runs "
+        "while the browser is leaving, and clearing the busy state there puts the button back "
+        "to looking idle with the navigation still pending -- which is what caused the "
+        "double-click."
+    )
+    assert "ui.setBusy(button, null)" not in body[:assign], (
+        "nothing may clear the busy state before the navigation starts"
+    )
+
+
 def test_the_connect_view_is_the_only_place_a_github_app_is_created() -> None:
     """One click, and the three things that make it one.
 
