@@ -1542,20 +1542,24 @@ def test_a_redelivery_of_a_converged_update_issues_no_call(
 def test_update_rewrites_the_execution_role_even_when_the_runtime_is_converged(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A policy change has to reach a repository registered before it, and `UPDATE` is the
-    only path that can carry one to a live configuration.
+    """A change to `_execution_role_policy` has to reach a configuration that is already
+    live, and `UPDATE` is the only path that can carry one.
 
-    The ordering is the test. `_matches_intent` returns early on a converged runtime -- which
-    is what every already-deployed configuration looks like after a code-only change -- so a
-    role write placed after that check would never run on exactly the fleet that needs it.
+    The ordering is the test. The inline policy is not part of the runtime, so a policy-only
+    change leaves the runtime converged and `_matches_intent` returns early -- meaning a role
+    write placed after that check would never run on the one fleet that needs it. This test
+    therefore asserts both halves: the policy was rewritten **and** no `UpdateAgentRuntime`
+    was issued at all.
 
-    What it costs to get wrong is the expensive silent shape invariant 41 exists to prevent,
-    and it is asymmetric: `runs.queue_run` checks whether the *API* can reach the token vault,
-    not whether the container can. So a stale role lets dispatch succeed, the run clone, plan,
-    code and verify, and only `store.github_token` inside the container come back empty -- a
-    whole task spent before anything says why. Measured against the real migration: a
-    repository registered while the credential was a Secrets Manager secret keeps
-    `ReadOwnSecret` and gains neither Identity action until `_update` rewrites the policy.
+    What getting it wrong costs is the expensive silent shape invariant 41 exists to prevent,
+    and it is asymmetric, which is why nothing earlier catches it: a grant the policy is
+    missing is a fact about the *container*, while `runs.queue_run` can only ask whether the
+    *API* can reach what it needs. So dispatch succeeds, the run clones, plans, codes and
+    verifies, and the missing permission surfaces as an empty credential at `submit`.
+
+    The stale policy seeded below is the real worked example -- `ReadOwnSecret`, from before
+    the GitHub credential moved into AgentCore Identity -- because a statement that no longer
+    exists anywhere in the tree cannot be rewritten by accident.
     """
     _fleet(monkeypatch)
     common, provisioner = _load("provisioner")

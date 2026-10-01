@@ -1163,31 +1163,6 @@ at an OAuth app of its own, or deleting it and taking the whole fleet's access w
 no wildcard in that group — `Get*` would shadow `GetResourceOauth2Token` and break every
 task, the same trap the memory actions document.
 
-### Migrating a fleet that already has repositories registered
-
-A deploy converges fleet policy onto a runtime, but **a repository registered before a policy
-change needs one deliberate action per repository**, and the reason is worth knowing before
-you reach for it.
-
-`make deploy` does not enqueue an `UPDATE` per configuration — it deploys the stacks and
-stops — so the operator presses **Update runtime** on each repository's settings page, or
-`POST /configurations/{configId}/runtime-update`. That message is what carries a new
-execution-role policy to a live configuration, because `provisioner._update` calls
-`_ensure_role` **before** `_matches_intent`: on a code-only change the runtime is already
-converged and the early return would otherwise skip the one write that matters.
-
-Then authorise each repository, because an authorisation is per `configId` and no older
-registration has one.
-
-Getting that order wrong, or skipping the update, produces the asymmetric failure invariant
-41 cannot catch: `runs.queue_run` asks whether the **API** can reach the token vault, and an
-old role's missing grant is a fact about the **container**. So the run dispatches, clones,
-plans, codes and verifies, and only `store.github_token` comes back empty — a whole task
-spent before anything says why.
-`tests/test_api_provisioner.py::test_update_rewrites_the_execution_role_even_when_the_runtime_is_converged`
-is what holds the ordering. Deregistering and re-registering is the other way through, and
-on a disposable demo repository it is the cheaper one.
-
 ### Turn on branch protection on the default branch
 
 The agent only ever pushes `agent/<taskId>` and opens a pull request, so protection is

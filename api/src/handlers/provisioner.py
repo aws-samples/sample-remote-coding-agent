@@ -1546,20 +1546,21 @@ def _update(config_id: str) -> None:
         return
 
     # The execution role's inline policy is rewritten **before** the intent check below, and
-    # that ordering is the whole point: `_matches_intent` returns early on a converged
-    # runtime, which is what every already-deployed configuration looks like after a
-    # code-only change -- so a role write placed after it would never run on exactly the
-    # fleet that needs it. `_ensure_role` has always promised that "the inline policy is
-    # rewritten every time so a fleet-wide policy change lands on a re-provision"; until
-    # this call existed, `_update` was the one provision path that did not keep it.
+    # that ordering is the whole point. `UPDATE` is the only path that can carry a change in
+    # `_execution_role_policy` to a configuration that is already live, and
+    # `_matches_intent` returns early on a converged runtime -- which is exactly what a
+    # policy-only change looks like, since the policy is not part of the runtime at all. So a
+    # role write placed after that check would never run on the one fleet that needs it.
+    # `_ensure_role` has always promised that "the inline policy is rewritten every time so a
+    # fleet-wide policy change lands on a re-provision"; until this call existed, `_update`
+    # was the provision path that did not keep that promise.
     #
     # What omitting it costs is the expensive silent shape invariant 41 exists to prevent,
-    # and the asymmetry is why no earlier check catches it: `runs.queue_run` asks whether
-    # the *API* can reach the token vault, not whether the container can. When the GitHub
-    # credential moved from Secrets Manager to AgentCore Identity, an existing repository's
-    # role kept `ReadOwnSecret` and gained neither Identity action -- so dispatch succeeded,
-    # the run cloned, planned, coded and verified, and `store.github_token` then returned
-    # `""` inside the container. The task died at `submit` having spent everything.
+    # and the asymmetry is why no earlier check catches it: a grant the policy is missing is
+    # a fact about the **container**, while `runs.queue_run` can only ask whether the **API**
+    # can reach what it needs. So the run dispatches, clones, plans, codes and verifies, and
+    # the missing permission surfaces as an empty credential at `submit` -- a whole task
+    # spent before anything says why.
     #
     # Unconditional rather than compared: `put_role_policy` is idempotent, and one IAM write
     # per update is cheaper than a read to decide whether to write.
