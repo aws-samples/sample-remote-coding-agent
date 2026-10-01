@@ -37,6 +37,12 @@ const KEY_STATE = "rca.oauthState";
 export const FOREIGN_FLOW_PARAM = "rca";
 export const FOREIGN_FLOW_VALUE = "github-app";
 
+// Where to come back to after a redirect that leaves the console. This module owns it for the
+// same reason it owns the PKCE verifier: both are small things that have to survive a
+// top-level navigation and die with the tab, and the token store is named in exactly one
+// place on purpose (`tests/test_web_console.py::test_the_token_store_is_session_scoped_and_named_once`).
+const KEY_DESTINATION = "rca.destination";
+
 // Refresh two minutes before expiry rather than on the 401: a board holds several
 // requests in flight at once, and letting them all fail first turns one silent refresh
 // into five visible errors.
@@ -223,6 +229,24 @@ export function refresh() {
       inFlight = null;
     });
   return inFlight;
+}
+
+/** Remember a hash route to return to after a redirect away from the console.
+ *
+ * The GitHub authorisation leg leaves the console and AgentCore returns the browser to the
+ * bare origin -- it cannot return to a per-repository route, because every permitted return
+ * URL has to be registered on the workload identity and a configuration id is not knowable
+ * when that list is written. So the destination is held here across the trip instead.
+ */
+export function rememberDestination(hash) {
+  tokenStore.setItem(KEY_DESTINATION, String(hash || ""));
+}
+
+/** The remembered route, consumed. `""` when there is none. */
+export function takeDestination() {
+  const hash = tokenStore.getItem(KEY_DESTINATION) || "";
+  tokenStore.removeItem(KEY_DESTINATION);
+  return hash;
 }
 
 /** Forget the session here, then end it at the pool. Both halves matter: clearing only

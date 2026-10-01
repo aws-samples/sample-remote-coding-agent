@@ -207,6 +207,13 @@ async function boot() {
   const returned = new URLSearchParams(window.location.search);
   if (returned.get(auth.FOREIGN_FLOW_PARAM) === auth.FOREIGN_FLOW_VALUE) {
     window.location.hash = "#/connect";
+  } else {
+    // The return leg of the per-repository GitHub authorisation. AgentCore can only send the
+    // browser to the bare origin, so the page it should land on was remembered before leaving
+    // -- see `auth.rememberDestination`. Consumed either way, so a stale value cannot hijack
+    // a later boot in this tab.
+    const destination = auth.takeDestination();
+    if (destination) window.location.hash = destination;
   }
   await navigate();
 }

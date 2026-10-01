@@ -27,6 +27,7 @@
 
 import * as activity from "../activity.js";
 import * as api from "../api.js";
+import * as auth from "../auth.js";
 import * as configs from "../configs.js";
 import * as ui from "../ui.js";
 
@@ -285,10 +286,13 @@ function mountSettings(root, configId) {
   const save = ui.action("Save settings", { class: "btn btn-primary", onClick: saveSettings });
 
   // The authorisation panel's own state, read from `GET .../github-status` rather than from
-  // the configuration item. It is deliberately not stored on the item: the token vault is
+  // the configuration item. Named `access` and **not** `auth`: the module imported at the top
+  // of this file is `auth`, and a local of that name silently shadows it -- which made
+  // `auth.rememberDestination` undefined at click time until oxlint reported the import as
+  // unused. It is deliberately not stored on the item: the token vault is
   // the only authority on whether a repository is authorised, and a cached flag would be a
   // second, staler answer to the same question.
-  let auth = null;
+  let access = null;
   let authFailure = null;
   const authHost = ui.el("div", { class: "stack" });
   const authorize = ui.action("Authorise GitHub", {
@@ -400,12 +404,19 @@ function mountSettings(root, configId) {
       if (answer.authorized) {
         ui.toast("this repository is already authorised.", "good");
       } else {
-        window.open(answer.authorizationUrl, "_blank", "noopener,noreferrer");
-        ui.toast(
-          "GitHub is open in a new tab. Approve it there, then come back -- this page " +
-            "notices on its own.",
-          "info",
-        );
+        // **This tab, not a new one.** AgentCore returns the browser to the console origin
+        // when GitHub is done, and the session lives in the token store -- which is per tab.
+        // Opened with `window.open`, the return landed in a tab that had no session, so the
+        // operator was asked to sign in again and the tab they started from was never told
+        // anything had happened. A top-level navigation is also what `auth.js` does for
+        // sign-in, and for the same reason.
+        //
+        // Nothing is lost by leaving: the authorisation lives in the token vault, so the
+        // state this page shows is rebuilt from the server when it loads again.
+        // Remembered before leaving, consumed by `app.js` on the way back: the operator
+        // returns to the repository they were authorising rather than to the board.
+        auth.rememberDestination(`#/register/${encodeURIComponent(configId)}`);
+        window.location.assign(answer.authorizationUrl);
       }
     } catch (error) {
       ui.toast(error.message, "bad");
@@ -418,7 +429,7 @@ function mountSettings(root, configId) {
   /** Re-read the authorisation verdict. Never throws: a failure is a banner, not a crash. */
   async function refreshAuth() {
     try {
-      auth = await api.githubStatus(configId);
+      access = await api.githubStatus(configId);
       authFailure = null;
     } catch (error) {
       authFailure = error.message;
@@ -517,13 +528,13 @@ function mountSettings(root, configId) {
       authHost.append(ui.banner("bad", `could not read the GitHub status: ${authFailure}`));
       return;
     }
-    if (!auth) {
+    if (!access) {
       authHost.append(ui.el("p", { class: "field-hint" }, "Checking the GitHub credential…"));
       return;
     }
-    if (!auth.authorized) {
+    if (!access.authorized) {
       authHost.append(
-        ui.banner("warn", auth.reason || "this repository is not authorised yet"),
+        ui.banner("warn", access.reason || "this repository is not authorised yet"),
         ui.el(
           "p",
           {},
@@ -536,7 +547,7 @@ function mountSettings(root, configId) {
       );
       return;
     }
-    if (auth.canPush === false) {
+    if (access.canPush === false) {
       authHost.append(
         ui.banner("bad", "Authorised, but the app cannot write to this repository."),
         ui.el(
@@ -545,14 +556,14 @@ function mountSettings(root, configId) {
           "That almost always means the GitHub App is not installed on this repository. " +
             "Installing and authorising are separate steps and both are needed.",
         ),
-        ui.el("p", { class: "field-hint mono" }, `GitHub says: ${auth.reason || "--"}`),
+        ui.el("p", { class: "field-hint mono" }, `GitHub says: ${access.reason || "--"}`),
         ui.el("div", { class: "row" }, [
-          auth.installUrl
+          access.installUrl
             ? ui.el(
                 "a",
                 {
                   class: "btn btn-primary",
-                  href: auth.installUrl,
+                  href: access.installUrl,
                   target: "_blank",
                   rel: "noopener noreferrer",
                 },
@@ -566,8 +577,8 @@ function mountSettings(root, configId) {
     }
     authHost.append(
       ui.banner(
-        auth.canPush === null ? "warn" : "good",
-        auth.canPush === null
+        access.canPush === null ? "warn" : "good",
+        access.canPush === null
           ? "Authorised. GitHub could not be reached, so the write check did not run."
           : "Authorised, and a write to this repository was confirmed.",
       ),
