@@ -721,6 +721,31 @@ class ApiStack(cdk.Stack):
                         ],
                     )
                 )
+                fn.add_to_role_policy(
+                    iam.PolicyStatement(
+                        sid="ExchangeTokensWithTheProvidersSecret",
+                        # **AgentCore Identity does its Secrets Manager work with the CALLER's
+                        # permissions**, so the code exchange inside
+                        # `CompleteResourceTokenAuth` reads the provider's client secret as this
+                        # role and fails `AccessDenied` without this. Measured the hard way: the
+                        # operator approved on GitHub, the console reported
+                        # `AuthorizationNotCompleted`, and the message named this exact secret
+                        # ARN and this exact role.
+                        #
+                        # This is the same property that disqualified the API-key credential
+                        # provider earlier -- Identity is a broker that borrows the caller's
+                        # reach rather than insulating it from the store -- and it is the reason
+                        # the OAuth path cannot honestly be described as "no Secrets Manager
+                        # anywhere". It is *narrower* here than it was there: only these four
+                        # control-plane Lambdas hold it, and only on AgentCore's own
+                        # service-linked prefix, never on a secret this repository creates.
+                        actions=["secretsmanager:GetSecretValue"],
+                        resources=[
+                            f"arn:aws:secretsmanager:{self.region}:{self.account}"
+                            f":secret:bedrock-agentcore-identity!*"
+                        ],
+                    )
+                )
             elif capability == "github:provider-admin":
                 fn.add_to_role_policy(
                     iam.PolicyStatement(

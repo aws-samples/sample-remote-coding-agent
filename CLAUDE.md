@@ -1159,15 +1159,38 @@ literal ARN** per role, this is not fenced at all, and two consequences follow:
   register.** "Only select repositories" is the right answer on GitHub's install page, and
   the console says so.
 
-What was bought for that: no stored credential anywhere, 8-hour tokens the vault refreshes
-instead of a PAT that lives until someone revokes it, one operator action per repository
-instead of nine decisions in a list of fifty permissions, and — measured — **zero** Secrets
-Manager permissions on the container. The one Secrets Manager grant left in the system is
-`github:provider-admin`'s, on `secret:bedrock-agentcore-identity!*`, held by four
-control-plane Lambdas: `CreateOauth2CredentialProvider` stores the client secret in a
-service-linked secret of AgentCore's own and authorizes that write against the **caller**, so
-without it the first connect fails `AccessDenied`, and without `DeleteSecret` the disconnect
-does. Nothing in this repository names that secret, reads it, or knows its ARN.
+What was bought for that: no credential stored by this repository, 8-hour tokens the vault
+refreshes instead of a PAT that lives until someone revokes it, and one operator action per
+repository instead of nine decisions in a list of fifty permissions.
+
+**It is not "no Secrets Manager anywhere", and the reason is a property of Identity rather
+than of this code: Identity does its Secrets Manager work with the *caller's* permissions.**
+It is a broker that borrows the caller's reach, not one that insulates the caller from the
+store. Two grants follow, both on AgentCore's own service-linked prefix
+`secret:bedrock-agentcore-identity!*` and never on a secret this repository creates:
+
+* `github:provider-admin` needs `CreateSecret`/`PutSecretValue`/`DeleteSecret`, because
+  `CreateOauth2CredentialProvider` stores the app's client secret there and authorizes that
+  write against the caller. Without it the first connect fails `AccessDenied`; without
+  `DeleteSecret`, the disconnect does.
+* `github:credential` needs `GetSecretValue`, because the code exchange inside
+  `CompleteResourceTokenAuth` **reads** that client secret as the calling role. Measured the
+  hard way: the operator approved on GitHub, the console answered
+  `AuthorizationNotCompleted`, and the message named the exact secret ARN and the exact
+  Lambda role. This is the same property that disqualified the API-key credential provider
+  earlier, met again on the OAuth path.
+
+**Whether the container needs that read too is unmeasured, and it is the one open question
+in this design.** Retrieving an *already stored* token needed zero Secrets Manager
+permissions -- measured against a throwaway role -- so the grant is deliberately **not** on
+the execution role. But a refresh has to call GitHub's token endpoint with the client secret,
+and no run here has lived past the 8-hour expiry to find out whether the vault does that with
+the caller's permissions as well. If it does, the symptom is a task failing at `submit` after
+about eight hours with an `AccessDenied` naming
+`bedrock-agentcore-identity!default/oauth2/rca_github`. Granting it pre-emptively is the
+wrong trade: it would let any container read every provider's client secret in the account,
+which is wider than anything else on that role. So the failure is left loud and this paragraph
+is the note that explains it.
 
 **What a container must never reach is denied by name.** `MayNotEscalate` in
 `infra/stacks/agent_stack.py` denies the fourteen Identity control-plane actions and

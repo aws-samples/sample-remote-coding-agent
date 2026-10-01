@@ -180,10 +180,12 @@ function mountRegister(root) {
       const config = await api.createConfiguration(body);
       configs.invalidate();
       await configs.load().catch(() => []);
+      // "registered" is not "ready to use", and saying only the first is how the remaining
+      // step gets missed. The authorisation is named as the next action, and the page this
+      // redirects to leads with it.
       ui.toast(
-        `${config.repository} is registered. Its runtime, execution role and memory are ` +
-          "provisioning, which takes 8-12 minutes. Authorise it on its settings page while " +
-          "you wait -- the two are independent.",
+        `${config.repository} is registered. One step left: press Authorise GitHub on the ` +
+          "page that follows. Provisioning runs in parallel and takes 8-12 minutes.",
         "good",
       );
       // Straight to the settings page rather than the board, because there is one action
@@ -566,17 +568,19 @@ function mountSettings(root, configId) {
       return;
     }
     if (!access.authorized) {
+      // The action comes **first**, before the explanation. This panel is the last required
+      // step of the setup and an operator who reads top to bottom should meet the button
+      // before the paragraph about what it does.
       authHost.append(
-        ui.banner("warn", access.reason || "this repository is not authorised yet"),
+        ui.banner("warn", "This repository is not authorised yet, so tasks will be refused."),
+        ui.el("div", { class: "row" }, [authorize]),
         ui.el(
           "p",
-          {},
-          "Authorising opens GitHub in a new tab and asks you to approve this deployment's " +
-            "GitHub App once for this repository. The credential it issues is held by " +
-            "AgentCore Identity, refreshed automatically, and never stored here. Runs are " +
-            "refused until it is done.",
+          { class: "field-hint" },
+          "Authorising takes you to GitHub to approve this deployment's GitHub App for this " +
+            "repository, then brings you back here. The credential it issues is held by " +
+            "AgentCore Identity and never stored in this deployment.",
         ),
-        ui.el("div", { class: "row" }, [authorize]),
       );
       return;
     }
@@ -721,6 +725,11 @@ function mountSettings(root, configId) {
     ]),
     ui.el("div", { class: "board-head" }, [heading, statusText]),
     notes,
+    // **First panel on the page, above the repository's own facts.** Authorising is the one
+    // thing a freshly registered repository still needs from the operator, and nothing else
+    // here is actionable until it is done -- a task is refused with `409 GitHubNotAuthorized`.
+    // It was below Settings, where it read as one more optional section and was missed.
+    ui.panel("GitHub access", [authHost]),
     ui.panel("Repository", [facts]),
     ui.panel("Settings", [
       ui.el("div", { class: "form" }, [
@@ -734,7 +743,6 @@ function mountSettings(root, configId) {
         ui.el("div", { class: "row" }, [save]),
       ]),
     ]),
-    ui.panel("GitHub access", [authHost]),
     ui.panel("Runtime", [
       ui.el("p", { class: "field-hint" }, [
         "An update re-reads the intended runtime -- container image, environment, network " +

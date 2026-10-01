@@ -612,6 +612,37 @@ def test_the_manifest_return_marker_is_the_handlers_spelling() -> None:
     )
 
 
+def test_the_authorisation_panel_comes_before_everything_it_blocks() -> None:
+    """Authorising is the last required step and the easiest to miss, so it leads the page.
+
+    Reported from a live walkthrough: the panel sat below Settings, read as one more optional
+    section, and was skipped -- which is expensive, because nothing else on that page is
+    actionable until it is done and a task is refused with `409 GitHubNotAuthorized`.
+
+    Two things are asserted, and the second is the one prose cannot hold: the panel is above
+    the repository's own facts, and within the unauthorised state the **button precedes the
+    paragraph**. An operator reading top to bottom should meet the action before the
+    explanation of it.
+    """
+    source = (JS / "views" / "register.js").read_text(encoding="utf-8")
+
+    access = source.index('ui.panel("GitHub access"')
+    repository = source.index('ui.panel("Repository", [facts])')
+    settings = source.index('ui.panel("Settings"')
+    assert access < repository < settings, (
+        "the GitHub access panel must be the first on the settings page: it is the only "
+        "remaining required step, and below the others it reads as optional"
+    )
+
+    unauthorised = source.index("This repository is not authorised yet")
+    button = source.index("[authorize]", unauthorised)
+    paragraph = source.index("Authorising takes you to GitHub", unauthorised)
+    assert button < paragraph, (
+        "in the unauthorised state the button has to come before the description of it, or "
+        "the operator reads an explanation and then has to hunt for the control"
+    )
+
+
 def test_the_connect_view_is_the_only_place_a_github_app_is_created() -> None:
     """One click, and the three things that make it one.
 
