@@ -3,7 +3,7 @@
 **Turn a coding task into a pull request. Keep your laptop free.**
 
 [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue)](LICENSE)
-[![Tested with Python 3.12](https://img.shields.io/badge/Python-tested_3.12-blue)](#before-you-start)
+[![Tested with Python 3.12](https://img.shields.io/badge/Python-tested_3.12-blue)](#prerequisites)
 [![Status: AWS sample](https://img.shields.io/badge/Status-AWS_sample-orange)](#who-is-this-for)
 
 Submit from Claude Code or the web UI, follow the remote agent's progress, and get a PR with verification evidence powered by Amazon Bedrock AgentCore Runtime.
@@ -32,24 +32,38 @@ it does not make untrusted code safe. A runtime or publishing failure may produc
 
 ## Quick start
 
-### Before you start
+### Prerequisites
 
+- Clone the repository
 - A dedicated AWS account, with credentials for your intended profile and region.
 - Docker running, Python ≥ 3.11 (tested with 3.12), `uv`, Node ≥ 20, and the AWS CLI.
-- A trusted, disposable repository and a **GitHub PAT**. A classic token with the `repo`
-  scope is the quickest, but it is not limited to one repository; see
-  [Token scope](#token-scope-read-this). A fine-grained token with `contents: write` and
-  `pull requests: write` is the tighter choice. Step 3 links straight to either page.
+- A trusted, disposable GitHub repository with **a default branch that already builds and passes its tests**. The agent never guesses how to build a repository. It reads a root `Makefile` with a `setup:` (or `bootstrap:`) target and a `test:` target, or a root `package.json` with `scripts.setup` and `scripts.test`. **An empty repository does not work.** With no default branch, the run fails at the very end when it opens the pull request (`422 Validation Failed`, `"field": "base"`). With no test entry point, every PR comes back as an unverified draft. If your repository is empty, set it up with one of the options below **before you register it**.
+- A **GitHub fine-grained personal access token (PAT)**  with `contents: write` and `pull requests: write` permissions scoped to the repository you'd like to work on.
 
-Preflight checks AgentCore/model availability and prints any required CDK bootstrap command.
-The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI works without it.
+Preflight checks AgentCore/model availability and prints any required CDK bootstrap command. The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI works without it.
+
+#### Setting up an empty repository
+
+##### WebUI instructions
+
+Follow these instructions if you do not intend to use Claude Code with this project. You need `git`, `make`, `python3`, and git credentials that can push to the repository (for example `gh auth login`). The script pushes with those credentials, not with the PAT.
+
+1. With this repository as your working directory run `scripts/scaffold.sh <owner>/<repo>`. A GitHub URL or the path to a local clone also works.
+2. The script clones the repository into a temporary directory, writes a minimal Python project (a `Makefile` with `setup` and `test` targets, one function in `src/`, and its pytest tests), and runs `make setup` and `make test`. When both pass, it asks before it pushes the project as `main`.
+
+##### Claude Code instructions
+
+Follow these instructions if you intend to use Claude Code with this project.
+
+1. Install the plugin ([Option B](#option-b-claude-code), step 4) and clone the repository locally.
+2. Run `/sample-rca:scaffold` in Claude Code from the clone. It writes a Python project, or TypeScript if you ask for it by name.
+3. The skill runs the project's setup and tests, pushes it as `main` after you confirm, and offers to register the repository.
 
 ### Deploy it
 
-1. **Deploy the fleet.**
+1. **Deploy the fleet.** Run these commands with this repository as the working directory. 
 
    ```bash
-   git clone https://github.com/aws-samples/sample-remote-coding-agent
    cd sample-remote-coding-agent
    make setup
    make preflight
@@ -62,16 +76,7 @@ The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI work
 
 2. **Sign in at the console URL.** Cognito emails a temporary password to `EMAIL`; check spam and change it on first sign-in.
 
-3. **Register a disposable repository** with **+ Add repository**. Enter the repository URL
-   first, then use the **Create a token for … on GitHub — scope prefilled** link under the
-   token field: it opens GitHub with `repo` already ticked and the description naming that
-   repository, so you set an expiry and press Generate. Paste the token back and leave
-   Advanced folded. Wait **8–12 min** for `READY`; starting sooner returns
-   `409 ConfigurationNotReady`.
-
-   The agent pushes branches and opens PRs. Start with a small repository whose tests already
-   pass. Declare setup/test entry points so verification can run:
-   [command detection details](CLAUDE.md#why-the-makefile-targets-are-named-that-way).
+3. **Register a disposable repository** with **+ Add repository**. Enter the repository URL first, then use the token you created earlier.  Wait **8–12 min** for `READY`; starting sooner returns `409 ConfigurationNotReady`.
 
 ### Choose how to submit tasks
 
@@ -113,13 +118,9 @@ both at once. Watch **Planning → Coding → Verifying → Done** and click the
    Check the `endpoint used:` line. Restarting loads the plugin's MCP tools.
 
 ```text
-# Optional: scaffold an empty repo locally, then push it before dispatch.
-/sample-rca:scaffold
 # Example: build a 2048 game in your registered disposable repository.
-/sample-rca:remote Build a 2048 game as a Vue 3 single-page app. Keep the board and merge
-logic in a plain module with Vitest tests covering spawn, merge, win and game over. Add
-scripts.setup, scripts.test and scripts.dev to package.json, and a README whose first
-section is the exact commands to install it, run it in a browser, and test it.
+/sample-rca:remote Build a 2048 game as a Vue 3 single-page app. Keep the board and merge logic in a plain module with Vitest tests covering spawn, merge, win and game over.
+Add scripts.setup, scripts.test and scripts.dev to package.json, and a README whose first section is the exact commands to install it, run it in a browser, and test it.
 # Check progress here or in the web UI; the task appears in both.
 /sample-rca:remote status
 ```
@@ -178,6 +179,7 @@ before deleting them; some are the only history of your runs.
 - **Temporary password expired.** Redeployment does not resend it; see [operator recovery notes](CLAUDE.md#what-the-walkthrough-touches-and-where-it-lives).
 - **Tools succeed but the board is empty.** Check `endpoint used:` and stale API overrides for another deployment.
 - **Another `/remote` command answers.** Use `/sample-rca:remote`; other plugin namespaces are unrelated.
+- **The run fails at submit with `could not open a pull request ... (HTTP 422)` and `"field": "base", "code": "invalid"`.** The repository had no default branch when the task started. The agent assumed `main`, and GitHub rejected it as the PR base. The agent's branch is now the repository's only branch, and probably its default, so `scripts/scaffold.sh` and `/sample-rca:scaffold` will refuse the repository because it is no longer empty. Either push a `main` that builds and passes its tests yourself and set it as the default branch, or create a new empty repository, scaffold that, and register it instead. Then run the task again.
 
 Setup notes worth reading before you deploy: [VPC quota](https://github.com/aws-samples/sample-remote-coding-agent/issues/2), [Cognito domain](https://github.com/aws-samples/sample-remote-coding-agent/issues/3),
 [deployment](https://github.com/aws-samples/sample-remote-coding-agent/issues/5), [wrong-account handling](https://github.com/aws-samples/sample-remote-coding-agent/issues/7), [account selection](https://github.com/aws-samples/sample-remote-coding-agent/issues/8).
@@ -188,40 +190,12 @@ Run `make setup`, `make test`, and `make lint`. Local tests use fake AWS service
 See [contribution guidelines](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md),
 and [maintainer reference](CLAUDE.md). Keep diagrams and previews in sync with UI changes.
 
-## Token scope: read this
-
-The console offers two credentials and they are **not** equivalent.
-
-| | classic PAT (`ghp_…`) | fine-grained PAT (`github_pat_…`) |
-|---|---|---|
-| to create | ~3 decisions, scope pre-ticked from the console link | ~9 decisions, no prefill possible |
-| reach if leaked | **every repository its owner can access** | the one repository you selected |
-| scope to set | `repo`, or `public_repo` for a public repository | `contents: write`, `pull requests: write` |
-
-A classic token **cannot be limited to one repository.** GitHub does not offer that, so a
-classic token registered here can read and write everything its owner can reach. This system
-runs an arbitrary repository's own setup and test commands with a model pointed at them, and
-it does not prevent prompt injection — so treat the token as reachable by that code.
-
-Both are accepted because the fine-grained flow was turning people away before they saw a
-single run: nine decisions in a list of about fifty permissions, none of which can be
-pre-filled from a link. The classic page can be, so it is one click from Generate.
-
-**If you use a classic token, use a GitHub account that owns nothing you mind losing.** That
-is the same bound this sample already asks for on the AWS side — a dedicated account — and it
-is what makes the wider scope survivable rather than merely convenient. For anything else,
-spend the extra clicks on a fine-grained token.
-
-GitHub App and OAuth tokens (`ghs_`, `ghu_`, `ghr_`, `gho_`) are refused, and not on security
-grounds: they expire an hour after issue and nothing here refreshes one, so registration
-would succeed and every task an hour later would fail inside a container.
-
 ## Limitations
 
 - **The token is minted by hand.** GitHub has no API to create a PAT, so this cannot be
   automated. The alternative is a GitHub App, which needs an App registered and installed
   before the first repository can be added — more setup than it saves for one repository.
-- **A classic token's blast radius is its owner's whole account**, as above.
+- **A classic token's blast radius is its owner's whole account**, because GitHub cannot limit one to a single repository. That is why the prerequisites ask for a fine-grained token.
 - **Commit attribution** defaults to an address that matches no GitHub account, so checks
   that gate on it will refuse the agent's pull requests. Pass `-c gitAuthorName=` and
   `-c gitAuthorEmail=` at deploy time to fix it.
@@ -230,8 +204,7 @@ would succeed and every task an hour later would fail inside a container.
 
 ## Security
 
-Protect the default branch of the repository you register. Read [Token scope](#token-scope-read-this)
-before choosing a credential.
+Protect the default branch of the repository you register. Use a fine-grained token scoped to that one repository, as described in [Prerequisites](#prerequisites).
 The account boundary does not stop repository code from making outbound HTTPS requests.
 [Remaining exposure](CLAUDE.md#what-remains-exposed)
 
