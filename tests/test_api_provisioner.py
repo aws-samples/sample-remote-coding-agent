@@ -1539,6 +1539,71 @@ def test_a_redelivery_of_a_converged_update_issues_no_call(
     assert stored["status"] == provisioner.READY, "a converged fleet does not sit in UPDATING"
 
 
+def test_update_rewrites_the_execution_role_even_when_the_runtime_is_converged(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A policy change has to reach a repository registered before it, and `UPDATE` is the
+    only path that can carry one to a live configuration.
+
+    The ordering is the test. `_matches_intent` returns early on a converged runtime -- which
+    is what every already-deployed configuration looks like after a code-only change -- so a
+    role write placed after that check would never run on exactly the fleet that needs it.
+
+    What it costs to get wrong is the expensive silent shape invariant 41 exists to prevent,
+    and it is asymmetric: `runs.queue_run` checks whether the *API* can reach the token vault,
+    not whether the container can. So a stale role lets dispatch succeed, the run clone, plan,
+    code and verify, and only `store.github_token` inside the container come back empty -- a
+    whole task spent before anything says why. Measured against the real migration: a
+    repository registered while the credential was a Secrets Manager secret keeps
+    `ReadOwnSecret` and gains neither Identity action until `_update` rewrites the policy.
+    """
+    _fleet(monkeypatch)
+    common, provisioner = _load("provisioner")
+    _seed(common)
+    control = FakeAgentCore("bedrock-agentcore-control")
+    install(monkeypatch, common, control=control)
+
+    _run(provisioner, "CREATE")
+    runtime_id = _status(common)["agentRuntimeId"]
+    control.runtimes[runtime_id]["status"] = "READY"
+    _run(provisioner, "CHECK")
+    role_name = provisioner._role_name(_CONFIG_ID)
+
+    # Stand in for a role minted by an older deployment: a policy this code would never write
+    # now, naming a secret that no longer exists anywhere in the system.
+    common.iam.put_role_policy(
+        RoleName=role_name,
+        PolicyName=provisioner._POLICY_NAME,
+        PolicyDocument=json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Sid": "ReadOwnSecret",
+                        "Effect": "Allow",
+                        "Action": ["secretsmanager:GetSecretValue"],
+                        "Resource": "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:x",
+                    }
+                ],
+            }
+        ),
+    )
+
+    _run(provisioner, "UPDATE")
+
+    # The runtime really was converged, so this is the arm that would have skipped the write.
+    assert control.calls_to("UpdateAgentRuntime") == [], "the runtime matched intent"
+    written = common.iam.get_role_policy(RoleName=role_name, PolicyName=provisioner._POLICY_NAME)
+    document = written["PolicyDocument"]
+    document = json.loads(document) if isinstance(document, str) else document
+    sids = {statement["Sid"] for statement in document["Statement"]}
+    assert "UseGitHubCredential" in sids, (
+        "the update has to converge the inline policy, or a repository registered before a "
+        "policy change can never reach the credential it now needs"
+    )
+    assert "ReadOwnSecret" not in sids, "and the statement it replaced has to be gone"
+
+
 def test_update_of_a_configuration_with_no_runtime_yet_is_a_no_op(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
