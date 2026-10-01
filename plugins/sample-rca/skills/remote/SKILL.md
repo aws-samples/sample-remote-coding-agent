@@ -40,7 +40,7 @@ one account. The six tools are the whole surface:
   revised its approach** after verification sent it back -- it did not retry the same
   plan a second time. Say which it was; the difference is the whole story of a run.
 - A repository whose status is `PENDING` or `CREATING` is still provisioning and
-  refuses tasks with `409 ConfigurationNotReady`. Provisioning takes 2-5 minutes, and
+  refuses tasks with `409 ConfigurationNotReady`. Provisioning takes 8-12 minutes, and
   `mcp__plugin_sample-rca_remote-coding-agent__get_repository` is how to check.
 - `SUCCEEDED` means a real verification command ran and the review judged it green.
 - A run still in `PLANNING`, `CODING`, `VERIFYING`, `REVIEWING` or `SUBMITTING` is

@@ -117,7 +117,7 @@ export function mount(root) {
       list.append(ui.el("li", { class: "repo-empty tone-bad" }, error.message));
     });
 
-  // A repository provisions in about ten minutes and its status is what this list is
+  // A repository provisions in 8-12 minutes and its status is what this list is
   // for while it does, so the rail carries the one poll that is not a view's. It backs
   // off to 30 s like every other, and skips itself while the tab is hidden.
   const poll = activity.createPoll({

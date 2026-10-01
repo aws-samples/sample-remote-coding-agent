@@ -259,12 +259,20 @@ Everything the walkthrough used to attribute inline lives here, in the order an 
   585s. It is the *deploy* that takes 15-25 minutes; this is the per-repository step after it.
   Everything said "2-5 minutes" until the V2 upgrade made that wrong, and an understated wait is
   not a cosmetic error — an operator who believes it concludes the registration is stuck at
-  exactly the point where waiting is the correct action. The number is spelled in **five** places
+  exactly the point where waiting is the correct action. The number is spelled in **eight** files
   and they have to move together: `README.md`'s registration step, `mcp/src/rca_mcp/format.py`'s
-  `_NOT_READY_NOTE`, `mcp/src/rca_mcp/server.py`'s `_PROVISIONING_NOTE`, and the two console
-  strings in `web/js/views/register.js` and `web/js/views/sidebar.js`. Nothing pins them to each
-  other, because there is no shared unit to pin them in: two are model-facing tool prose, two are
-  browser strings and one is an operator's README.
+  `_NOT_READY_NOTE`, `mcp/src/rca_mcp/server.py`'s `_PROVISIONING_NOTE`, the two console strings
+  in `web/js/views/register.js` and `web/js/views/sidebar.js`, both of the plugin's skills, and
+  the un-namespaced `.claude/commands/remote.md`.
+
+  **A test pins them, because prose did not.** This paragraph said "five places" and listed
+  five; the plugin's two skills and the command were not among them and went on saying "2-5
+  minutes" long after the V2 upgrade made that wrong -- the expensive direction, since an
+  operator who believes an understated wait concludes the registration is stuck at exactly the
+  point where waiting is correct. `tests/test_docs.py::test_every_file_states_the_same_provisioning_time`
+  asserts each spelling, and `::test_no_file_states_a_different_provisioning_time` catches a file
+  carrying the right number *and* a stale one -- the shape that actually drifted, because a
+  reader meets the stale sentence first.
 - **The slash command and the drag are one code path** — `tasks.create` and `cards.move` both call
   `runs.queue_run`. The board is live-polled by `web/js/activity.js`, and the task view links to
   that run's log group, `/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`.
@@ -1418,8 +1426,11 @@ than one that does not. Five things are still true after everything above.
   `setting_sources=[]` and `strict_mcp_config=True`, the `PreToolUse` hook that denies
   `git commit` on `Bash` for every role and every subagent, and `submit` being the sole
   publisher. None of them stop a malicious `npm test` or a `pip install` hook: that code
-  runs because running it is the point, which is why the account is dedicated and the token
-  is scoped to one repository.
+  runs because running it is the point, which is why the account is dedicated and the GitHub
+  App is installed only on the repositories being worked on. **Not** "the token is scoped to
+  one repository" -- that was true of a fine-grained PAT and is not true of this design: one
+  app's token reaches every repository it is installed on, which is why the installation list
+  is the thing to keep short.
 - **A resume unpickles a file the container could have written.**
   `agent/src/coding_agent/checkpoint.py` calls `pickle.load` on the path
   `checkpoint.checkpoint_path` returns, `<workDir>/checkpoint/graph.pkl`, and unpickling is
@@ -1433,13 +1444,20 @@ than one that does not. Five things are still true after everything above.
   task. JSON is not the fix: the payload is LangGraph's own nested `defaultdict` structures
   and would not round-trip, which is why `checkpoint._load` rebuilds key by key instead of
   assigning.
-- **There is no roadmap.** This list is the finished posture, not a staging post. A GitHub App
-  issuing one-hour installation tokens, phase-separated execution roles, an SCP backstop on
-  `iam:CreateRole`, Bedrock Guardrails and a TLS-inspecting egress allowlist were all
-  considered and are **not being built** — so the exposures above are permanent for this
-  system rather than pending. Read them as the terms of use: a dedicated account, a
-  repository-scoped token, and branch protection are what bound them, and nothing further is
-  coming to help.
+- **There is no roadmap.** This list is the finished posture, not a staging post.
+  Phase-separated execution roles, an SCP backstop on `iam:CreateRole`, Bedrock Guardrails and
+  a TLS-inspecting egress allowlist were all considered and are **not being built** — so the
+  exposures above are permanent for this system rather than pending. Read them as the terms of
+  use: a dedicated account, a GitHub App installed only where the agent is meant to work, and
+  branch protection are what bound them, and nothing further is coming to help.
+
+  A GitHub App was on that declined list, as "issuing one-hour **installation** tokens", and it
+  is now built — but not in the shape that was declined. What ships issues a **user-to-server**
+  token through AgentCore Identity, which is why the blast radius is the installation list
+  rather than one repository: an installation token can be scoped to a single repository, and a
+  user token cannot. That narrower variant needs the app's private key to mint a JWT, which
+  means storing a credential this design deliberately has nowhere to put, and it remains
+  declined for that reason.
 
 ### Static analysis suppressions
 

@@ -317,19 +317,21 @@ export RCA_OUTPUT
 
 json_output = $(PYTHON) -c "$$RCA_OUTPUT" "$(OUTPUTS)"
 
-# Step 6 of the deploy, as a program rather than a shell pipeline, for one reason: the
-# GitHub token. `getpass` keeps it off the terminal, and running it here keeps it out of a
-# command line, out of `argv` and out of the environment. The control plane is IAM-authorized
-# `execute-api`, so the `aws` CLI cannot sign this request at all -- the in-tree
-# `rca_mcp.client.ApiClient` is the only signer on this machine, and `POST /configurations`
-# is inside its `ALLOWED_METHODS`.
+# Step 6 of the deploy, as a program rather than a shell pipeline, because the control plane
+# is IAM-authorized `execute-api` and the `aws` CLI cannot sign a request to it at all -- the
+# in-tree `rca_mcp.client.ApiClient` is the only signer on this machine.
+#
+# **It asks for nothing.** This used to read a fine-grained PAT with `getpass` and send it as
+# `githubToken`; registration takes no credential now and the API refuses a body carrying one
+# with `400 TokenNotAccepted`, so the prompt was not merely redundant, it made the last step of
+# every deploy fail. What a repository needs instead is an authorisation, and that is a browser
+# step -- so this registers and then says where to finish.
 #
 # Every statement is inside a function on purpose. A column-0 `try:` or `else:` in this
 # block reads as a declared Makefile target to the regex in
 # `tests/test_repo_contracts.py`, which turns that test red for a reason that looks like a
 # naming complaint.
 define RCA_REGISTER
-import getpass
 import sys
 from rca_mcp import client as rca_client
 from rca_mcp import format as rca_format
@@ -338,7 +340,7 @@ def registered_already(api, slug):
     """The configuration for this repository, or None.
 
     Listing first is what makes a re-run of `make deploy` silent: an already-registered
-    repository must never be asked for a token a second time.
+    repository must not be registered a second time.
     """
     for item in api.get("/configurations").get("items") or []:
         if item.get("repository") == slug:
@@ -357,34 +359,19 @@ def main(origin):
         if existing is not None:
             print(
                 f"deploy: {slug} is already registered as {existing.get('configId')} "
-                f"(status {existing.get('status')}), so no token was asked for."
+                f"(status {existing.get('status')})."
             )
             return 0
-        if not sys.stdin.isatty():
+        if not api.get("/github-app").get("connected"):
             print(
-                f"deploy: {slug} is not registered yet, and there is no terminal here to "
-                "read a token from, so nothing was registered. This is what happens when "
-                "Claude Code runs this target: ask it to register the repository with "
-                "register_repository, which takes the token without putting it on a "
-                "command line."
+                f"deploy: {slug} was not registered, because no GitHub App is connected to "
+                "this deployment yet. Open the console, press Create the GitHub App on "
+                "GitHub, install it on this repository, and then add the repository there. "
+                "The API refuses a registration without an app, so there is nothing this "
+                "deploy can usefully do first."
             )
             return 0
-        print(f"deploy: registering {slug} needs one value this deploy cannot discover -- a")
-        print("        fine-grained GitHub PAT scoped to that one repository, with contents")
-        print("        write and pull requests write. It is not echoed, and blank skips.")
-        token = getpass.getpass("GitHub token: ").strip()
-        if not token:
-            print(
-                f"deploy: no token given, so {slug} was not registered. Re-run "
-                "'make deploy EMAIL=...' when you have one, or ask Claude Code to run "
-                "register_repository."
-            )
-            return 0
-        print(
-            rca_format.registered(
-                api.post("/configurations", {"repositoryUrl": origin, "githubToken": token})
-            )
-        )
+        print(rca_format.registered(api.post("/configurations", {"repositoryUrl": origin})))
         return 0
     except (rca_client.RcaError, rca_client.ApiError) as err:
         print(f"deploy: registration did not happen: {err}")
@@ -938,9 +925,9 @@ deploy:
 	case "$$origin" in \
 	  *github.com*) $(PYTHON) -c "$$RCA_REGISTER" "$$origin" || printf '%s\n' \
 	    "deploy: the deployment is up, but registering this repository did not finish." \
-	    "  fix: re-run 'make deploy EMAIL=...' from a terminal, or ask Claude Code to" \
-	    "       register it -- register_repository takes the token without putting it on a" \
-	    "       command line." >&2 ;; \
+	    "  fix: re-run 'make deploy EMAIL=...', or add the repository in the console --" \
+	    "       either way it takes no credential, and the console is also where the" \
+	    "       repository is authorised afterwards." >&2 ;; \
 	  "") printf '%s\n' \
 	    "deploy: this checkout has no 'origin' remote, so no repository was registered." \
 	    "        Register one from Claude Code with register_repository." ;; \
