@@ -131,6 +131,15 @@ def _connect(common: Any, *, slug: str = "rca-coding-agent-abc123") -> None:
     )
 
 
+def configurations_connect(common: Any) -> dict[str, Any]:
+    """`POST /github-app/conversions`, the leg that adopts a freshly created app."""
+    from handlers import github_app
+
+    return github_app.convert(
+        api_event("POST", "/github-app/conversions", body={"code": "manifest-code"}), None
+    )
+
+
 def _register(configurations: Any, *, url: str = _URL, **extra: Any) -> dict[str, Any]:
     body = {"repositoryUrl": url, **extra}
     return configurations.create(api_event("POST", "/configurations", body=body), None)
@@ -234,6 +243,96 @@ def test_a_body_carrying_a_token_is_refused_rather_than_ignored(aws: Any) -> Non
     # Nothing was written on the way to the refusal, and the token is not echoed back.
     assert [item["configId"] for item in common.config_table.scan()["Items"]] == ["rca:settings"]
     assert _REFUSED_PAT not in response["body"]
+
+
+def test_connecting_derives_the_apps_bot_account_as_the_commit_identity(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The demo path configures no git author, so connecting has to produce one.
+
+    The address is `<botUserId>+<slug>[bot]@users.noreply.github.com`, and the **id is the bot
+    user's, not the app's**. That distinction is the whole test: both forms are well-formed,
+    both look like the documented convention, and only one resolves. Measured against a live
+    app -- the app-id form came back with `author: null`, the bot-user-id form resolved to
+    `<slug>[bot] (Bot)`, and a control commit with a human's own noreply address resolved to
+    that user, so the negative was real rather than an artefact of the probe.
+
+    Getting it wrong is silent in the worst way: the commits look attributed in the pull
+    request's own metadata and GitHub reports no author, so a Vercel preview answers
+    "Deployment was blocked" and a DCO check fails with a perfect diff (invariant 4b).
+    """
+    common, _provisioner = _load("provisioner")
+    from handlers import github_probe
+
+    app_id, bot_user_id, slug = "5146691", "336429684", "rca-coding-agent-298bc4"
+
+    def fake(method: str, url: str, **_kwargs: Any) -> tuple[int, Any, dict[str, str]]:
+        if url.endswith("/conversions"):
+            return (
+                201,
+                {
+                    "id": app_id,
+                    "slug": slug,
+                    "client_id": "Iv23livTEST",
+                    "client_secret": "shhh",
+                    "html_url": f"https://github.com/apps/{slug}",
+                    "owner": {"login": "lazydragon"},
+                },
+                {},
+            )
+        # The bot-account lookup. Its `id` is deliberately NOT the app id above.
+        assert url.endswith(f"/users/{slug}[bot]"), url
+        return 200, {"id": bot_user_id, "login": f"{slug}[bot]", "type": "Bot"}, {}
+
+    monkeypatch.setattr(github_probe, "_request", fake)
+    install(monkeypatch, common, control=FakeAgentCore("bedrock-agentcore-control"))
+
+    response = configurations_connect(common)
+    assert response["statusCode"] == 200, _body(response)
+
+    stored = common.config_table.get_item(Key={"configId": "rca:settings"})["Item"]
+    assert stored["gitAuthorName"] == f"{slug}[bot]"
+    assert stored["gitAuthorEmail"] == f"{bot_user_id}+{slug}[bot]@users.noreply.github.com"
+    assert app_id not in stored["gitAuthorEmail"], (
+        "the address must carry the BOT USER id, not the app id -- the app-id form is "
+        "well-formed and resolves to no GitHub account at all"
+    )
+
+
+def test_an_unreadable_bot_account_costs_the_identity_and_not_the_connect(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed attribution lookup must not fail the connect.
+
+    The app exists on GitHub by this point and its credentials are already in the vault, so
+    refusing here would leave the operator with an app this deployment cannot finish adopting
+    -- trading a cosmetic problem (commits resolve to no author) for a blocking one.
+    """
+    common, _provisioner = _load("provisioner")
+    from handlers import github_probe
+
+    def fake(method: str, url: str, **_kwargs: Any) -> tuple[int, Any, dict[str, str]]:
+        if url.endswith("/conversions"):
+            return (
+                201,
+                {
+                    "id": "5146691",
+                    "slug": "rca-app",
+                    "client_id": "Iv23livTEST",
+                    "client_secret": "shhh",
+                },
+                {},
+            )
+        return 404, {"message": "Not Found"}, {}
+
+    monkeypatch.setattr(github_probe, "_request", fake)
+    install(monkeypatch, common, control=FakeAgentCore("bedrock-agentcore-control"))
+
+    assert configurations_connect(common)["statusCode"] == 200
+    stored = common.config_table.get_item(Key={"configId": "rca:settings"})["Item"]
+    assert stored["appSlug"] == "rca-app", "the app was still adopted"
+    assert stored["gitAuthorName"] == ""
+    assert stored["gitAuthorEmail"] == ""
 
 
 def test_registering_without_a_github_app_is_refused_before_anything_is_written(

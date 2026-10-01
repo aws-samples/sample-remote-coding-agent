@@ -315,6 +315,51 @@ def _public_settings(settings: Mapping[str, Any], provider: Mapping[str, Any]) -
     }
 
 
+def _bot_commit_identity(slug: str) -> tuple[str, str]:
+    """The app's own bot account as a git author, or `("", "")`.
+
+    This is what makes a commit the agent pushes attributable, and the shape was measured
+    rather than taken from the convention, because the obvious reading of the convention is
+    wrong. GitHub resolves a commit to an account by matching the author **email**, and the
+    `users.noreply.github.com` form for a bot carries the **bot user's** id -- not the app id.
+    Measured against a live app: `5146691+<slug>[bot]@...` (the app id) resolved to **no
+    account at all**, while `336429684+<slug>[bot]@...` (the bot user id) resolved to
+    `<slug>[bot] (Bot)`. A control commit with a human's own noreply address resolved to that
+    user, so the first answer was a real negative and not an artefact of how the probe wrote
+    the commit.
+
+    The id is therefore fetched rather than derived, from `GET /users/<slug>[bot]`, which needs
+    no credential. A failure returns `("", "")` and costs the deployment nothing but the
+    default identity: the alternative is a connect flow that fails because an *attribution*
+    lookup did, which trades a cosmetic problem for a blocking one. `AGENT_GIT_AUTHOR_*` set
+    at deploy time still wins over this (`provisioner._git_identity`).
+    """
+    login = f"{slug}[bot]"
+    status, decoded, _headers = github_probe.request(
+        "GET", f"{github_probe.API_ROOT}/users/{login}"
+    )
+    if status != 200 or not isinstance(decoded, Mapping) or not decoded.get("id"):
+        LOG.warning(
+            "could not read the bot account for %s (HTTP %s); commits will carry the "
+            "container's default identity and GitHub will resolve no author for them",
+            login,
+            status,
+        )
+        return "", ""
+    return login, f"{decoded['id']}+{login}@users.noreply.github.com"
+
+
+def commit_identity() -> tuple[str, str]:
+    """The connected app's bot identity as `(name, email)`, or `("", "")`.
+
+    Read off the settings item rather than recomputed, so provisioning costs no GitHub call.
+    `("", "")` for a deployment with no app connected yet, and for one connected before this
+    existed -- both of which fall back to the container's default.
+    """
+    settings = _settings()
+    return str(settings.get("gitAuthorName") or ""), str(settings.get("gitAuthorEmail") or "")
+
+
 def is_connected() -> bool:
     """Has a GitHub App been converted into this deployment's provider yet?
 
@@ -524,11 +569,14 @@ def convert(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
             PROVIDER_CONFIG_MEMBER: {"clientId": client_id, "clientSecret": client_secret}
         },
     )
+    name, email = _bot_commit_identity(slug)
     _save_settings(
         appSlug=slug,
         appId=str(decoded.get("id") or ""),
         appUrl=str(decoded.get("html_url") or ""),
         appOwner=str((decoded.get("owner") or {}).get("login") or ""),
+        gitAuthorName=name,
+        gitAuthorEmail=email,
     )
     LOG.info("connected the GitHub App %s to this deployment", slug)
     return 200, _public_settings(_settings(), _provider())

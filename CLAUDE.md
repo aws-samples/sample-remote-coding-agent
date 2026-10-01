@@ -412,6 +412,20 @@ the code it governs and a regression test.
    environment silently winning. A **dedicated bot account** is the right value
    rather than a human's address — the commits were not written by a person and
    the audit trail should not say they were.
+
+   **The demo path configures neither, because the connected GitHub App supplies
+   them.** `provisioner._git_identity` prefers the context pair and otherwise uses
+   the app's own bot account, which is the dedicated bot the paragraph above wants.
+   The address is `<botUserId>+<slug>[bot]@users.noreply.github.com`, and the id is
+   the **bot user's, not the app's**. That was measured, because the obvious reading
+   of GitHub's convention is wrong in a way nothing reports: against a live app,
+   `5146691+<slug>[bot]@…` (the app id) resolved to **no account**, while
+   `336429684+<slug>[bot]@…` (the bot user id) resolved to `<slug>[bot] (Bot)` —
+   with a control commit carrying a human's own noreply address resolving to that
+   user, so the negative was real rather than an artefact of how the probe wrote the
+   commit. `github_app._bot_commit_identity` fetches the id from
+   `GET /users/<slug>[bot]`, needs no credential, and degrades to `("", "")` rather
+   than failing a connect whose app already exists on GitHub.
 5. **Nothing under `.agent/` counts as work** — `has_changes()` is
    unconditionally true once the plan node writes a spec. Keep the two-way split
    in `code` (nothing outside `.agent/` raises; nothing beyond

@@ -46,7 +46,7 @@ from typing import Any
 from boto3.dynamodb.conditions import Attr
 from botocore.exceptions import ClientError
 
-from . import _common, observability
+from . import _common, github_app, observability
 from ._common import LOG
 
 PHASES = ("CREATE", "CHECK", "DELETE", "UPDATE")
@@ -767,6 +767,34 @@ def _fleet_network(live: Mapping[str, Any] | None) -> dict[str, Any]:
     return {"networkMode": "PUBLIC"}
 
 
+def _git_identity() -> tuple[str, str]:
+    """The commit identity every pull request carries, as `(name, email)`.
+
+    Three sources, in order, and the order is the point:
+
+    1. **The deploy-time context pair** (`-c gitAuthorName=` / `-c gitAuthorEmail=`). An
+       explicit choice outranks a derived one, so a deployment that wants its own bot account
+       keeps it. Either value present selects this source for both, because a name from one
+       source and an address from another is an identity nobody chose.
+    2. **The connected GitHub App's own bot account**, which needs no operator input and is
+       why the demo path configures nothing. `github_app.commit_identity` reads it off the
+       settings item; the address is `<botUserId>+<slug>[bot]@users.noreply.github.com`, and
+       the id is the **bot user's** rather than the app's -- see that function for the
+       measurement, because the app-id form resolves to no account.
+    3. **Nothing**, which leaves `git_ops` to its default `agent@localhost` -- and that
+       resolves to no GitHub author, so anything gating on commit attribution refuses the
+       pull request (invariant 4b).
+
+    Fleet policy, so an existing runtime converges on the next update rather than keeping
+    whatever it was born with (invariant 24). That matters more here than for the other knobs:
+    the app is connected *after* the deploy, so every runtime provisioned before the connect
+    was necessarily born without an identity.
+    """
+    if AGENT_GIT_AUTHOR_NAME or AGENT_GIT_AUTHOR_EMAIL:
+        return AGENT_GIT_AUTHOR_NAME, AGENT_GIT_AUTHOR_EMAIL
+    return github_app.commit_identity()
+
+
 def _fleet_environment() -> dict[str, str]:
     """The environment keys this deployment owns, and therefore converges. Anything not
     named here is carried forward from the live runtime. Takes no configuration on
@@ -781,6 +809,12 @@ def _fleet_environment() -> dict[str, str]:
     its expected values are pinned in `tests/test_env_contract.CLI_SUPPRESSIONS`, because
     deleting one is invisible at run time.
     """
+    # Resolved once, and assigned to names rather than splatted in: the two keys below are
+    # read out of this function's AST by
+    # `tests/test_env_contract.py::test_every_container_environment_read_is_forwarded_or_a_declared_default`,
+    # and a `**dict(...)` makes them invisible to it -- which is how a forwarded knob stops
+    # being checked while still appearing to work.
+    author_name, author_email = _git_identity()
     return {
         "WORK_ROOT": WORK_ROOT,
         "CLAUDE_CODE_USE_BEDROCK": "1",
@@ -805,8 +839,8 @@ def _fleet_environment() -> dict[str, str]:
         # leave a runtime that was born with a real identity carrying it forever, since
         # anything not named in this group is carried forward. Sending "" is what makes
         # clearing the context key actually clear the identity.
-        "AGENT_GIT_AUTHOR_NAME": AGENT_GIT_AUTHOR_NAME,
-        "AGENT_GIT_AUTHOR_EMAIL": AGENT_GIT_AUTHOR_EMAIL,
+        "AGENT_GIT_AUTHOR_NAME": author_name,
+        "AGENT_GIT_AUTHOR_EMAIL": author_email,
         # The CLI's suppression group, whose names and values are pinned in
         # `tests/test_env_contract.CLI_SUPPRESSIONS` -- that test is the count, not this
         # sentence. The reason it is fleet policy rather than a per-configuration default:
