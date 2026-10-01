@@ -335,6 +335,68 @@ def test_an_unreadable_bot_account_costs_the_identity_and_not_the_connect(
     assert stored["gitAuthorEmail"] == ""
 
 
+def test_a_deployment_connected_before_the_identity_existed_backfills_itself(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A settings item with a slug and no identity closes its own gap, once.
+
+    This is the state every deployment connected before the identity was derived is in, and
+    the reason it self-heals rather than being an operator task: the only other recovery is to
+    disconnect and connect again, which creates a **second** GitHub App and orphans the first.
+    Leaving litter in someone's GitHub account to repair a field is the wrong trade when the
+    slug already present is enough to derive the identity.
+
+    The write is asserted as well as the return value, because the point is that it happens
+    once -- a derivation that answered correctly and stored nothing would ask GitHub on every
+    provision for a value that cannot change.
+    """
+    common, _provisioner = _load("provisioner")
+    from handlers import github_app, github_probe
+
+    slug, bot_user_id = "rca-coding-agent-298bc4", "336429684"
+    common.config_table.put_item(Item={"configId": "rca:settings", "appSlug": slug})
+
+    calls: list[str] = []
+
+    def fake(method: str, url: str, **_kwargs: Any) -> tuple[int, Any, dict[str, str]]:
+        calls.append(url)
+        return 200, {"id": bot_user_id, "login": f"{slug}[bot]", "type": "Bot"}, {}
+
+    monkeypatch.setattr(github_probe, "_request", fake)
+
+    name, email = github_app.commit_identity()
+    assert name == f"{slug}[bot]"
+    assert email == f"{bot_user_id}+{slug}[bot]@users.noreply.github.com"
+    stored = common.config_table.get_item(Key={"configId": "rca:settings"})["Item"]
+    assert stored["gitAuthorEmail"] == email, "the backfill has to persist, or it repeats"
+
+    # Second call reads the stored pair and asks GitHub nothing.
+    assert github_app.commit_identity() == (name, email)
+    assert len(calls) == 1, f"the identity was re-derived instead of read back: {calls}"
+
+
+def test_a_failed_bot_lookup_is_not_cached_as_an_empty_identity(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Storing `("", "")` would be indistinguishable from a successful derivation of nothing,
+    and would stop the backfill ever retrying -- so a failure writes nothing and the next
+    provision tries again."""
+    common, _provisioner = _load("provisioner")
+    from handlers import github_app, github_probe
+
+    common.config_table.put_item(Item={"configId": "rca:settings", "appSlug": "rca-app"})
+
+    def not_found(*_args: Any, **_kwargs: Any) -> tuple[int, Any, dict[str, str]]:
+        return 404, {"message": "Not Found"}, {}
+
+    monkeypatch.setattr(github_probe, "_request", not_found)
+
+    assert github_app.commit_identity() == ("", "")
+    stored = common.config_table.get_item(Key={"configId": "rca:settings"})["Item"]
+    assert "gitAuthorName" not in stored
+    assert "gitAuthorEmail" not in stored
+
+
 def test_registering_without_a_github_app_is_refused_before_anything_is_written(
     aws: Any,
 ) -> None:

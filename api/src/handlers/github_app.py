@@ -352,12 +352,36 @@ def _bot_commit_identity(slug: str) -> tuple[str, str]:
 def commit_identity() -> tuple[str, str]:
     """The connected app's bot identity as `(name, email)`, or `("", "")`.
 
-    Read off the settings item rather than recomputed, so provisioning costs no GitHub call.
-    `("", "")` for a deployment with no app connected yet, and for one connected before this
-    existed -- both of which fall back to the container's default.
+    Read off the settings item, so the ordinary provision costs no GitHub call: `convert`
+    derives it once when the app is adopted.
+
+    **A deployment whose app was connected before this existed backfills itself here**, and
+    that is worth the write rather than leaving it to the operator. The alternative recovery
+    is to disconnect and connect again, which creates a *second* GitHub App and orphans the
+    first -- litter in someone's GitHub account, to repair a field. The slug is enough to
+    derive the identity at any time, so a missing pair with a slug present is a gap this can
+    simply close, once, and never think about again.
+
+    `("", "")` only when no app is connected at all, or when the bot lookup fails -- both of
+    which fall back to the container's default identity.
     """
     settings = _settings()
-    return str(settings.get("gitAuthorName") or ""), str(settings.get("gitAuthorEmail") or "")
+    name = str(settings.get("gitAuthorName") or "")
+    email = str(settings.get("gitAuthorEmail") or "")
+    if name and email:
+        return name, email
+
+    slug = str(settings.get("appSlug") or "")
+    if not slug:
+        return "", ""
+    name, email = _bot_commit_identity(slug)
+    if name and email:
+        # Stored so the next provision reads it rather than asking GitHub again. Not stored
+        # when the lookup failed: an empty pair written here would be indistinguishable from
+        # a successful derivation of nothing, and would stop this from ever retrying.
+        _save_settings(gitAuthorName=name, gitAuthorEmail=email)
+        LOG.info("derived the commit identity for %s and stored it", slug)
+    return name, email
 
 
 def is_connected() -> bool:
