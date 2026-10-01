@@ -90,11 +90,26 @@ from constructs import Construct
 # so nothing on the wire and nothing in any log said why: every server-side probe passes
 # because `curl` does not enforce CSP. Only a browser could see it, which is why no test
 # and no live API run caught it.
+#
+# `form-action` is the **same failure, a second time**, and it is recorded here rather than
+# fixed quietly because the shape is what generalises. It was `'none'` on the reasoning that
+# every outbound call in this console is a `fetch` -- true until `web/js/views/connect.js`
+# submitted a real `<form>` to GitHub, which is the one thing the app-manifest flow cannot do
+# any other way: GitHub has to receive the manifest under the operator's own github.com
+# session and answer with its own confirmation page, which is a navigation and not a response
+# JavaScript may read. With `'none'` the browser refuses that submit silently, the console
+# sits on "Preparing the GitHub App…" forever, and every server-side signal is green -- the
+# API returns a manifest, its log line says so, and nothing is ever sent. The lesson is that
+# a CSP directive narrowed to what the code does today is a tripwire for the next thing it
+# does, and only a browser can trip it.
+#
+# `tests/test_web_stack.py::test_the_policy_permits_the_github_app_manifest_post` ties this
+# entry to `github_app._MANIFEST_FORM_URL`, so the two cannot drift.
 def _content_security_policy(cognito_origin: str) -> str:
     return (
         "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
         f"font-src 'self'; connect-src 'self' {cognito_origin}; frame-ancestors 'none'; "
-        "base-uri 'none'; form-action 'none'"
+        "base-uri 'none'; form-action https://github.com"
     )
 
 
