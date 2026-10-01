@@ -295,6 +295,9 @@ function mountSettings(root, configId) {
   // the only authority on whether a repository is authorised, and a cached flag would be a
   // second, staler answer to the same question.
   let access = null;
+  // Whether this page load is the return leg of an authorisation. Read by
+  // `autoStartAuthorizeIfNeeded`, which must not start one on a load that is finishing one.
+  let returnedFromAuthorization = false;
   let authFailure = null;
   const authHost = ui.el("div", { class: "stack" });
   const authorize = ui.action("Authorise GitHub", {
@@ -453,6 +456,10 @@ function mountSettings(root, configId) {
     const query = new URLSearchParams(window.location.search);
     const sessionUri = query.get(auth.AUTH_RETURN_PARAM);
     if (!sessionUri) return;
+    // Set before anything can fail: a load that came back from GitHub must never start a new
+    // authorisation, whatever the completion then does. That is the difference between an
+    // error the operator can read and an endless redirect.
+    returnedFromAuthorization = true;
 
     const url = new URL(window.location.href);
     url.searchParams.delete(auth.AUTH_RETURN_PARAM);
@@ -473,7 +480,7 @@ function mountSettings(root, configId) {
   }
 
   /** Re-read the authorisation verdict. Never throws: a failure is a banner, not a crash. */
-  async function refreshAuth() {
+  async function refreshAuth({ mayAutoStart = false } = {}) {
     try {
       access = await api.githubStatus(configId);
       authFailure = null;
@@ -481,6 +488,33 @@ function mountSettings(root, configId) {
       authFailure = error.message;
     }
     renderAuth();
+    if (mayAutoStart) void autoStartAuthorizeIfNeeded();
+  }
+
+  /**
+   * Start the authorisation for the operator instead of waiting to be asked.
+   *
+   * Authorising needs the operator's **browser** -- the token is a user-to-server one, so it
+   * depends on their github.com session and no server can obtain it -- but it does not need a
+   * decision: GitHub asks for consent once per user per app, and every authorisation after
+   * that is a silent redirect. A button the operator has to notice was therefore the wrong
+   * shape for the common case, and it was missed in a live walkthrough.
+   *
+   * **Three guards, and the loop is why.** An automatic redirect fired whenever the status
+   * reads unauthorised bounces the browser to GitHub and back forever when completion keeps
+   * failing -- the exact state a missing `secretsmanager:GetSecretValue` grant produced, where
+   * an error panel was the only useful outcome. So: never on a load that just completed a
+   * session, never more than once per configuration per tab (`auth.tryOnce`), and never when
+   * the status could not be read at all.
+   *
+   * The button stays rendered for what remains: a failed attempt, and re-authorising as a
+   * different GitHub account.
+   */
+  async function autoStartAuthorizeIfNeeded() {
+    if (returnedFromAuthorization) return;
+    if (authFailure || !access || access.authorized) return;
+    if (!auth.tryOnce("authorize", configId)) return;
+    await startAuthorize(false);
   }
 
   async function updateRuntime() {
@@ -588,9 +622,11 @@ function mountSettings(root, configId) {
         ui.el(
           "p",
           { class: "field-hint" },
-          "Authorising takes you to GitHub to approve this deployment's GitHub App for this " +
-            "repository, then brings you back here. The credential it issues is held by " +
-            "AgentCore Identity and never stored in this deployment.",
+          "Authorising starts on its own when a repository is new: it takes you to GitHub and " +
+            "brings you back here. GitHub asks for consent the first time only, so after that " +
+            "it completes without stopping you. Press the button if it did not start, or to " +
+            "authorise as a different GitHub account. The credential is held by AgentCore " +
+            "Identity and never stored in this deployment.",
         ),
       );
       return;
@@ -783,7 +819,9 @@ function mountSettings(root, configId) {
   // polling it would be a write probe against someone's repository every six seconds.
   // Completed before the first status read, so the panel's first render already reflects it
   // rather than showing "not authorised" and correcting itself a moment later.
-  void completeAuthorizationIfReturning().then(refreshAuth);
+  // `mayAutoStart` only on this first read. A `visibilitychange` refresh must not redirect a
+  // tab the operator has just come back to.
+  void completeAuthorizationIfReturning().then(() => refreshAuth({ mayAutoStart: true }));
   document.addEventListener("visibilitychange", onVisible);
   configs.load().then(render).catch(() => {
     // The settings page works without the cache -- it reads its own configuration

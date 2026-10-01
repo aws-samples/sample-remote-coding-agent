@@ -49,6 +49,13 @@ export const AUTH_RETURN_PARAM = "session_id";
 // place on purpose (`tests/test_web_console.py::test_the_token_store_is_session_scoped_and_named_once`).
 const KEY_DESTINATION = "rca.destination";
 
+// One-shot marks, per tab, so an automatic action cannot repeat. The GitHub authorisation is
+// started for the operator rather than waited for (`views/register.js`), and without a mark
+// an authorisation that keeps failing to complete would bounce the browser to GitHub and back
+// forever -- which is exactly the state a missing IAM grant produced once, where an error
+// panel was the only useful outcome.
+const KEY_TRIED_PREFIX = "rca.tried.";
+
 // Refresh two minutes before expiry rather than on the 401: a board holds several
 // requests in flight at once, and letting them all fail first turns one silent refresh
 // into five visible errors.
@@ -256,6 +263,19 @@ export function takeDestination() {
   const hash = tokenStore.getItem(KEY_DESTINATION) || "";
   tokenStore.removeItem(KEY_DESTINATION);
   return hash;
+}
+
+/** Has this tab already taken `action` for `subject`? Marks it if not.
+ *
+ * `false` the first time and `true` afterwards, so a caller can guard a redirect it starts on
+ * the operator's behalf. Per tab rather than per browser, because the thing it guards against
+ * is a loop inside one visit: a fresh tab should be willing to try again.
+ */
+export function tryOnce(action, subject) {
+  const key = `${KEY_TRIED_PREFIX}${action}.${subject}`;
+  if (tokenStore.getItem(key)) return false;
+  tokenStore.setItem(key, "1");
+  return true;
 }
 
 /** Forget the session here, then end it at the pool. Both halves matter: clearing only

@@ -636,10 +636,61 @@ def test_the_authorisation_panel_comes_before_everything_it_blocks() -> None:
 
     unauthorised = source.index("This repository is not authorised yet")
     button = source.index("[authorize]", unauthorised)
-    paragraph = source.index("Authorising takes you to GitHub", unauthorised)
+    paragraph = source.index("Authorising starts on its own", unauthorised)
     assert button < paragraph, (
         "in the unauthorised state the button has to come before the description of it, or "
         "the operator reads an explanation and then has to hunt for the control"
+    )
+
+
+def test_the_authorisation_starts_itself_and_cannot_loop() -> None:
+    """The console starts the authorisation rather than waiting to be asked -- and the guards
+    are the test, because the failure mode is worse than the problem it solves.
+
+    Authorising needs the operator's browser but not their decision: GitHub asks for consent
+    once per user per app, and every authorisation after that is a silent redirect. So the
+    happy path has no console button in it. An automatic redirect fired whenever the status
+    reads unauthorised, though, bounces the browser to GitHub and back **forever** when
+    completion keeps failing -- which is the exact state a missing
+    `secretsmanager:GetSecretValue` grant produced, where an error panel was the only useful
+    outcome.
+
+    Three guards, asserted individually because any one of them missing restores the loop:
+    never on a load that is finishing an authorisation, never twice for one configuration in
+    one tab, and never when the status could not be read.
+    """
+    source = (JS / "views" / "register.js").read_text(encoding="utf-8")
+    start = source.index("async function autoStartAuthorizeIfNeeded")
+    body = source[start : source.index("\n  }", start)]
+
+    assert "returnedFromAuthorization" in body, (
+        "a load that came back from GitHub must not start another authorisation, or a "
+        "completion that fails redirects forever instead of reporting itself"
+    )
+    assert "auth.tryOnce(" in body, (
+        "the attempt has to be one-shot per configuration per tab; without it a status that "
+        "stays unauthorised re-triggers on every read"
+    )
+    assert "authFailure" in body, (
+        "a status that could not be read is not evidence that the repository is "
+        "unauthorised, so it must not start a redirect"
+    )
+
+    # The return leg sets the flag before it can fail, or the guard does not hold.
+    complete = source.index("async function completeAuthorizationIfReturning")
+    flag = source.index("returnedFromAuthorization = true", complete)
+    first_await = source.index("await api.completeGitHubAuthorization", complete)
+    assert flag < first_await, (
+        "`returnedFromAuthorization` must be set before the completion call, so a completion "
+        "that throws still cannot be followed by a fresh redirect"
+    )
+
+    # And the periodic refresh must never redirect: only the first read may.
+    assert "refreshAuth({ mayAutoStart: true })" in source
+    assert source.count("mayAutoStart: true") == 1, (
+        "exactly one call site may start an authorisation -- the first read on mount. A "
+        "visibilitychange or poll refresh that could redirect would hijack a tab the operator "
+        "has just come back to."
     )
 
 

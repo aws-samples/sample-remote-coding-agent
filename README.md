@@ -66,11 +66,12 @@ The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI work
    select repositories**: that list bounds which repositories the agent can reach.
 
 4. **Register a disposable repository** with **+ Add repository**: the URL, Advanced folded,
-   no credential field. Then press **Authorise GitHub** on the settings page you land on. It
-   takes you to GitHub and brings you back to that same page, which finishes the authorisation
-   and confirms it by writing a throwaway branch and deleting it. If it reports that the app
-   cannot write here, the app is not installed on this repository and the panel links the fix —
-   installing and authorising are separate steps and both are required.
+   no credential field. The authorisation starts on its own — it takes you to GitHub and brings
+   you back, and GitHub asks for consent only the first time. The **GitHub access** panel
+   confirms it by writing a throwaway branch and deleting it. If that panel says the app cannot
+   write here, the app is **not installed** on this repository: installing and authorising are
+   separate grants, both required, and the panel links the fix. **Authorise GitHub** is there
+   to retry or to use a different GitHub account.
 
    Provisioning runs in parallel and takes **8–12 min** to reach `READY`. A task started
    sooner returns `409 ConfigurationNotReady`; one started before authorising returns
