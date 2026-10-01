@@ -30,7 +30,7 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 from conftest import FAKE_FINE_GRAINED_PAT, api_event
-from test_api_fakes import FakeAgentCore, install
+from test_api_fakes import FakeAgentCore, client_error, install
 from test_api_fakes import load_handlers as _load
 
 _URL = "https://github.com/owner/repo"
@@ -288,6 +288,45 @@ def test_an_unauthorised_repository_reports_itself_unauthorised(aws: Any) -> Non
     assert body["authorized"] is False
     assert body["canPush"] is None
     assert "not been authorised" in body["reason"]
+
+
+def test_a_validation_error_about_anything_else_is_not_reported_as_unauthorised(
+    aws: Any,
+) -> None:
+    """The fence on the translation, and the reason it is two conditions rather than one.
+
+    `resolve_token` turns "you must provide a ResourceOauth2ReturnUrl" into "not authorised",
+    because that is what the service says when it has no token and was not offered a way to
+    ask for one. But a **wrong provider name** arrives as the same error *code*, and reporting
+    that as an unauthorised repository would leave a misconfigured deployment looking like a
+    repository nobody had got round to authorising -- forever, with nothing to find.
+
+    So the message has to name the return URL. Anything else is re-raised and becomes a 500
+    carrying the vendor's own words, which is the safe direction to fail in: loud and
+    attributable rather than quiet and wrong.
+    """
+    common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
+    _seed(common)
+    data = FakeAgentCore(
+        "bedrock-agentcore",
+        errors={
+            "GetResourceOauth2Token": [
+                client_error(
+                    "ValidationException",
+                    "No credential provider found with name rca_github",
+                    operation="GetResourceOauth2Token",
+                )
+            ]
+        },
+    )
+    common.agentcore_data = lambda: data
+
+    response = configurations.github_status(_for(_CONFIG_ID, "GET", "/github-status"), None)
+    assert response["statusCode"] == 500, (
+        "an unrecognised ValidationException must not be flattened into `authorized: false`"
+    )
+    assert "authorized" not in _body(response)
 
 
 def test_an_authorised_repository_is_proved_by_a_write_and_not_a_read(

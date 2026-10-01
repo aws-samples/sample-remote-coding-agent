@@ -311,10 +311,20 @@ class FakeAgentCore:
         if operation == "GetResourceOauth2Token":
             user_id = str(kwargs["workloadIdentityToken"]).removeprefix("wat.")
             if self.authorized is not None and user_id not in self.authorized:
-                # The real shape of "not authorised": an `authorizationUrl` and **no**
-                # `accessToken`, not an error. Every caller in this repository branches on the
-                # absence of the token, so a fake that raised here would exercise a path the
-                # service never takes.
+                # Two different answers for "not authorised", and the fake has to model both
+                # because the callers do. Measured against the live service: with a
+                # `resourceOauth2ReturnUrl` it answers an `authorizationUrl` and no
+                # `accessToken`; **without** one it refuses outright, because the absence of a
+                # return URL means "do not start a flow" and there is no token to hand back.
+                # The fake used to model only the first, which is why a 500 on the most
+                # ordinary state a new repository is in reached a live deployment with the
+                # suite green.
+                if not kwargs.get("resourceOauth2ReturnUrl"):
+                    raise client_error(
+                        "ValidationException",
+                        "You must provide a ResourceOauth2ReturnUrl to proceed with this flow",
+                        operation=operation,
+                    )
                 return {
                     "authorizationUrl": f"https://github.com/login/oauth/authorize?state={user_id}"
                 }

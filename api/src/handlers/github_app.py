@@ -368,9 +368,25 @@ def resolve_token(config_id: str, *, return_url: str = "", force: bool = False) 
     an `authorizationUrl` when it does not, and asking "is it authorised?" separately would
     be a second round trip that could disagree with the first.
 
-    `return_url` is required by the API and must be one of the workload identity's
-    registered URLs. `force` re-authorises an identity that already has a token, which is
-    what the console's "Re-authorise" action needs.
+    **Omitting `return_url` is a read, and an unauthorised repository answers it with an
+    exception rather than an empty result.** The service refuses
+    `GetResourceOauth2Token` with `ValidationException: You must provide a
+    ResourceOauth2ReturnUrl to proceed with this flow` whenever it would have to *start* a
+    flow -- so the absence of a return URL does not mean "just tell me", it means "and do not
+    offer to fix it". Callers that only want to know (`configurations.github_status`,
+    `runs.queue_run`) pass none, and both of them want "not authorised" rather than a 500.
+    That is translated here rather than in each caller, because every caller that omits the
+    parameter needs the same translation and the one that forgets it answers 500 to the most
+    ordinary state a new repository is in.
+
+    A `ValidationException` whose message does not name the return URL is **re-raised**: a
+    wrong provider name arrives as the same error code, and silently reporting that as "not
+    authorised" would leave a misconfigured deployment looking like an unauthorised repository
+    forever. If the vendor rewords the message this stops matching and the failure is a loud
+    500 carrying their words, which is the safe direction to fail in.
+
+    `force` re-authorises an identity that already has a token, which is what the console's
+    "Re-authorise" action needs.
     """
     arguments: dict[str, Any] = {
         "workloadIdentityToken": workload_token(config_id),
@@ -382,11 +398,31 @@ def resolve_token(config_id: str, *, return_url: str = "", force: bool = False) 
         arguments["resourceOauth2ReturnUrl"] = return_url
     if force:
         arguments["forceAuthentication"] = True
-    answer = dict(_common.agentcore_data().get_resource_oauth2_token(**arguments))
+    try:
+        answer = dict(_common.agentcore_data().get_resource_oauth2_token(**arguments))
+    except ClientError as err:
+        if return_url or not _needs_a_return_url(err):
+            raise
+        LOG.info("configuration %s has no stored GitHub authorisation", config_id)
+        return {"accessToken": "", "authorizationUrl": ""}
     return {
         "accessToken": str(answer.get("accessToken") or ""),
         "authorizationUrl": str(answer.get("authorizationUrl") or ""),
     }
+
+
+def _needs_a_return_url(err: ClientError) -> bool:
+    """Whether this error is the service saying "there is no token and I would have to ask".
+
+    Both halves are the fence. The code alone is too broad -- a wrong provider name is also a
+    `ValidationException` -- and the message alone would match a reworded error about some
+    other parameter. `ReturnUrl` is matched case-insensitively and as a substring because the
+    sentence around it is the vendor's to change; the parameter name is theirs to keep.
+    """
+    error = err.response.get("Error", {})
+    if error.get("Code") != "ValidationException":
+        return False
+    return "returnurl" in str(error.get("Message") or "").lower()
 
 
 @handler
