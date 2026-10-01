@@ -172,9 +172,10 @@ cap, and does not cover every service. Monitor your actual account charges.
 [Budget configuration](infra/stacks/account_stack.py)
 
 Deregister every repository in the console **first** — settings → **Deregister**, 1-3 min each —
-and only then destroy the stacks. The other order orphans the runtime, the IAM role and the
-secret, which no stack owns and which keep costing money. Follow the
-[exact five-stack teardown commands](CLAUDE.md#tearing-a-fleet-down) for your prefix and region.
+then **Disconnect** on the GitHub App page, and only then destroy the stacks. The other order
+orphans the runtime, the IAM role, the memory and the credential provider, which no stack owns
+and which keep costing money. The GitHub App belongs to your GitHub account; delete it there.
+Follow the [exact five-stack teardown](CLAUDE.md#tearing-a-fleet-down) for your prefix and region.
 Stack deletion retains tables, the Cognito pool, access logs, bootstrap ECR images, and runtime
 log groups. Review the [retained-resource cleanup table](CLAUDE.md#what-deliberately-survives-a-destroy)
 before deleting them; some are the only history of your runs.
