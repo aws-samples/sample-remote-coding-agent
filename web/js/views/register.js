@@ -8,20 +8,21 @@
  *
  * Three rules this view exists to honour.
  *
- * 1. **The API is the only validator.** There is no URL grammar and no token shape check
- *    here, deliberately: `configurations._repository_from_url` accepts two forms and
- *    `_reject_classic_pat` refuses a whole family of tokens, and both answer with a
- *    sentence written for the operator. A second copy of either regex in this file would
- *    drift from the server's, and the drift would show up as a console refusing a URL the
- *    API would have taken. The `InvalidRepositoryUrl` / `ClassicTokenRejected` message is
- *    shown verbatim.
+ * 1. **The API is the only validator.** There is no URL grammar here, deliberately:
+ *    `configurations._repository_from_url` accepts two forms and answers with a sentence
+ *    written for the operator. A second copy of that regex in this file would drift from the
+ *    server's, and the drift would show up as a console refusing a URL the API would have
+ *    taken. The `InvalidRepositoryUrl` message is shown verbatim.
  * 2. **An emptied setting is `null`, not `""`.** `configurations.patch` REMOVEs on `null`,
  *    which puts `verifyCommand`, `setupCommand` or `defaultBranch` back to per-run
  *    detection, while a stored empty string is a *declared* "run nothing". Clearing a
  *    field in this form therefore sends `null` and the hint under it says so.
- * 3. **The token leaves this page immediately.** It is the one value in the system that
- *    cannot be read back, so the field is emptied as soon as the request is made and it is
- *    never held in a variable that outlives the call.
+ * 3. **No credential is ever typed here.** Registration takes a repository URL and nothing
+ *    else: the GitHub credential comes from this deployment's GitHub App through AgentCore
+ *    Identity, so what a repository needs after registering is an *authorisation*, which is
+ *    the panel at the bottom of its settings page. There is no token field in this file and
+ *    there must not be one -- a field that accepted a PAT would be storing a credential the
+ *    rest of the system has no place to put.
  */
 
 import * as activity from "../activity.js";
@@ -93,34 +94,6 @@ export function repositorySlug(value) {
   return match ? `${match[1]}/${match[2]}` : "";
 }
 
-// Where a token is made. The **classic** page, not the fine-grained one, and that is the
-// whole reason this link can prefill at all: `/settings/tokens/new` honours `scopes` and
-// `description` query parameters, while GitHub documents no parameters for
-// `/settings/personal-access-tokens/new` and ignores them. So a classic token arrives
-// pre-ticked and one click from Generate, where a fine-grained one is nine decisions in a
-// list of about fifty permissions.
-//
-// `repo` is the scope. The agent needs to read the tree, push a branch and open a pull
-// request; `repo` covers all three on a private repository, and `public_repo` is the tighter
-// choice when the repository is public -- the hint beside the link says so, because this URL
-// cannot know which it is.
-//
-// The trade is real and is stated in `README.md`: a classic token is not scoped to one
-// repository, so it reaches everything its owner can. That is why the fine-grained page is
-// still offered as the second link rather than dropped.
-const CLASSIC_TOKEN_PAGE = "https://github.com/settings/tokens/new";
-const FINE_GRAINED_TOKEN_PAGE = "https://github.com/settings/personal-access-tokens/new";
-
-export function tokenPageUrl(slug, { scope = "repo" } = {}) {
-  const description = slug ? `remote coding agent -- ${slug}` : "remote coding agent";
-  const query = new URLSearchParams({ scopes: scope, description });
-  return `${CLASSIC_TOKEN_PAGE}?${query}`;
-}
-
-export function fineGrainedTokenPageUrl() {
-  return FINE_GRAINED_TOKEN_PAGE;
-}
-
 export function mount(root, { configId }) {
   ui.empty(root);
   // The same module answers both routes, and each half is a plain `{destroy}` so the
@@ -143,69 +116,6 @@ function mountRegister(root) {
     spellcheck: "false",
     placeholder: "https://github.com/owner/repo",
   });
-  const tokenField = ui.el("input", {
-    type: "password",
-    autocomplete: "off",
-    spellcheck: "false",
-    "aria-label": "GitHub token",
-    placeholder: "github_pat_...",
-  });
-  // The link the token hint used to describe in prose. It tracks `urlField`, so by the time
-  // an operator reaches the token field the target already names their repository -- which is
-  // the value they would otherwise have to carry from one tab to the other and re-select from
-  // a list.
-  // `field-link`, NOT `field-hint`: a class beats an element in CSS, so `.field-hint`'s
-  // `--ink-faint` overrode `a`'s `--accent` and the anchor rendered as 12px grey text
-  // indistinguishable from the paragraph above it. It was there and nobody could see it,
-  // which for a link is the same as not being there.
-  // `field-link`, NOT `field-hint`: a class beats an element in CSS, so `.field-hint`'s
-  // `--ink-faint` overrode `a`'s `--accent` and the anchor rendered as 12px grey text
-  // indistinguishable from the paragraph above it. It was there and nobody could see it,
-  // which for a link is the same as not being there.
-  const tokenLink = ui.el("a", {
-    class: "field-link",
-    href: tokenPageUrl(""),
-    target: "_blank",
-    // `noopener` because this opens a page where a credential is about to be created.
-    rel: "noopener noreferrer",
-  });
-  const tokenScope = ui.el("span", { class: "field-hint" });
-  // The tighter option, offered second rather than dropped: it cannot be prefilled, but it is
-  // the only shape that limits a leaked token to one repository.
-  const fineGrainedLink = ui.el("a", {
-    class: "field-link",
-    href: fineGrainedTokenPageUrl(),
-    target: "_blank",
-    rel: "noopener noreferrer",
-    text: "Or create a fine-grained token, scoped to one repository (not prefillable)",
-  });
-
-  function refreshTokenLink() {
-    const slug = repositorySlug(urlField.value);
-    tokenLink.setAttribute("href", tokenPageUrl(slug));
-    tokenLink.textContent = slug
-      ? `Create a token for ${slug} on GitHub -- scope prefilled`
-      : "Create a token on GitHub -- scope prefilled";
-    ui.empty(tokenScope);
-    ui.append(tokenScope, [
-      "That page opens with ",
-      ui.el("strong", {}, "repo"),
-      " already ticked, which is what the agent needs to read the tree, push a branch and " +
-        "open a pull request. Set an expiry and press Generate. For a ",
-      ui.el("strong", {}, "public"),
-      " repository ",
-      ui.el("strong", {}, "public_repo"),
-      " alone is enough -- untick ",
-      ui.el("strong", {}, "repo"),
-      " and tick that instead. A classic token is ",
-      ui.el("strong", {}, "not"),
-      " limited to one repository: it reaches every repository its owner can, so use an " +
-        "account that owns nothing you mind. The fine-grained link below is the way to " +
-        "limit it to this repository alone.",
-    ]);
-  }
-  urlField.addEventListener("input", refreshTokenLink);
-  refreshTokenLink();
 
   const optional = {};
   for (const spec of EDITABLE) {
@@ -225,9 +135,9 @@ function mountRegister(root) {
 
   function renderFailure(error) {
     ui.empty(notes);
-    // Verbatim. `InvalidRepositoryUrl` names both accepted forms and
-    // `ClassicTokenRejected` explains why a classic PAT cannot be scoped to one
-    // repository -- wording this view could only make worse.
+    // Verbatim. `InvalidRepositoryUrl` names both accepted forms, `TokenNotAccepted` says
+    // why a credential is not wanted here, and `GitHubAppNotConnected` names the step that
+    // has not been done -- wording this view could only make worse.
     notes.append(
       ui.banner("bad", error.message, [
         // `RepositoryAlreadyRegistered` names the configuration that holds it, and the
@@ -239,20 +149,24 @@ function mountRegister(root) {
               "Open that repository's board",
             )
           : null,
+        // The one refusal with a page to go to rather than a value to change.
+        error.code === "GitHubAppNotConnected"
+          ? ui.el("a", { class: "btn btn-small", href: "#/connect" }, "Connect GitHub")
+          : null,
       ]),
     );
   }
 
   async function register() {
     const repositoryUrl = urlField.value.trim();
-    if (!repositoryUrl || !tokenField.value) {
+    if (!repositoryUrl) {
       // Presence, not shape: the API refuses an absent field with `MissingField` and a
       // round trip to be told a field is empty is a request that did not need making.
-      ui.toast("a repository URL and a GitHub token are both required", "warn");
+      ui.toast("a repository URL is required", "warn");
       return;
     }
 
-    const body = { repositoryUrl, githubToken: tokenField.value };
+    const body = { repositoryUrl };
     for (const spec of EDITABLE) {
       const value = optional[spec.name].value.trim();
       // Absent rather than empty, matching `configurations.create`: an omitted field falls
@@ -263,18 +177,18 @@ function mountRegister(root) {
     ui.setRefusal(submit, "the registration is already in flight");
     try {
       const config = await api.createConfiguration(body);
-      // Out of the page as soon as it is sent, and never held anywhere else.
-      tokenField.value = "";
       configs.invalidate();
       await configs.load().catch(() => []);
       ui.toast(
-        `${config.repository} is registered. Its runtime, execution role and secret are ` +
-          "provisioning; that takes about ten minutes and the sidebar shows the status.",
+        `${config.repository} is registered. Its runtime, execution role and memory are ` +
+          "provisioning, which takes 8-12 minutes. Authorise it on its settings page while " +
+          "you wait -- the two are independent.",
         "good",
       );
-      // Straight to the board, which is where the status is watched from. Registration
-      // answers 201 with the item, so the id is known without a second read.
-      window.location.hash = boardHash(config.configId);
+      // Straight to the settings page rather than the board, because there is one action
+      // left to do and that is where it is. Registration answers 201 with the item, so the
+      // id is known without a second read.
+      window.location.hash = `#/register/${encodeURIComponent(config.configId)}`;
     } catch (error) {
       renderFailure(error);
     } finally {
@@ -295,27 +209,22 @@ function mountRegister(root) {
             "pointing it at something you mind receiving pull requests. The API is the only " +
             "validator, so whichever form it accepts is the form this field accepts.",
         ),
-        // The link comes FIRST, before any prose. It was below a three-line paragraph and
-        // went unseen -- an operator reading top to bottom meets the explanation before the
-        // thing that acts on it, which is the wrong way round for the one control here that
-        // leaves the page.
-        ui.el("label", { class: "field" }, [
-          ui.el("span", { class: "field-label" }, "GitHub token"),
-          tokenField,
-          tokenLink,
-          tokenScope,
-          fineGrainedLink,
+        // Said here rather than discovered later: an operator who expects to paste a token
+        // looks for the field, and its absence needs an explanation at the point they look.
+        ui.banner("info", "No token to paste.", [
           ui.el(
-            "span",
-            { class: "field-hint" },
-            "A classic token is refused -- it cannot be scoped to one repository at all. This " +
-              "one goes straight into Secrets Manager and is never readable again, not by this " +
-              "console and not by the API.",
+            "p",
+            {},
+            "This deployment authenticates through its GitHub App, so registering takes the " +
+              "repository URL and nothing else. Two things have to be true before a run can " +
+              "push: the app must be installed on this repository, and this repository must " +
+              "be authorised. Both are one click each on the next page.",
           ),
+          ui.el("a", { class: "btn btn-small", href: "#/connect" }, "The GitHub App"),
         ]),
         // The three optional fields are folded away, and that is the whole point: they were
-        // presented at the same level as the two required ones, so a first-time operator read
-        // five inputs to fill and hunted for values that are better left empty. `<details>` and
+        // presented at the same level as the required one, so a first-time operator read
+        // four inputs to fill and hunted for values that are better left empty. `<details>` and
         // not a scripted toggle -- it needs no JavaScript, so it cannot get out of step with
         // `ui.setRefusal`, and it survives the no-inline CSP with nothing added.
         ui.el("details", { class: "field-group" }, [
@@ -336,8 +245,6 @@ function mountRegister(root) {
 
   return {
     destroy() {
-      // No timers here, so teardown is just the DOM -- and emptying it is also what takes
-      // the token field out of the document.
       ui.empty(root);
     },
   };
@@ -377,14 +284,21 @@ function mountSettings(root, configId) {
   }
   const save = ui.action("Save settings", { class: "btn btn-primary", onClick: saveSettings });
 
-  const rotateField = ui.el("input", {
-    type: "password",
-    autocomplete: "off",
-    spellcheck: "false",
-    "aria-label": "New GitHub token",
-    placeholder: "github_pat_...",
+  // The authorisation panel's own state, read from `GET .../github-status` rather than from
+  // the configuration item. It is deliberately not stored on the item: the token vault is
+  // the only authority on whether a repository is authorised, and a cached flag would be a
+  // second, staler answer to the same question.
+  let auth = null;
+  let authFailure = null;
+  const authHost = ui.el("div", { class: "stack" });
+  const authorize = ui.action("Authorise GitHub", {
+    class: "btn btn-primary",
+    onClick: () => startAuthorize(false),
   });
-  const rotate = ui.action("Rotate token", { class: "btn", onClick: rotateToken });
+  const reauthorize = ui.action("Re-authorise", {
+    class: "btn",
+    onClick: () => startAuthorize(true),
+  });
 
   const runtime = ui.action("Update runtime", {
     class: "btn btn-secondary",
@@ -409,7 +323,6 @@ function mountSettings(root, configId) {
       config.agentRuntimeVersion,
       config.memoryId,
       config.containerUri,
-      config.secretArn,
       config.updatedAt,
     ].join("|");
   }
@@ -467,25 +380,50 @@ function mountSettings(root, configId) {
     }
   }
 
-  async function rotateToken() {
-    if (!rotateField.value) {
-      ui.toast("paste the new token into the field first", "warn");
-      return;
-    }
+  /**
+   * Start the 3LO leg, or report that it is already done.
+   *
+   * The authorisation URL is opened in a **new tab** rather than navigating this one: the
+   * operator comes back to a page that is still here and still polling, and this tab is the
+   * one that detects the result. It is also single-use and expires in ten minutes, so it is
+   * fetched at click time and never held.
+   *
+   * `force` is the Re-authorise path -- the vault answers an already-authorised id with a
+   * token and no URL, so without it there is no way to replace an authorisation made by the
+   * wrong GitHub account.
+   */
+  async function startAuthorize(force) {
+    const button = force ? reauthorize : authorize;
+    ui.setRefusal(button, "asking GitHub for an authorisation URL");
     try {
-      await api.rotateToken(configId, rotateField.value);
-      rotateField.value = "";
-      ui.toast(
-        "a new version of the secret is stored, and the next run reads it. The runtime, " +
-          "the execution role and the secret's ARN are unchanged, so nothing has to be " +
-          "reprovisioned.",
-        "good",
-      );
+      const answer = await api.authorizeGitHub(configId, { force });
+      if (answer.authorized) {
+        ui.toast("this repository is already authorised.", "good");
+      } else {
+        window.open(answer.authorizationUrl, "_blank", "noopener,noreferrer");
+        ui.toast(
+          "GitHub is open in a new tab. Approve it there, then come back -- this page " +
+            "notices on its own.",
+          "info",
+        );
+      }
     } catch (error) {
-      // `ClassicTokenRejected` again, and `NoSecret` for a configuration whose
-      // registration failed before the secret was written. Both sentences are the API's.
       ui.toast(error.message, "bad");
+    } finally {
+      ui.setRefusal(button, null);
+      await refreshAuth();
     }
+  }
+
+  /** Re-read the authorisation verdict. Never throws: a failure is a banner, not a crash. */
+  async function refreshAuth() {
+    try {
+      auth = await api.githubStatus(configId);
+      authFailure = null;
+    } catch (error) {
+      authFailure = error.message;
+    }
+    renderAuth();
   }
 
   async function updateRuntime() {
@@ -560,6 +498,90 @@ function mountSettings(root, configId) {
     }
   }
 
+  /**
+   * The GitHub access panel: three states, each with exactly one action.
+   *
+   * The states are not cosmetic -- they are the three ways this can be wrong, and they have
+   * different fixes. **Not authorised** is fixed here, by authorising. **Authorised but
+   * cannot push** means the app is not installed on this repository, which is fixed on
+   * GitHub and nowhere else -- so that case carries GitHub's own refusal and the install
+   * link. **Authorised and can push** is the finished state and says so plainly, because
+   * "nothing on this panel" reads as "something is still missing".
+   *
+   * `canPush === null` is the fourth, honest case: GitHub could not be reached, so the panel
+   * says the check did not run rather than implying a verdict.
+   */
+  function renderAuth() {
+    ui.empty(authHost);
+    if (authFailure) {
+      authHost.append(ui.banner("bad", `could not read the GitHub status: ${authFailure}`));
+      return;
+    }
+    if (!auth) {
+      authHost.append(ui.el("p", { class: "field-hint" }, "Checking the GitHub credential…"));
+      return;
+    }
+    if (!auth.authorized) {
+      authHost.append(
+        ui.banner("warn", auth.reason || "this repository is not authorised yet"),
+        ui.el(
+          "p",
+          {},
+          "Authorising opens GitHub in a new tab and asks you to approve this deployment's " +
+            "GitHub App once for this repository. The credential it issues is held by " +
+            "AgentCore Identity, refreshed automatically, and never stored here. Runs are " +
+            "refused until it is done.",
+        ),
+        ui.el("div", { class: "row" }, [authorize]),
+      );
+      return;
+    }
+    if (auth.canPush === false) {
+      authHost.append(
+        ui.banner("bad", "Authorised, but the app cannot write to this repository."),
+        ui.el(
+          "p",
+          {},
+          "That almost always means the GitHub App is not installed on this repository. " +
+            "Installing and authorising are separate steps and both are needed.",
+        ),
+        ui.el("p", { class: "field-hint mono" }, `GitHub says: ${auth.reason || "--"}`),
+        ui.el("div", { class: "row" }, [
+          auth.installUrl
+            ? ui.el(
+                "a",
+                {
+                  class: "btn btn-primary",
+                  href: auth.installUrl,
+                  target: "_blank",
+                  rel: "noopener noreferrer",
+                },
+                "Install the app on this repository",
+              )
+            : null,
+          reauthorize,
+        ]),
+      );
+      return;
+    }
+    authHost.append(
+      ui.banner(
+        auth.canPush === null ? "warn" : "good",
+        auth.canPush === null
+          ? "Authorised. GitHub could not be reached, so the write check did not run."
+          : "Authorised, and a write to this repository was confirmed.",
+      ),
+      ui.el(
+        "p",
+        { class: "field-hint" },
+        "Re-authorise only to change which GitHub account the agent acts as. Deregistering " +
+          "this repository ends its authorisation; Disconnect on the GitHub App page ends " +
+          "every repository's at once.",
+      ),
+      ui.el("div", { class: "row" }, [reauthorize]),
+    );
+  }
+
   function renderFacts() {
     ui.empty(facts);
     if (!config) return;
@@ -585,9 +607,6 @@ function mountSettings(root, configId) {
           : "none: registered before memory, or provisioning did not create one",
       ),
       ...kv("Container", ui.el("span", { class: "mono truncate" }, config.containerUri || "--")),
-      // The ARN and not the token: the secret is never readable, and its ARN is what the
-      // execution role's inline policy names.
-      ...kv("Secret", ui.el("span", { class: "mono truncate" }, config.secretArn || "--")),
       ...kv("Updated", ui.relTime(config.updatedAt)),
     );
   }
@@ -607,7 +626,7 @@ function mountSettings(root, configId) {
       deregister,
       status === "DELETING"
         ? `${name()} is already being deregistered; the provisioner removes the ` +
-            "configuration when the runtime, the role and the secret are gone."
+            "configuration when the runtime, the memory and the role are gone."
         : null,
     );
   }
@@ -671,18 +690,7 @@ function mountSettings(root, configId) {
         ui.el("div", { class: "row" }, [save]),
       ]),
     ]),
-    ui.panel("GitHub token", [
-      ui.el("div", { class: "form" }, [
-        field(
-          "New token",
-          rotateField,
-          "rotation writes a new version of the same secret, so the ARN the execution " +
-            "role names does not change. The old version is not deleted here -- do that " +
-            "in GitHub by revoking the token you replaced.",
-        ),
-        ui.el("div", { class: "row" }, [rotate]),
-      ]),
-    ]),
+    ui.panel("GitHub access", [authHost]),
     ui.panel("Runtime", [
       ui.el("p", { class: "field-hint" }, [
         "An update re-reads the intended runtime -- container image, environment, network " +
@@ -705,14 +713,29 @@ function mountSettings(root, configId) {
   // `immediate` read is the load, so there is no second request for the same item.
   seed({ force: true });
   render();
+  renderAuth();
+  // Read once on mount and then only when something could have changed it -- a click on
+  // Authorise, or this tab regaining focus after the operator came back from GitHub. It is
+  // deliberately **not** on the six-second poll: the check makes three calls to GitHub, so
+  // polling it would be a write probe against someone's repository every six seconds.
+  void refreshAuth();
+  document.addEventListener("visibilitychange", onVisible);
   configs.load().then(render).catch(() => {
     // The settings page works without the cache -- it reads its own configuration
     // directly, and only the pre-first-answer name comes from the list.
   });
 
+  function onVisible() {
+    // The return leg from the authorisation tab. The operator approves on GitHub, closes
+    // that tab and this one becomes visible again -- which is the moment the vault's answer
+    // has changed, and the only signal this page gets that it has.
+    if (document.visibilityState === "visible") void refreshAuth();
+  }
+
   return {
     destroy() {
       poll.stop();
+      document.removeEventListener("visibilitychange", onVisible);
       ui.empty(root);
     },
   };

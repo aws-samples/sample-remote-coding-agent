@@ -1,10 +1,14 @@
-"""`/configurations`: registration, the closed patch allow-list, and token rotation.
+"""`/configurations`: registration, the closed patch allow-list, and authorisation.
 
-Registration is the one route that writes a credential, so most of what is pinned here
-is about the token: that a shape outside the allowlist is refused offline with the
-reason, that a token which *reads* but cannot push is refused in GitHub's own words, that
-the value reaches neither the item nor the response nor a log line, and that rotation
-writes a new *version* of the one secret the execution role is allowed to read.
+Registration writes **no credential at all** -- one GitHub App serves the whole deployment
+and AgentCore Identity's token vault holds its credentials -- so what is pinned here is the
+shape that replaced it: that a `githubToken` is refused rather than quietly ignored, that
+registering against a deployment with no GitHub App is refused before anything is written,
+and that `github_status` reaches a verdict by *writing* to the repository rather than
+reading from it. The read-is-not-evidence lesson carried over intact and got worse: with a
+GitHub App, `GET /repos/{owner}/{repo}` reports `push=True` for a public repository the app
+was never installed on, because that field describes the **user's** rights and not the
+token's.
 
 Handler modules build their clients at import, so `_load` reloads them inside `mock_aws`
 -- see `test_api_fakes.load_handlers`. `provisioner` is reloaded first because
@@ -25,23 +29,19 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
-from conftest import (
-    FAKE_APP_INSTALLATION_PAT,
-    FAKE_APP_REFRESH_PAT,
-    FAKE_APP_USER_PAT,
-    FAKE_CLASSIC_HEX_PAT,
-    FAKE_CLASSIC_PREFIXED_PAT,
-    FAKE_FINE_GRAINED_PAT,
-    FAKE_FINE_GRAINED_REPLACEMENT_PAT,
-    FAKE_OAUTH_PAT,
-    api_event,
-)
+from conftest import FAKE_FINE_GRAINED_PAT, api_event
 from test_api_fakes import FakeAgentCore, install
 from test_api_fakes import load_handlers as _load
 
 _URL = "https://github.com/owner/repo"
-_TOKEN = FAKE_FINE_GRAINED_PAT
+# Imported and asserted in exactly one place: `create` refuses a body carrying a token, so
+# the suite needs a value shaped like the thing an operator would try to paste.
+_REFUSED_PAT = FAKE_FINE_GRAINED_PAT
 _CONFIG_ID = "cfg_0123456789ab"
+# What the vault hands back for `_CONFIG_ID`. `FakeAgentCore` answers
+# `GetResourceOauth2Token` with `ghu_<userId>`, and `ghu_` is the real prefix of a GitHub
+# App's user-to-server token -- which is what the 3LO leg issues.
+_VAULT_TOKEN = f"ghu_{_CONFIG_ID}"
 # A realistic memory id, and the length is load-bearing: botocore's own `memoryId` shape has
 # a minimum of 12 characters and `FakeAgentCore` validates against it, so a short stand-in
 # would raise a `ParamValidationError` inside the fake before any assertion here ran.
@@ -105,9 +105,6 @@ def _seed(common: Any, **overrides: Any) -> dict[str, Any]:
         "status": "READY",
         "statusReason": "",
         "verifyCommand": "make test",
-        "secretArn": (
-            f"arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:rca/github/{_CONFIG_ID}-AbCdEf"
-        ),
         "createdAt": "2026-01-01T00:00:00.000Z",
         "updatedAt": "2026-01-01T00:00:00.000Z",
     }
@@ -121,10 +118,21 @@ def _provision_messages(aws: Any) -> list[dict[str, Any]]:
     return [json.loads(message["Body"]) for message in received.get("Messages", [])]
 
 
-def _register(
-    configurations: Any, *, url: str = _URL, token: str = _TOKEN, **extra: Any
-) -> dict[str, Any]:
-    body = {"repositoryUrl": url, "githubToken": token, **extra}
+def _connect(common: Any, *, slug: str = "rca-coding-agent-abc123") -> None:
+    """Make `github_app.is_connected()` true, without going through the connect flow.
+
+    The sentinel item is the whole of "a GitHub App is connected", so seeding it is both the
+    cheapest setup and an assertion in itself: if `is_connected` ever starts reading
+    something else, every registration test in this file fails at once rather than one
+    carefully-written test failing alone.
+    """
+    common.config_table.put_item(
+        Item={"configId": "rca:settings", "appSlug": slug, "appId": "5143354"}
+    )
+
+
+def _register(configurations: Any, *, url: str = _URL, **extra: Any) -> dict[str, Any]:
+    body = {"repositoryUrl": url, **extra}
     return configurations.create(api_event("POST", "/configurations", body=body), None)
 
 
@@ -147,6 +155,7 @@ def _memory_client(monkeypatch: pytest.MonkeyPatch, common: Any, **kwargs: Any) 
 
 def test_create_registers_the_repository_and_queues_the_provisioner(aws: Any) -> None:
     common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
     response = _register(configurations, verifyCommand="make test")
     assert response["statusCode"] == 201
 
@@ -155,7 +164,10 @@ def test_create_registers_the_repository_and_queues_the_provisioner(aws: Any) ->
     assert body["status"] == "PENDING"
     assert body["verifyCommand"] == "make test"
     assert body["configId"].startswith("cfg_")
-    assert body["secretArn"]
+    # No `secretArn`, and the absence is the assertion: registration creates no credential
+    # of any kind. `_PUBLIC_FIELDS` is a closed allow-list, so a key reappearing here would
+    # mean something started storing one again.
+    assert "secretArn" not in body
 
     stored = common.config_table.get_item(Key={"configId": body["configId"]})["Item"]
     assert stored["repositoryUrl"] == _URL
@@ -168,6 +180,7 @@ def test_an_absent_optional_command_stays_absent_rather_than_empty(aws: Any) -> 
     """The three editable fields fall back to per-run detection when they are absent; a
     stored empty string is a declared "run nothing" and means something else."""
     common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
     body = _body(_register(configurations))
     stored = common.config_table.get_item(Key={"configId": body["configId"]})["Item"]
     assert "verifyCommand" not in stored
@@ -178,7 +191,8 @@ def test_an_absent_optional_command_stays_absent_rather_than_empty(aws: Any) -> 
     "url", ["https://github.com/owner/repo.git", "git@github.com:owner/repo.git"]
 )
 def test_both_clone_url_forms_resolve_to_the_owner_repo_slug(aws: Any, url: str) -> None:
-    _common, _provisioner, configurations = _load("provisioner", "configurations")
+    common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
     assert _body(_register(configurations, url=url))["repository"] == "owner/repo"
 
 
@@ -201,147 +215,141 @@ def test_an_unrecognised_repository_url_names_the_accepted_forms(aws: Any, url: 
     assert "git@github.com:owner/repo.git" in body["message"]
 
 
-@pytest.mark.parametrize(
-    "token",
-    [
-        FAKE_CLASSIC_PREFIXED_PAT,
-        # A pre-2021 classic token: bare 40 hex characters, no prefix at all.
-        FAKE_CLASSIC_HEX_PAT,
-    ],
-)
-def test_a_classic_pat_is_accepted(aws: Any, github: _FakeGitHub, token: str) -> None:
-    """A classic PAT registers, and that is a deliberate trade rather than an oversight.
+def test_a_body_carrying_a_token_is_refused_rather_than_ignored(aws: Any) -> None:
+    """Dropping it silently is the failure this prevents.
 
-    It cannot be scoped to one repository, so a stolen one reaches everything its owner can.
-    What bought the change is setup churn: three decisions to create one against roughly nine
-    for a fine-grained token, and people were giving up before they saw the agent run. The
-    bound is stated in `README.md` -- a dedicated, disposable account -- which is the same
-    bound this system already relies on for AWS.
-
-    The live push check still runs, so an under-permissioned classic token is still caught in
-    milliseconds rather than inside a container.
+    An operator -- or a script, or an older copy of the MCP plugin -- still sending a PAT has
+    to be told it is not used. Ignored, they would believe a credential was stored and then be
+    unable to explain the `GitHubNotAuthorized` on their first task. The message names the
+    route that *is* the credential step.
     """
     common, _provisioner, configurations = _load("provisioner", "configurations")
-    response = _register(configurations, token=token)
-    assert response["statusCode"] == 201, _body(response)
-    stored = common.config_table.scan()["Items"]
-    assert len(stored) == 1
-    # It was proved pushable before it was stored, exactly as a fine-grained one is.
-    assert github.calls, "the live push probe must run for a classic token too"
-
-
-@pytest.mark.parametrize(
-    "token",
-    [
-        # GitHub App installation and user-to-server tokens, and an OAuth user token. All
-        # refused for the same non-security reason: they expire an hour after issue and
-        # nothing here refreshes one, so accepting one moves the failure into a container an
-        # hour later instead of reporting it now.
-        FAKE_APP_INSTALLATION_PAT,
-        FAKE_APP_USER_PAT,
-        FAKE_APP_REFRESH_PAT,
-        FAKE_OAUTH_PAT,
-    ],
-)
-def test_a_token_that_expires_in_an_hour_is_refused_with_the_reason(
-    aws: Any, github: _FakeGitHub, token: str
-) -> None:
-    """The refusal has to say *why*, or the operator retries with the same class of token."""
-    common, _provisioner, configurations = _load("provisioner", "configurations")
-    response = _register(configurations, token=token)
+    _connect(common)
+    response = _register(configurations, githubToken=_REFUSED_PAT)
     assert response["statusCode"] == 400
 
     body = _body(response)
-    assert body["error"] == "ExpiringTokenRejected"
-    assert "expires an hour later" in body["message"]
-    assert "github_pat_" in body["message"]
-    # Nothing was written on the way to the refusal, and nothing was asked of GitHub: the
-    # shape check is offline and comes first.
-    assert common.config_table.scan()["Items"] == []
-    assert common.secrets.list_secrets()["SecretList"] == []
-    assert github.calls == []
+    assert body["error"] == "TokenNotAccepted"
+    assert "github-authorize" in body["message"]
+    # Nothing was written on the way to the refusal, and the token is not echoed back.
+    assert [item["configId"] for item in common.config_table.scan()["Items"]] == ["rca:settings"]
+    assert _REFUSED_PAT not in response["body"]
 
 
-@pytest.mark.parametrize(
-    ("token", "error"),
-    [
-        # An App installation token: refused for its one-hour expiry, which there is no
-        # refresh path for.
-        (FAKE_APP_INSTALLATION_PAT, "ExpiringTokenRejected"),
-        ("xoxb-slack-not-github-000000", "UnsupportedTokenType"),
-        ("glpat-ABCDEFGHIJKLMNOPQRST", "UnsupportedTokenType"),
-        ("just-a-string-someone-pasted", "UnsupportedTokenType"),
-    ],
-)
-def test_a_token_outside_the_supported_shape_is_refused_without_a_network_call(
-    aws: Any, github: _FakeGitHub, token: str, error: str
+def test_registering_without_a_github_app_is_refused_before_anything_is_written(
+    aws: Any,
 ) -> None:
-    """The allowlist half. A denylist admits every token type nobody thought of, and each
-    of those is discovered 25 minutes later inside a container -- so the gate is
-    `github_pat_...` and everything else is refused here, offline, naming what is
-    supported."""
+    """A repository registered against a deployment with no GitHub App can never be
+    authorised, so it would provision a runtime for ten minutes and then be useless. Refused
+    where the operator is, naming the step they have not done."""
     common, _provisioner, configurations = _load("provisioner", "configurations")
-    response = _register(configurations, token=token)
-    assert response["statusCode"] == 400
-    assert _body(response)["error"] == error
-    assert "github_pat_" in _body(response)["message"]
-    # Offline: the shape check runs before the probe, so a token this shape can be refused
-    # with GitHub unreachable, and a registration attempt costs GitHub nothing.
-    assert github.calls == []
-    assert common.config_table.scan()["Items"] == []
-    assert common.secrets.list_secrets()["SecretList"] == []
-
-
-def test_a_token_that_reads_but_cannot_push_is_refused_in_githubs_own_words(
-    aws: Any, github: _FakeGitHub
-) -> None:
-    """The headline regression, and the fact that cost four round trips to learn: passing
-    the read check is not evidence. `GET /commits` answers 200 for a token with no
-    `Contents` permission, and only the ref creation says no -- in GitHub's own words,
-    which is what reaches the operator."""
-    common, _provisioner, configurations = _load("provisioner", "configurations")
-    github.create_ref = (
-        403,
-        {"message": "Resource not accessible by personal access token"},
-        {"x-accepted-github-permissions": "contents=write"},
-    )
     response = _register(configurations)
-    assert response["statusCode"] == 400
+    assert response["statusCode"] == 409
 
     body = _body(response)
-    assert body["error"] == "TokenCannotPush"
-    assert "Resource not accessible by personal access token" in body["message"]
-    assert body["acceptedPermissions"] == "contents=write"
-    assert body["repository"] == "owner/repo"
-    # Nothing was written on the way to the refusal.
+    assert body["error"] == "GitHubAppNotConnected"
+    assert "connect one first" in body["message"]
     assert common.config_table.scan()["Items"] == []
-    assert common.secrets.list_secrets()["SecretList"] == []
-    # The read really did succeed first: this is the whole reason the probe is a write.
-    assert [call["method"] for call in github.calls] == ["GET", "POST"]
+    assert _provision_messages(aws) == []
 
 
-def test_the_write_probe_creates_a_throwaway_ref_and_deletes_it(
+def test_registration_asks_github_for_nothing_at_all(aws: Any, github: _FakeGitHub) -> None:
+    """Registration used to spend three round trips on GitHub proving a token could push.
+
+    With no token to prove anything about, it spends none -- which is the point: the check
+    moved to `github_status`, where it can be re-run after the operator installs the app,
+    instead of being a one-shot gate at the moment they have the least information.
+    """
+    common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
+    assert _register(configurations)["statusCode"] == 201
+    assert github.calls == []
+
+
+def test_an_unauthorised_repository_reports_itself_unauthorised(aws: Any) -> None:
+    """The vault answers an unauthorised `userId` with an authorization URL and no token, and
+    that is a *state* rather than a fault -- so the route is a 200 describing it, not a 4xx.
+
+    `canPush` is `None` and not `False`: nothing was asked of GitHub, so there is no verdict
+    to report, and a `False` here would send the operator to the install page for a problem
+    they do not have.
+    """
+    common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
+    _seed(common)
+    # An empty authorised set: this configuration is the one the vault does not know.
+    data = FakeAgentCore("bedrock-agentcore")
+    data.authorized = set()
+    common.agentcore_data = lambda: data
+
+    response = configurations.github_status(_for(_CONFIG_ID, "GET", "/github-status"), None)
+    assert response["statusCode"] == 200
+    body = _body(response)
+    assert body["authorized"] is False
+    assert body["canPush"] is None
+    assert "not been authorised" in body["reason"]
+
+
+def test_an_authorised_repository_is_proved_by_a_write_and_not_a_read(
     aws: Any, github: _FakeGitHub
 ) -> None:
-    """The happy path, in three calls: a commit to branch from, a ref created from it, and
-    the same ref removed again."""
-    _common, _provisioner, configurations = _load("provisioner", "configurations")
-    assert _register(configurations)["statusCode"] == 201
+    """The read-is-not-evidence lesson, carried over and made worse by the GitHub App.
+
+    `GET /repos/{owner}/{repo}` reports `push=True` for a public repository the app was never
+    installed on, because that field is the **user's** rights and not the token's -- measured
+    against a live app. So the verdict is still a throwaway ref created and deleted, and the
+    three calls are asserted in order.
+    """
+    common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
+    _seed(common)
+
+    response = configurations.github_status(_for(_CONFIG_ID, "GET", "/github-status"), None)
+    assert response["statusCode"] == 200
+    body = _body(response)
+    assert body["authorized"] is True
+    assert body["canPush"] is True
+    # No install link on the happy path: one beside a working repository invites an operator
+    # to change something that is already right.
+    assert body["installUrl"] is None
 
     assert [call["method"] for call in github.calls] == ["GET", "POST", "DELETE"]
-    assert github.calls[0]["url"].endswith("/repos/owner/repo/commits?per_page=1")
     created = github.calls[1]["payload"]
     assert created["ref"].startswith("refs/heads/rca-write-probe-")
-    assert created["sha"] == "a" * 40
-    # The *same* generated name, or the probe leaves a ref behind on every registration.
     assert github.calls[2]["url"].endswith(f"heads/{created['ref'].removeprefix('refs/heads/')}")
 
 
-def test_an_unreachable_github_does_not_fail_registration(
-    aws: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_an_authorised_app_that_is_not_installed_here_says_so_and_links_the_fix(
+    aws: Any, github: _FakeGitHub
 ) -> None:
-    """The deliberate degrade: a control plane that cannot register a repository while
-    GitHub has an incident is worse than one that finds out late."""
+    """The single most likely mistake in the whole setup: authorised account-wide, not
+    installed on this repository. GitHub's own words for it are "Resource not accessible by
+    integration", and the fix is on GitHub -- so the response carries both the sentence and
+    the install URL."""
+    common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common, slug="rca-coding-agent-89c770")
+    _seed(common)
+    github.create_ref = (
+        403,
+        {"message": "Resource not accessible by integration"},
+        {"x-accepted-github-permissions": "contents=write"},
+    )
+
+    body = _body(configurations.github_status(_for(_CONFIG_ID, "GET", "/github-status"), None))
+    # Authorised *and* unable to write: two different facts, and collapsing them into one
+    # boolean is what would send the operator to re-authorise, which would not help.
+    assert body["authorized"] is True
+    assert body["canPush"] is False
+    assert "Resource not accessible by integration" in body["reason"]
+    assert body["acceptedPermissions"] == "contents=write"
+    assert body["installUrl"] == (
+        "https://github.com/apps/rca-coding-agent-89c770/installations/new"
+    )
+
+
+def test_an_unreachable_github_is_not_a_verdict(aws: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GitHub incident must not make a correctly configured repository look broken, so
+    `canPush` is three-valued and `None` means the check did not run."""
     from handlers import github_probe
 
     def unreachable(*_args: Any, **_kwargs: Any) -> None:
@@ -349,74 +357,154 @@ def test_an_unreachable_github_does_not_fail_registration(
 
     monkeypatch.setattr(github_probe, "_request", unreachable)
     common, _provisioner, configurations = _load("provisioner", "configurations")
-    caplog.set_level(logging.WARNING, logger="handlers")
+    _connect(common)
+    _seed(common)
 
-    response = _register(configurations)
-    assert response["statusCode"] == 201
-    stored = _body(response)
-    assert common.secrets.get_secret_value(SecretId=stored["secretArn"])["SecretString"] == _TOKEN
-
-    logged = "\n".join(record.getMessage() for record in caplog.records)
-    assert "owner/repo" in logged, (
-        "the warning names the repository, so the late failure is greppable"
-    )
-    assert _TOKEN not in logged
+    body = _body(configurations.github_status(_for(_CONFIG_ID, "GET", "/github-status"), None))
+    assert body["authorized"] is True
+    assert body["canPush"] is None
+    assert "Name or service not known" in body["reason"]
 
 
-def test_a_github_5xx_does_not_fail_registration(aws: Any, github: _FakeGitHub) -> None:
-    """The other half of "GitHub has an incident": it answered, but not with a verdict."""
-    _common, _provisioner, configurations = _load("provisioner", "configurations")
-    github.commits = (503, {"message": "Server Error"}, {})
-    assert _register(configurations)["statusCode"] == 201
+def test_the_status_route_returns_no_part_of_the_token(
+    aws: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """It holds a live GitHub token in memory for the duration of the probe. Not a prefix and
+    not a length reaches the response or a log line."""
+    common, _provisioner, configurations = _load("provisioner", "configurations")
+    caplog.set_level(logging.DEBUG, logger="handlers")
+    _connect(common)
+    _seed(common)
+
+    response = configurations.github_status(_for(_CONFIG_ID, "GET", "/github-status"), None)
+    assert _VAULT_TOKEN not in response["body"]
+    assert _VAULT_TOKEN not in "\n".join(record.getMessage() for record in caplog.records)
+    stored = common.config_table.get_item(Key={"configId": _CONFIG_ID})["Item"]
+    assert _VAULT_TOKEN not in json.dumps(stored, default=str)
 
 
 def test_the_probe_never_puts_the_token_in_a_url(aws: Any, github: _FakeGitHub) -> None:
     """The credential travels in the header argument and nowhere else: a query string is
     logged verbatim by every proxy between this Lambda and the API."""
-    _common, _provisioner, configurations = _load("provisioner", "configurations")
-    assert _register(configurations)["statusCode"] == 201
+    common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
+    _seed(common)
+    configurations.github_status(_for(_CONFIG_ID, "GET", "/github-status"), None)
     assert github.calls, "the probe ran"
     for call in github.calls:
-        assert _TOKEN not in call["url"]
-        assert call["token"] == _TOKEN
+        assert _VAULT_TOKEN not in call["url"]
+        assert call["token"] == _VAULT_TOKEN
 
 
-def test_the_token_is_never_stored_on_the_item_or_echoed(
-    aws: Any, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_authorize_returns_the_url_to_open_and_registers_the_console_origin(aws: Any) -> None:
+    """The start of the 3LO leg. The console's own origin is what AgentCore returns the
+    browser to, and it has to be registered on the workload identity first -- an
+    unregistered one is refused by the service."""
     common, _provisioner, configurations = _load("provisioner", "configurations")
-    caplog.set_level(logging.DEBUG, logger="handlers")
-    response = _register(configurations)
+    _connect(common)
+    _seed(common)
+    data = FakeAgentCore("bedrock-agentcore")
+    data.authorized = set()
+    common.agentcore_data = lambda: data
 
-    assert _TOKEN not in response["body"]
-    stored = common.config_table.get_item(Key={"configId": _body(response)["configId"]})["Item"]
-    assert "githubToken" not in stored
-    assert _TOKEN not in json.dumps(stored, default=str)
+    response = configurations.github_authorize(
+        _for(
+            _CONFIG_ID, "POST", "/github-authorize", body={"consoleOrigin": "https://console.test"}
+        ),
+        None,
+    )
+    assert response["statusCode"] == 200
+    body = _body(response)
+    assert body["authorized"] is False
+    assert body["authorizationUrl"].startswith("https://github.com/login/oauth/authorize")
+    # The return URL really was sent, and it is the console's own origin rather than anything
+    # this deployment hard-codes.
+    assert data.last("GetResourceOauth2Token")["resourceOauth2ReturnUrl"] == "https://console.test"
+    # And the `userId` is the configuration id -- the keying rule the whole design rests on.
+    assert data.last("GetWorkloadAccessTokenForUserId")["userId"] == _CONFIG_ID
 
-    logged = "\n".join(record.getMessage() for record in caplog.records)
-    assert _TOKEN not in logged
-    assert "***" in logged, "the registration line is logged, scrubbed"
-    # The secret is where it went, and reading it back is a deliberate act.
-    assert common.secrets.get_secret_value(SecretId=stored["secretArn"])["SecretString"] == _TOKEN
+
+def test_authorize_refuses_a_console_origin_that_is_not_https(aws: Any) -> None:
+    """The origin is request-supplied and ends up registered as a permitted OAuth return
+    target, so it is checked rather than trusted."""
+    common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
+    _seed(common)
+    response = configurations.github_authorize(
+        _for(
+            _CONFIG_ID,
+            "POST",
+            "/github-authorize",
+            body={"consoleOrigin": "http://evil.example.com"},
+        ),
+        None,
+    )
+    assert response["statusCode"] == 400
+    assert _body(response)["error"] == "InsecureConsoleOrigin"
+
+
+def test_authorize_says_so_when_the_repository_is_already_authorised(aws: Any) -> None:
+    """The vault answers an already-authorised id with a token and no URL, so this route has
+    to report the state rather than hand back an empty URL for the console to open."""
+    common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
+    _seed(common)
+    response = configurations.github_authorize(
+        _for(
+            _CONFIG_ID,
+            "POST",
+            "/github-authorize",
+            body={"consoleOrigin": "https://console.test"},
+        ),
+        None,
+    )
+    body = _body(response)
+    assert body["authorized"] is True
+    assert "authorizationUrl" not in body
+
+
+def test_a_run_is_refused_while_the_repository_has_no_authorisation(aws: Any) -> None:
+    """The gate that saves a whole task. A repository can be perfectly `READY` and still have
+    no credential, and without this the run clones, plans, codes, verifies and then dies at
+    `submit` having spent a full task's tokens.
+
+    In `runs.queue_run` rather than in `tasks.create`, because that is the one definition of
+    "queue a run" -- so a card dragged into Planning is refused for the same reason.
+    """
+    common, _provisioner, runs = _load("provisioner", "runs")
+    _connect(common)
+    config = _seed(common)
+    data = FakeAgentCore("bedrock-agentcore")
+    data.authorized = set()
+    common.agentcore_data = lambda: data
+
+    with pytest.raises(common.ApiError) as raised:
+        runs.queue_run(config, prompt="add a readme", source="test")
+    assert raised.value.status == 409
+    assert raised.value.code == "GitHubNotAuthorized"
+    assert "Authorise GitHub" in raised.value.message
+    # Nothing was queued and no task item was written.
+    assert common.tasks_table.scan()["Items"] == []
 
 
 def test_registering_the_same_repository_twice_is_a_conflict(aws: Any) -> None:
     common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
     first = _body(_register(configurations))
     response = _register(configurations)
     assert response["statusCode"] == 409
     body = _body(response)
     assert body["error"] == "RepositoryAlreadyRegistered"
     assert body["configId"] == first["configId"]
-    assert len(common.secrets.list_secrets()["SecretList"]) == 1, (
-        "the second attempt wrote no secret"
-    )
+    # The second attempt wrote nothing at all: the sentinel item plus the one configuration.
+    assert len(common.config_table.scan()["Items"]) == 2
 
 
 def test_a_repository_being_torn_down_can_be_registered_again(aws: Any) -> None:
     """Teardown is asynchronous, so a `DELETING` configuration must not make the
     repository look permanently taken."""
     common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
     _seed(common, status="DELETING")
     assert _register(configurations)["statusCode"] == 201
 
@@ -426,7 +514,8 @@ def test_a_failed_registration_can_be_registered_again(aws: Any) -> None:
     plugin can send clears it -- `ApiClient.ALLOWED_METHODS` is `{"GET", "POST"}`. So the
     registration succeeds and the stale item goes down the ordinary teardown path."""
     common, _provisioner, configurations = _load("provisioner", "configurations")
-    stale = _seed(
+    _connect(common)
+    _seed(
         common,
         status="FAILED",
         statusReason="the provisioner lacked bedrock-agentcore:CreateAgentRuntimeEndpoint",
@@ -444,9 +533,6 @@ def test_a_failed_registration_can_be_registered_again(aws: Any) -> None:
     # so this route marks it and queues the teardown rather than deleting anything.
     retired = common.config_table.get_item(Key={"configId": _CONFIG_ID})["Item"]
     assert retired["status"] == "DELETING"
-    fresh = common.config_table.get_item(Key={"configId": body["configId"]})["Item"]
-    assert fresh["secretArn"] != stale["secretArn"]
-
     # Sorted: SQS does not promise order, and this is the first request that sends two.
     assert sorted(_provision_messages(aws), key=lambda message: message["phase"]) == [
         {"phase": "CREATE", "configId": body["configId"], "attempt": 0},
@@ -454,32 +540,42 @@ def test_a_failed_registration_can_be_registered_again(aws: Any) -> None:
     ]
 
 
-def test_re_registering_stores_the_new_token_in_a_new_secret(aws: Any) -> None:
-    """`configId` is random, so a replacement gets its own secret name. The stale secret
-    is neither reused for the new token nor mutated -- it belongs to the configuration
-    being torn down, and the runtime that could read it is going away with it."""
-    common, _provisioner, configurations = _load("provisioner", "configurations")
-    stale_arn = common.secrets.create_secret(
-        Name=f"rca/github/{_CONFIG_ID}", SecretString="stale-token"
-    )["ARN"]
-    _seed(common, status="FAILED", secretArn=stale_arn)
+def test_a_replacement_registration_needs_its_own_authorisation(aws: Any) -> None:
+    """`configId` is random and it is the 3LO `userId`, so a replacement does not inherit the
+    retired configuration's authorisation -- it has one fewer step done than the operator
+    might assume, and the status route is what says so.
 
-    new_token = FAKE_FINE_GRAINED_REPLACEMENT_PAT
-    body = _body(_register(configurations, token=new_token))
-    assert body["secretArn"] != stale_arn
-    assert common.secrets.get_secret_value(SecretId=body["secretArn"])["SecretString"] == new_token
-    assert common.secrets.get_secret_value(SecretId=stale_arn)["SecretString"] == "stale-token"
+    This is the per-repository half of the keying rule: the credential's lifetime is exactly
+    the registration's, which is also what makes deregistering a repository end its access
+    without anything having to be revoked.
+    """
+    common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
+    _seed(common, status="FAILED")
+    data = FakeAgentCore("bedrock-agentcore")
+    # Only the retired configuration is authorised.
+    data.authorized = {_CONFIG_ID}
+    common.agentcore_data = lambda: data
+
+    body = _body(_register(configurations))
+    assert body["configId"] != _CONFIG_ID
+    fresh = _body(
+        configurations.github_status(_for(body["configId"], "GET", "/github-status"), None)
+    )
+    assert fresh["authorized"] is False
 
 
 def test_the_provisioner_tears_the_replaced_configuration_down(aws: Any) -> None:
-    """The no-orphans half, end to end: the role at `ROLE_PATH`, its inline policy, the
-    secret holding the operator's old token and the item all go, and the replacement is
-    untouched."""
+    """The no-orphans half, end to end: the role at `ROLE_PATH`, its inline policy and the
+    item all go, and the replacement is untouched.
+
+    There is no secret in this list any more, and nothing replaced it: the retired
+    configuration's GitHub authorisation is keyed on a `configId` that will never be issued
+    again, so removing the item is what makes it unreachable.
+    """
     common, provisioner, configurations = _load("provisioner", "configurations")
-    stale_arn = common.secrets.create_secret(
-        Name=f"rca/github/{_CONFIG_ID}", SecretString="stale-token"
-    )["ARN"]
-    stale = _seed(common, status="FAILED", secretArn=stale_arn)
+    _connect(common)
+    stale = _seed(common, status="FAILED")
     # Minted the way a failed CREATE minted it, rather than by hand, so the teardown is
     # tested against the real role name, path and inline policy.
     provisioner._ensure_role(_CONFIG_ID, stale)
@@ -493,21 +589,19 @@ def test_the_provisioner_tears_the_replaced_configuration_down(aws: Any) -> None
     )
 
     assert common.config_table.get_item(Key={"configId": _CONFIG_ID}).get("Item") is None
-    with pytest.raises(ClientError):
-        common.secrets.get_secret_value(SecretId=stale_arn)
     with pytest.raises(ClientError) as raised:
         common.iam.get_role(RoleName=role_name)
     assert raised.value.response["Error"]["Code"] == "NoSuchEntity"
 
     fresh = common.config_table.get_item(Key={"configId": body["configId"]})["Item"]
     assert fresh["status"] == "PENDING"
-    assert common.secrets.get_secret_value(SecretId=fresh["secretArn"])["SecretString"] == _TOKEN
 
 
 def test_a_repository_being_torn_down_is_not_torn_down_twice(aws: Any) -> None:
     """`DELETING` is ignored by the conflict check but must *not* be retired: its teardown
     is already in flight, and a second `DELETE` message would be a redundant replay."""
     common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
     _seed(common, status="DELETING")
     response = _register(configurations)
     assert response["statusCode"] == 201
@@ -529,6 +623,7 @@ def test_a_live_configuration_still_wins_over_a_stale_failed_one(
     configuration that actually holds the repository -- `web/js/views/register.js` reads
     `details.configId` to offer "Open that repository's board"."""
     common, _provisioner, configurations = _load("provisioner", "configurations")
+    _connect(common)
     _seed(common)
     _seed(common, configId="cfg_ffffffffffff", status="FAILED", statusReason="ran out of grants")
 
@@ -541,7 +636,6 @@ def test_a_live_configuration_still_wins_over_a_stale_failed_one(
     # against GitHub on its way to a conflict it could see locally.
     assert _provision_messages(aws) == []
     assert github.calls == []
-    assert common.secrets.list_secrets()["SecretList"] == []
     assert (
         common.config_table.get_item(Key={"configId": "cfg_ffffffffffff"})["Item"]["status"]
         == "FAILED"
@@ -827,7 +921,7 @@ def test_patch_refuses_a_field_outside_the_allow_list_and_says_where_to_go(aws: 
     # Both sentences have to reach the client: a bare "unknown field" is what makes
     # someone try `repositoryUrl` twice and then look for a `githubToken` field.
     assert "re-register" in body["message"]
-    assert "github-token" in body["message"]
+    assert "github-authorize" in body["message"]
 
 
 def test_repository_url_is_not_patchable(aws: Any) -> None:
@@ -960,110 +1054,6 @@ def test_runtime_update_requires_ready_and_queues_update(aws: Any) -> None:
     # No status write: the provisioner sets `UPDATING` only if an update was needed, so a
     # converged fleet does not park every configuration in `UPDATING` forever.
     assert common.config_table.get_item(Key={"configId": _CONFIG_ID})["Item"]["status"] == "READY"
-
-
-def test_rotation_writes_a_new_version_of_the_one_secret(aws: Any) -> None:
-    common, _provisioner, configurations = _load("provisioner", "configurations")
-    created = _body(_register(configurations))
-    before = common.secrets.get_secret_value(SecretId=created["secretArn"])
-    rotated_token = FAKE_FINE_GRAINED_REPLACEMENT_PAT
-
-    response = configurations.rotate_token(
-        _for(
-            created["configId"],
-            "PUT",
-            "/configurations/{configId}/github-token",
-            body={"githubToken": rotated_token},
-        ),
-        None,
-    )
-    assert response["statusCode"] == 200
-    body = _body(response)
-    assert body["rotated"] is True
-    assert rotated_token not in response["body"], "the credential body is never reflected back"
-
-    after = common.secrets.get_secret_value(SecretId=created["secretArn"])
-    assert after["SecretString"] == rotated_token
-    assert after["VersionId"] != before["VersionId"]
-    assert body["versionId"] == after["VersionId"]
-    # One secret, a new version of it. A second secret would not be readable by the
-    # execution role at all -- its inline policy names this literal ARN.
-    assert len(common.secrets.list_secrets()["SecretList"]) == 1
-    assert common.secrets.list_secrets()["SecretList"][0]["ARN"] == created["secretArn"]
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        {"githubToken": _TOKEN, "verifyCommand": "make test"},
-        {"githubToken": _TOKEN, "note": "rotating after a leak"},
-        {"token": _TOKEN},
-    ],
-)
-def test_rotation_refuses_a_body_carrying_any_other_key(aws: Any, body: dict[str, Any]) -> None:
-    common, _provisioner, configurations = _load("provisioner", "configurations")
-    _seed(common)
-    response = configurations.rotate_token(
-        _for(_CONFIG_ID, "PUT", "/configurations/{configId}/github-token", body=body), None
-    )
-    assert response["statusCode"] == 400
-    assert _body(response)["error"] == "CredentialBodyOnly"
-    assert "PATCH /configurations/" in _body(response)["message"]
-
-
-def test_rotation_refuses_a_token_that_expires_in_an_hour(aws: Any) -> None:
-    """Rotation runs the same shape check as registration, so it cannot widen what
-    registration narrowed -- nor accept a shape registration would not.
-
-    A classic PAT is now accepted on both routes; what stays refused is the App/OAuth family,
-    because nothing here refreshes an hour-long token and an accepted one would fail inside a
-    container long after the rotation looked successful.
-    """
-    common, _provisioner, configurations = _load("provisioner", "configurations")
-    _seed(common)
-    response = configurations.rotate_token(
-        _for(
-            _CONFIG_ID,
-            "PUT",
-            "/configurations/{configId}/github-token",
-            body={"githubToken": FAKE_APP_INSTALLATION_PAT},
-        ),
-        None,
-    )
-    assert response["statusCode"] == 400
-    assert _body(response)["error"] == "ExpiringTokenRejected"
-
-
-def test_rotation_refuses_a_token_that_cannot_push_and_keeps_the_old_secret(
-    aws: Any, github: _FakeGitHub
-) -> None:
-    """Rotation is the other route that writes a credential, and it refuses before the
-    write: the operator rotating *because* a token was wrong must not be left with a
-    second one that cannot push either."""
-    common, _provisioner, configurations = _load("provisioner", "configurations")
-    secret_arn = common.secrets.create_secret(Name=f"rca/github/{_CONFIG_ID}", SecretString=_TOKEN)[
-        "ARN"
-    ]
-    _seed(common, secretArn=secret_arn)
-    github.create_ref = (
-        403,
-        {"message": "Resource not accessible by personal access token"},
-        {"x-accepted-github-permissions": "contents=write"},
-    )
-
-    response = configurations.rotate_token(
-        _for(
-            _CONFIG_ID,
-            "PUT",
-            "/configurations/{configId}/github-token",
-            body={"githubToken": "github_pat_22ZYXWVUTSRQPONMLKJI9876543210"},
-        ),
-        None,
-    )
-    assert response["statusCode"] == 400
-    assert _body(response)["error"] == "TokenCannotPush"
-    assert "Resource not accessible by personal access token" in _body(response)["message"]
-    assert common.secrets.get_secret_value(SecretId=secret_arn)["SecretString"] == _TOKEN
 
 
 def test_the_provisioner_writes_only_declared_statuses(aws: Any) -> None:

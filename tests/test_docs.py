@@ -285,7 +285,7 @@ _IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 
 # Every backticked span. Narrowed to path claims by `_is_repo_path`.
 _PATH_RE = re.compile(r"`([^`\n]+)`")
-# `api/src/handlers/configurations.py::_require_supported_token`.
+# `api/src/handlers/configurations.py::_push_verdict`.
 _COLON_RE = re.compile(rf"`([^`\n]+?)::({_IDENT})`")
 # `nodes/code.py`'s `GOAL_CONDITION`.
 _POSSESSIVE_RE = re.compile(rf"`([^`\n]+?)`'s\s+`({_IDENT})`")

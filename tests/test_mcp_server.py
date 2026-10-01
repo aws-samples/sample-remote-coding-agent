@@ -61,9 +61,6 @@ _CONFIG: dict[str, Any] = {
     "verifyCommand": "make test",
     "setupCommand": "make setup",
     "defaultBranch": "main",
-    "secretArn": (
-        "arn:aws:secretsmanager:ap-southeast-1:111122223333:secret:rca/github/cfg_1a2b3c-AbCdEf"
-    ),
     "executionRoleArn": "arn:aws:iam::111122223333:role/CodingAgentExecution-cfg_1a2b3c",
     "agentRuntimeId": "coding_agent_cfg_1a2b3c-9Zx",
     "createdAt": "2026-08-19T00:00:00+00:00",
@@ -132,7 +129,6 @@ _ARGUMENTS: dict[str, dict[str, Any]] = {
     "list_repositories": {"limit": 5},
     "register_repository": {
         "repositoryUrl": "https://github.com/example/other-repo.git",
-        "githubToken": _TOKEN,
         "verifyCommand": "make test",
     },
     "get_repository": {"configId": _CONFIG_ID},
@@ -348,18 +344,20 @@ _RENDERED: dict[str, dict[str, Any]] = {
             "/configurations",
             {
                 "repositoryUrl": "https://github.com/example/other-repo.git",
-                "githubToken": _TOKEN,
                 "verifyCommand": "make test",
             },
         ),
-        "contains": ("cfg_9z8y7x", "PENDING", "Secrets Manager", "get_repository"),
-        "excludes": (_TOKEN,),
+        "contains": ("cfg_9z8y7x", "PENDING", "Authorise", "get_repository"),
+        # The token is not merely unechoed -- it is never sent, and `_ARGUMENTS` above no
+        # longer carries one. Kept as an exclusion so a credential field reappearing on this
+        # tool fails here rather than quietly being forwarded again.
+        "excludes": (_TOKEN, "githubToken"),
     },
     "get_repository": {
         "call": ("GET", f"/configurations/{_CONFIG_ID}", {}),
-        "contains": (_CONFIG_ID, "READY", "make test", "rca/github/cfg_1a2b3c", "start_task"),
-        # The secret's name, never the ARN's suffix and never the value.
-        "excludes": ("AbCdEf", "arn:aws:secretsmanager"),
+        "contains": (_CONFIG_ID, "READY", "make test", "start_task"),
+        # No credential of any shape in a repository's rendering: there is no secret to name.
+        "excludes": ("AbCdEf", "arn:aws:secretsmanager", "rca/github/"),
     },
     "start_task": {
         "call": (
@@ -447,11 +445,18 @@ def test_the_descriptions_carry_the_state_machine() -> None:
     )
 
     register = TOOLS_BY_NAME["register_repository"].description
-    assert "fine-grained" in register and "classic" in register, (
-        "the control plane rejects classic personal access tokens, and a model that "
-        "does not know that asks the operator for the wrong credential"
+    assert "NO credential" in register, (
+        "this tool takes no token. A model that thinks it needs one asks the operator for a "
+        "credential the control plane refuses with 400 TokenNotAccepted."
     )
-    assert "echo" in register.lower()
+    assert "githubToken" not in str(TOOLS_BY_NAME["register_repository"].input_schema), (
+        "no credential-shaped property may exist in this schema: there is nowhere for the "
+        "rest of the system to put one"
+    )
+    assert "409 GitHubNotAuthorized" in register, (
+        "registering is half the setup. Without this a model reports success and the "
+        "operator's first task is refused for a reason nothing mentioned."
+    )
 
 
 def test_the_list_tasks_filter_names_every_container_status() -> None:

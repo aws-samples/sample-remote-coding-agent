@@ -27,7 +27,6 @@ def _seed_config(common: Any, *, status: str = "READY") -> dict[str, Any]:
         "defaultBranch": "main",
         "verifyCommand": "make test",
         "setupCommand": "make setup",
-        "secretArn": f"arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:rca/github/{CONFIG_ID}-AbCdEf",
         "agentRuntimeArn": "arn:aws:bedrock-agentcore:ap-southeast-1:123456789012:runtime/rca_cfg_0123456789ab-ABC123",
         "agentRuntimeId": "rca_cfg_0123456789ab-ABC123",
         "createdAt": common.now_iso(),

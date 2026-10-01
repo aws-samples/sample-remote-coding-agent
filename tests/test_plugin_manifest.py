@@ -94,9 +94,16 @@ _SUBSTITUTIONS = (
 )
 
 _GUARDRAILS = (
-    "never pass or echo a github token",
+    # Was "never pass or echo a github token". The tool takes none now, so the stronger
+    # instruction is to refuse one: a model that asks for a credential sends the operator to
+    # create something the control plane answers `400 TokenNotAccepted` to.
+    "never ask for or accept a github token",
     "never poll get_task in a loop",
     "never call register_repository without explicit human intent",
+    # Registering is half the setup, and authorising is a browser step no tool here can take.
+    # Without this a model reports success and the operator's first task is refused with
+    # `409 GitHubNotAuthorized` for a reason nothing mentioned.
+    "never report a registration as finished",
     "a draft offered for review, not working code",
 )
 
@@ -105,7 +112,7 @@ _GUARDRAILS = (
 # `/sample-rca:remote` has.
 _SCAFFOLD_GUARDRAILS = (
     "never overwrite a file that already exists",
-    "never pass or echo a github token",
+    "never ask for or accept a github token",
     "never force-push",
     "never scaffold a repository that already has source in it",
 )

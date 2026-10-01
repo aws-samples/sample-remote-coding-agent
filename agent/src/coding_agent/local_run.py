@@ -163,9 +163,10 @@ def main(argv: list[str] | None = None) -> int:
     state = _initial_state(args)
     print(f"task {state['taskId']} on {state['repository']} in {work_root}")
     if not state.get("noSubmit") and not os.environ.get("GITHUB_TOKEN"):
-        # The developer-machine path. The container fetches the token from Secrets Manager
-        # at submit time and never puts it in the environment (invariant 4); locally there
-        # is no secret to fetch, so GITHUB_TOKEN is the only source.
+        # The developer-machine path. The container fetches the token from AgentCore
+        # Identity's token vault at submit time and never puts it in the environment
+        # (invariant 4); locally there is no vault to read, so GITHUB_TOKEN is the only
+        # source.
         print("warning: GITHUB_TOKEN is unset, so --no-submit is the only mode that will finish")
 
     final = asyncio.run(_walk(state, no_submit=bool(args.no_submit)))

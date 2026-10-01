@@ -61,8 +61,13 @@ ROUTES: tuple[tuple[str, str, str, str], ...] = (
     ("PATCH", "/configurations/{configId}", "configurations", "patch"),
     ("DELETE", "/configurations/{configId}", "configurations", "delete"),
     ("POST", "/configurations/{configId}/runtime-update", "configurations", "runtime_update"),
-    ("PUT", "/configurations/{configId}/github-token", "configurations", "rotate_token"),
+    ("POST", "/configurations/{configId}/github-authorize", "configurations", "github_authorize"),
+    ("GET", "/configurations/{configId}/github-status", "configurations", "github_status"),
     ("GET", "/configurations/{configId}/memory", "configurations", "memory"),
+    ("GET", "/github-app", "github_app", "get"),
+    ("POST", "/github-app", "github_app", "connect"),
+    ("POST", "/github-app/conversions", "github_app", "convert"),
+    ("DELETE", "/github-app", "github_app", "disconnect"),
     ("POST", "/cards", "cards", "create"),
     ("GET", "/cards", "cards", "list_"),
     ("GET", "/cards/{cardId}", "cards", "get"),
@@ -75,6 +80,11 @@ ROUTES: tuple[tuple[str, str, str, str], ...] = (
     ("GET", "/tasks/{taskId}/activity", "tasks", "activity"),
     ("POST", "/tasks/{taskId}/cancel", "tasks", "cancel"),
 )
+
+# The read routes that need a write route's timeout. Declared rather than inferred from the
+# grant list, because what makes one slow is an outbound call's own timeout budget and
+# nothing in a capability name says so.
+_SLOW_READ_ROUTES: frozenset[tuple[str, str]] = frozenset({("configurations", "github_status")})
 
 # The entry points no HTTP route reaches: two queue consumers, the DLQ's terminal owner
 # and the schedule.
@@ -96,7 +106,6 @@ _CAPABILITIES: frozenset[str] = frozenset(
         "tasks:write",
         "cards:read",
         "cards:write",
-        "secrets:write",
         "tasks-queue:send",
         "provision-queue:send",
         "agentcore:control",
@@ -108,6 +117,18 @@ _CAPABILITIES: frozenset[str] = frozenset(
         # force that test to be weakened. The fence that matters is the statement below --
         # two read-only actions on `memory/*` -- not the string.
         "memory:read",
+        # Named for what it grants rather than for the service, the same way `memory:read`
+        # is: `tests/test_grant_contract.py::test_read_routes_get_no_write_capability`
+        # refuses a read route's capability containing `agentcore`, and
+        # `configurations.github_status` is a GET that legitimately reaches the token vault.
+        # The fence that matters is the statement, not the string.
+        "github:credential",
+        # The deployment-wide GitHub App: creating, reading, updating and deleting the one
+        # OAuth2 credential provider and the one workload identity. Separate from
+        # `github:credential` because these are *control-plane* actions no read route may
+        # have, and separate from `agentcore:control` because that one is about runtimes and
+        # is held by the provisioner, which has no business reconfiguring the credential.
+        "github:provider-admin",
         "iam:mint-execution-roles",
     }
 )
@@ -123,18 +144,22 @@ _CAPABILITIES: frozenset[str] = frozenset(
 # queue, so an entry point granted the wrong one fails at run time with an AccessDenied
 # that reads like a service problem.
 _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
-    ("configurations", "create"): (
-        "config:read",
-        "config:write",
-        "secrets:write",
-        "provision-queue:send",
-    ),
+    # No credential capability: registration stores no credential at all. `config:read`
+    # covers both the sibling query and the `github_app.is_connected()` check, which is a
+    # `GetItem` on the same table.
+    ("configurations", "create"): ("config:read", "config:write", "provision-queue:send"),
     ("configurations", "list_"): ("config:read",),
     ("configurations", "get"): ("config:read",),
     ("configurations", "patch"): ("config:read", "config:write"),
     ("configurations", "delete"): ("config:read", "config:write", "provision-queue:send"),
     ("configurations", "runtime_update"): ("config:read", "provision-queue:send"),
-    ("configurations", "rotate_token"): ("config:read", "secrets:write"),
+    # Starting an authorisation and reading one back are the same two AgentCore calls, so
+    # both carry the same capability. Neither writes the configuration item: the vault is
+    # the only thing that changes, which is why there is no `config:write` here and no
+    # stored `githubAuthorized` flag anywhere -- a flag would be a second, staler answer to
+    # a question the vault already answers.
+    ("configurations", "github_authorize"): ("config:read", "github:credential"),
+    ("configurations", "github_status"): ("config:read", "github:credential"),
     # The one read route that reaches a second data plane: the records an operator is asking
     # about exist only in AgentCore Memory, so `config:read` alone could answer with nothing
     # but the `memoryId` the console already prints. `tests/test_api_grant_contract.py`'s
@@ -145,6 +170,9 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("cards", "get"): ("cards:read", "tasks:read"),
     ("cards", "patch"): ("cards:read", "cards:write", "tasks:read"),
     ("cards", "delete"): ("cards:read", "cards:write", "tasks:read"),
+    # `github:credential` on both of the two routes that reach `runs.queue_run`: it refuses
+    # a run against a repository with no GitHub authorisation, which costs one AgentCore call
+    # on the dispatch path and saves a whole task that would otherwise die at `submit`.
     ("cards", "move"): (
         "cards:read",
         "cards:write",
@@ -152,12 +180,19 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
         "tasks:read",
         "tasks:write",
         "tasks-queue:send",
+        "github:credential",
     ),
     # `cards:write` and not `cards:read`: every run has a card (invariant 38), so
     # `tasks.create` calls `cards.create_claimed` -- a `put_item` and an `update_item`,
     # never a `get_item`. Withholding the read grant is what makes a Cards *read* growing
     # into this handler a grant-contract failure rather than a silent widening.
-    ("tasks", "create"): ("config:read", "tasks:write", "tasks-queue:send", "cards:write"),
+    ("tasks", "create"): (
+        "config:read",
+        "tasks:write",
+        "tasks-queue:send",
+        "cards:write",
+        "github:credential",
+    ),
     ("tasks", "list_"): ("tasks:read",),
     ("tasks", "get"): ("tasks:read", "config:read"),
     ("tasks", "activity"): ("tasks:read",),
@@ -166,10 +201,13 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
     # `config:read` -- `agentRuntimeArn` and `sessionId` are already on the task item -- and
     # no `tasks-queue:send`, because cancelling a run dispatches nothing.
     ("tasks", "cancel"): ("tasks:read", "tasks:write", "agentcore:stop"),
+    ("github_app", "get"): ("config:read", "github:provider-admin"),
+    ("github_app", "connect"): ("config:read", "config:write", "github:provider-admin"),
+    ("github_app", "convert"): ("config:read", "config:write", "github:provider-admin"),
+    ("github_app", "disconnect"): ("config:read", "config:write", "github:provider-admin"),
     ("provisioner", "lambda_handler"): (
         "config:read",
         "config:write",
-        "secrets:write",
         "provision-queue:send",
         "agentcore:control",
         "iam:mint-execution-roles",
@@ -201,6 +239,7 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
 
 def _provisioner_environment(
     *,
+    account: str,
     image_uri: str,
     boundary_arn: str,
     subnet_ids: Sequence[str],
@@ -228,6 +267,14 @@ def _provisioner_environment(
     variable that reaches a runtime and reads there as a missing grant.
     """
     return {
+        # The account every ARN in `provisioner._execution_role_policy` is built from, and
+        # the trust policy's `aws:SourceAccount`. Forwarded rather than looked up: there is
+        # no account id in a Lambda's own environment, `sts:GetCallerIdentity` would be a
+        # grant this control plane otherwise does not need, and the value is a literal at
+        # synth time. It replaces parsing the account out of a per-configuration secret ARN,
+        # which stopped being possible when the GitHub credential moved into AgentCore
+        # Identity.
+        "AWS_ACCOUNT_ID": account,
         "AGENT_IMAGE_URI": image_uri,
         "EXECUTION_ROLE_BOUNDARY_ARN": boundary_arn,
         "AGENT_SUBNET_IDS": ",".join(subnet_ids),
@@ -437,6 +484,7 @@ class ApiStack(cdk.Stack):
         provisioner_environment = {
             **common,
             **_provisioner_environment(
+                account=self.account,
                 image_uri=agent.image.image_uri,
                 boundary_arn=agent.role_boundary.managed_policy_arn,
                 # The same subnets the runtime's ENIs land in. Read off the VPC rather
@@ -476,17 +524,25 @@ class ApiStack(cdk.Stack):
         self.handler_arns: dict[str, str] = {}
 
         for method, path, module, function in ROUTES:
-            # A GET is a read route and nothing else is -- which is exactly the eight
-            # entry points `tests/test_grant_contract.py` holds to note 30, the eighth
-            # being `configurations.memory`, the one that holds a read-only AgentCore
-            # grant beside its DynamoDB one -- so the size classification is derived
-            # rather than hand-listed.
+            # A GET is a read route and nothing else is -- which is exactly the entry points
+            # `tests/test_grant_contract.py` holds to note 30, including
+            # `configurations.memory` and `configurations.github_status`, the two that hold a
+            # read-only AgentCore grant beside their DynamoDB one -- so the size
+            # classification is derived rather than hand-listed.
             read_route = method == "GET"
+            # `github_status` is the one read route that cannot live inside ten seconds:
+            # `github_probe.check_can_push` makes three calls to GitHub at a four-second
+            # timeout each, so a slow GitHub would otherwise turn a correct answer into a
+            # Lambda timeout, which the console would render as a broken repository. It gets
+            # a write route's budget without a write route's grants.
+            slow_read = (module, function) in _SLOW_READ_ROUTES
             fn = self._function(
                 _construct_id(module, function),
                 module=module,
                 function=function,
-                timeout=Duration.seconds(10) if read_route else Duration.seconds(30),
+                timeout=Duration.seconds(10)
+                if read_route and not slow_read
+                else Duration.seconds(30),
                 memory=256 if read_route else 512,
                 environment=common,
                 capabilities=_ENTRY_POINT_GRANTS[(module, function)],
@@ -628,22 +684,96 @@ class ApiStack(cdk.Stack):
                 data.task_queue.grant_send_messages(fn)
             elif capability == "provision-queue:send":
                 data.provision_queue.grant_send_messages(fn)
-            elif capability == "secrets:write":
-                # Scoped to the one prefix `configurations.create` writes under
-                # (`rca/github/<configId>`), never the account's whole secret namespace.
-                # The trailing `*` is not slack: a secret ARN carries a six-character
-                # random suffix, so the name alone never matches.
+            elif capability == "github:credential":
                 fn.add_to_role_policy(
                     iam.PolicyStatement(
+                        # The same two actions the container's execution role gets, for the
+                        # same exchange -- see `provisioner._execution_role_policy`'s
+                        # `UseGitHubCredential`, which carries the measurement behind these
+                        # resource patterns. In short: the service authorizes
+                        # `GetWorkloadAccessTokenForUserId` only on
+                        # `workload-identity-directory/*` and `GetResourceOauth2Token` only
+                        # on `*`, with no condition key for the user id, so neither can be
+                        # narrowed further. That is why this capability is spelled out
+                        # separately instead of folded into `agentcore:control`: a reader has
+                        # to see that it is wide, and `CLAUDE.md`'s "What remains exposed"
+                        # names it.
+                        actions=[
+                            "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+                            "bedrock-agentcore:GetResourceOauth2Token",
+                        ],
+                        resources=[
+                            f"arn:aws:bedrock-agentcore:{self.region}:{self.account}"
+                            f":workload-identity-directory/*",
+                            "*",
+                        ],
+                    )
+                )
+            elif capability == "github:provider-admin":
+                fn.add_to_role_policy(
+                    iam.PolicyStatement(
+                        actions=[
+                            # The one OAuth2 credential provider, read/written on the connect
+                            # page. `List*` is deliberately absent: nothing here enumerates
+                            # providers, and a provider this deployment was not given is not
+                            # one it should be able to find.
+                            "bedrock-agentcore:CreateOauth2CredentialProvider",
+                            "bedrock-agentcore:GetOauth2CredentialProvider",
+                            "bedrock-agentcore:UpdateOauth2CredentialProvider",
+                            "bedrock-agentcore:DeleteOauth2CredentialProvider",
+                            # The one workload identity whose `allowedResourceOauth2ReturnUrls`
+                            # is what stops an authorisation being redirected anywhere the
+                            # console is not.
+                            "bedrock-agentcore:CreateWorkloadIdentity",
+                            "bedrock-agentcore:GetWorkloadIdentity",
+                            "bedrock-agentcore:UpdateWorkloadIdentity",
+                            # `CreateTokenVault` is needed because the account's default token
+                            # vault is created lazily, by the first
+                            # `CreateOauth2CredentialProvider` -- measured: without it the
+                            # very first connect in a fresh account fails `AccessDenied`
+                            # naming a vault nobody asked for. `SetTokenVaultCMK` is **not**
+                            # granted: changing the vault's encryption key is not something a
+                            # console page should be able to do.
+                            "bedrock-agentcore:CreateTokenVault",
+                            "bedrock-agentcore:GetTokenVault",
+                        ],
+                        # `*` for the same reason `agentcore:control` takes it: every one of
+                        # these creates is authorized before the resource exists, so no
+                        # pattern over the resource would match. The fence is the action list.
+                        resources=["*"],
+                    )
+                )
+                fn.add_to_role_policy(
+                    iam.PolicyStatement(
+                        sid="AgentCoreIdentityServiceLinkedSecret",
+                        # The **only** Secrets Manager grant left in this system, and it is a
+                        # control-plane one: no container has it, nothing in this repository
+                        # names the secret, reads it, or knows its ARN.
+                        #
+                        # AgentCore Identity keeps a provider's client secret in a
+                        # service-linked secret of its own and authorizes that write against
+                        # the *caller*, so `CreateOauth2CredentialProvider` fails
+                        # `AccessDenied` without `CreateSecret` and
+                        # `DeleteOauth2CredentialProvider` fails the same way without
+                        # `DeleteSecret` -- both measured, the second one only after the first
+                        # looked finished. `PutSecretValue` is the update path, which is what
+                        # writes the real client secret once the GitHub App exists.
                         actions=[
                             "secretsmanager:CreateSecret",
                             "secretsmanager:PutSecretValue",
                             "secretsmanager:DeleteSecret",
                             "secretsmanager:TagResource",
                         ],
+                        # Scoped to AgentCore's own name prefix rather than `*`, which was
+                        # measured to work and matters: on `*` this Lambda could mint and
+                        # destroy any secret in the account. The `!` is part of the
+                        # service-linked naming scheme (`bedrock-agentcore-identity!default/...`)
+                        # and the trailing `*` also absorbs the six random characters every
+                        # secret ARN ends with, so a pattern stopping at the name matches
+                        # nothing.
                         resources=[
                             f"arn:aws:secretsmanager:{self.region}:{self.account}"
-                            f":secret:{self._app_name}/github/*"
+                            f":secret:bedrock-agentcore-identity!*"
                         ],
                     )
                 )

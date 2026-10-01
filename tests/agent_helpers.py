@@ -41,7 +41,10 @@ AGENT_ENV_VARS = (
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "CODE_GOAL_ENABLED",
     "GITHUB_TOKEN",
-    "SECRET_ARN",
+    # `CONFIG_ID` is what `store.github_token` keys the GitHub credential on, and
+    # `CONFIG_TABLE` -- cleared above with the other table names -- is the switch that stops it
+    # building a client at all. `SECRET_ARN` was here and went with the secret.
+    "CONFIG_ID",
 )
 
 

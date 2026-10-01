@@ -61,7 +61,6 @@ def build(agent_stack: Any, asset_repository_arn: str) -> list[dict[str, Any]]:
     return [
         statement.to_json()
         for statement in agent_stack.execution_role_boundary_statements(
-            app_name=APP_NAME,
             account=ACCOUNT,
             region=REGION,
             asset_repository_arn=asset_repository_arn,
@@ -148,15 +147,19 @@ WIDER_RESOURCES: dict[tuple[str, str], str] = {
         "condition -- restating it would mean every future fence had to be written twice to "
         "work at all."
     ),
-    (
-        "MayReadOneSecret",
-        f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{APP_NAME}/github/*",
-    ): (
-        "One ceiling spans every configuration's secret because the boundary is minted once "
-        "per deploy while the grant names one literal ARN per role, and the trailing `*` "
-        "also absorbs the six-character suffix Secrets Manager appends to every secret ARN "
-        "-- an ARN ending at the name matches nothing at all."
-    ),
+    # `MayUseGitHubCredential` is NOT declared here, and its absence is the point.
+    # It allows `*`, which looks like the widest entry in the boundary -- but the grant
+    # under it allows `*` too, so the ceiling is no wider than the grant and there is no
+    # widening to declare. That is the service's shape rather than a choice: measured
+    # against a throwaway role, `GetWorkloadAccessTokenForUserId` is denied on an
+    # individual `workload-identity/<name>` ARN and allowed only on
+    # `workload-identity-directory/*`, and `GetResourceOauth2Token` is denied on the
+    # credential provider's own ARN, on `token-vault/default/*` and on `token-vault/*`,
+    # and allowed only on `*`. No condition key exists for the 3LO user id either, so
+    # neither document can name one repository's credential. CLAUDE.md's "What remains
+    # exposed" states that consequence; this table is only about ceilings that are wider
+    # than their grants, and this one is not.
+    #
     # `/aws/bedrock-agentcore/runtimes` spelled out rather than imported from
     # `agent_stack.RUNTIME_LOG_GROUP_PREFIX`: this module imports nothing.
     ("MayWriteRuntimeLogs", "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes*"): (

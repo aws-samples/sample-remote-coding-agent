@@ -82,7 +82,7 @@ def test_the_route_table_api_stack_wires_is_the_one_the_handlers_declare() -> No
     app's import path. This is what keeps the copy honest: a route added to a module and
     not there is never wired up, and nothing at deploy time says so."""
     declared: dict[tuple[str, str], tuple[str, str]] = {}
-    for module in ("configurations", "cards", "tasks"):
+    for module in ("configurations", "cards", "tasks", "github_app"):
         for method, path, function in _declared_routes(module):
             declared[(method, path)] = (module, function)
 
@@ -95,7 +95,7 @@ def test_the_route_table_api_stack_wires_is_the_one_the_handlers_declare() -> No
         f"module declares and ApiStack does not wire up answers 403 with no route, and one "
         f"ApiStack wires up with no handler is a 500 at the first request"
     )
-    assert len(api_stack.ROUTES) == 19, "the 19 declared routes"
+    assert len(api_stack.ROUTES) == 24, "the 24 declared routes"
 
 
 def test_every_entry_point_has_a_declared_grant_set() -> None:
@@ -109,8 +109,8 @@ def test_every_entry_point_has_a_declared_grant_set() -> None:
         f"_ENTRY_POINT_GRANTS covers {sorted(set(api_stack._ENTRY_POINT_GRANTS) ^ expected)} "
         f"differently from the entry points ApiStack creates"
     )
-    assert len(expected) == 23, (
-        "19 routes plus the provisioner, dispatcher, DLQ handler and watchdog"
+    assert len(expected) == 28, (
+        "24 routes plus the provisioner, dispatcher, DLQ handler and watchdog"
     )
     for entry, capabilities in api_stack._ENTRY_POINT_GRANTS.items():
         unknown = set(capabilities) - api_stack._CAPABILITIES
@@ -166,6 +166,7 @@ def _module_scope_environment_names(path: str) -> set[str]:
 
 def test_provisioner_environment_names_every_variable_the_handler_reads() -> None:
     environment = api_stack._provisioner_environment(
+        account="123456789012",
         image_uri="123456789012.dkr.ecr.ap-southeast-1.amazonaws.com/agent:abc",
         boundary_arn=_BOUNDARY_ARN,
         subnet_ids=["subnet-1", "subnet-2"],
@@ -179,6 +180,11 @@ def test_provisioner_environment_names_every_variable_the_handler_reads() -> Non
         git_author_email="99+bot@users.noreply.github.com",
     )
     assert environment == {
+        # Forwarded rather than looked up: a Lambda's environment carries no account id, and
+        # `sts:GetCallerIdentity` would be a grant this control plane otherwise does not need.
+        # It replaced parsing the account out of a per-configuration secret ARN, which stopped
+        # being possible when the GitHub credential moved into AgentCore Identity.
+        "AWS_ACCOUNT_ID": "123456789012",
         "AGENT_IMAGE_URI": "123456789012.dkr.ecr.ap-southeast-1.amazonaws.com/agent:abc",
         "EXECUTION_ROLE_BOUNDARY_ARN": _BOUNDARY_ARN,
         # Comma-joined here and split by `provisioner._csv_environment` there -- a Lambda
@@ -202,9 +208,16 @@ def test_provisioner_environment_names_every_variable_the_handler_reads() -> Non
         f"provisioner.py reads {sorted(read - set(environment))} at import and ApiStack "
         f"forwards no such variable; add it to _provisioner_environment"
     )
-    assert set(environment) - read == set(), (
-        f"ApiStack forwards {sorted(set(environment) - read)}, which provisioner.py never "
-        f"reads -- either the read was renamed or the variable is dead"
+    # `AWS_ACCOUNT_ID` is forwarded and read, but read *inside*
+    # `provisioner._account_and_region` rather than at module scope -- deliberately, so a test
+    # can `monkeypatch.setenv` it between two calls in one process, which is the same reason
+    # `store.py` builds its clients per call. The scan above only sees module-scope reads, so
+    # it is declared here rather than left to make this assertion fail for a variable that is
+    # genuinely wired up on both sides.
+    read_in_a_function = {"AWS_ACCOUNT_ID"}
+    assert set(environment) - read - read_in_a_function == set(), (
+        f"ApiStack forwards {sorted(set(environment) - read - read_in_a_function)}, which "
+        f"provisioner.py never reads -- either the read was renamed or the variable is dead"
     )
 
 
@@ -213,6 +226,7 @@ def test_the_goal_flag_is_normalised_rather_than_forwarded_as_a_bool() -> None:
     variable is a string either way, so the boolean has to become `"1"`/`"0"` somewhere.
     Doing it here means a `GetAgentRuntime` diff shows a value that says something."""
     off = api_stack._provisioner_environment(
+        account="123456789012",
         image_uri="i",
         boundary_arn=_BOUNDARY_ARN,
         subnet_ids=[],
@@ -357,7 +371,6 @@ def test_the_service_linked_role_grant_is_fenced_to_agentcore_by_a_wildcard_matc
 @pytest.fixture
 def boundary_statements() -> list[Any]:
     return agent_stack.execution_role_boundary_statements(
-        app_name="rca",
         account="123456789012",
         region="ap-southeast-1",
         # The boundary cannot be the union of what the inline policy grants without naming

@@ -8,14 +8,14 @@ dispatch message looks like, or whether a configuration was allowed to run at al
 from __future__ import annotations
 
 import json
-import secrets as secrets_module  # `_common.secrets` is the Secrets Manager client
+import secrets as secrets_module
 import time
 from collections.abc import Mapping
 from typing import Any
 
 from boto3.dynamodb.conditions import Attr
 
-from . import _common, observability
+from . import _common, github_app, observability
 from ._common import LOG, ApiError
 
 QUEUED, DISPATCHED = "QUEUED", "DISPATCHED"
@@ -88,6 +88,23 @@ def queue_run(
             "the configuration is not READY, so a run cannot be dispatched against it",
             configId=config.get("configId"),
             status=status,
+        )
+
+    # The second gate, and it fails the same way the first does rather than 20 minutes
+    # later. A repository can be perfectly `READY` and still have no GitHub credential: the
+    # authorisation is a separate operator action (`github_app.py`), and without it the run
+    # clones, plans, codes, verifies and then dies at `submit` having spent a full task's
+    # tokens. Checked here rather than in `tasks.create`, because `runs.queue_run` is the one
+    # definition of "queue a run" and `cards.move` must refuse for the same reason.
+    if not github_app.resolve_token(str(config["configId"]))["accessToken"]:
+        raise ApiError(
+            409,
+            "GitHubNotAuthorized",
+            "this repository has no GitHub credential yet. Authorise it in the console "
+            "(Repository settings -> Authorise GitHub); if it is already authorised, the "
+            "deployment's GitHub App is not installed on this repository.",
+            configId=config.get("configId"),
+            repository=config.get("repository"),
         )
 
     task_id = new_task_id()

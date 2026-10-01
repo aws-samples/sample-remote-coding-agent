@@ -1,23 +1,26 @@
-"""`/configurations` -- registering a repository, and the eight routes over it.
+"""`/configurations` -- registering a repository, and the nine routes over it.
 
-A configuration is one repository plus the AgentCore runtime, execution role and GitHub
-secret that serve it, so registering one is a *provisioning* act: this module writes the
-item and hands the slow half to `provisioner.enqueue`. That is also why `DELETE` is a
-`202` marking the item `DELETING` rather than a delete: the runtime, the role and the
-secret have to go first, and the provisioner removes the item last so a crash
-mid-teardown is resumable (invariant 22).
+A configuration is one repository plus the AgentCore runtime, execution role and memory
+that serve it, so registering one is a *provisioning* act: this module writes the item and
+hands the slow half to `provisioner.enqueue`. That is also why `DELETE` is a `202` marking
+the item `DELETING` rather than a delete: the runtime, the role and the memory have to go
+first, and the provisioner removes the item last so a crash mid-teardown is resumable
+(invariant 22).
 
-The GitHub token is the one value in this system that must never be readable
-afterwards. It goes straight into Secrets Manager, it is never an attribute on the item,
-it is never in a response, and the only log line that sees a request body puts it
-through `scrub`.
+**Registration takes no credential at all.** There is no `githubToken` field on any route
+here and no secret anywhere in the system: one GitHub App serves the whole deployment and
+AgentCore Identity's token vault holds its credentials -- see `github_app.py` for the whole
+design. What a repository needs beyond its registration is an **authorisation**, which
+`github_authorize` starts and `github_status` reports, keyed on this configuration's own id
+as the 3LO `userId`. A task started before that authorisation exists is refused with
+`409 GitHubNotAuthorized`, the same shape as `409 ConfigurationNotReady`.
 
-The two routes that write a token also *check* it first, in that order: an offline shape
-check (`_require_supported_token`, an allowlist) and then a live one that proves the
-token can push (`_require_pushable`, over `github_probe`). Both run before anything is
-written, so a refused token leaves nothing behind.
+`github_status` is also where the one check worth making lives: it fetches the live token
+and proves it can push (`_push_verdict`, over `github_probe`). That is what turns "did
+you remember to install the app on this repository?" from a question nobody can answer into
+a definite yes or no, 25 minutes before a container would otherwise find out.
 
-`memory` is the eighth route and the one exception to note 30 ("a read handler never gains
+`memory` is the one exception to note 30 ("a read handler never gains
 a permission to look something up live"): what an operator is asking for lives in the
 AgentCore Memory data plane and nowhere in DynamoDB, so a route over stored attributes
 could only ever answer with the `memoryId` the console already prints. What bounds it is
@@ -33,14 +36,14 @@ exists, only its memory does not.
 from __future__ import annotations
 
 import re
-import secrets as secrets_module  # `_common.secrets` is the Secrets Manager client
+import secrets as secrets_module
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
-from . import _common, github_probe, provisioner
+from . import _common, github_app, github_probe, provisioner
 from ._common import (
     LOG,
     ApiError,
@@ -90,7 +93,6 @@ _PUBLIC_FIELDS = (
     "verifyCommand",
     "setupCommand",
     "defaultBranch",
-    "secretArn",
     "executionRoleArn",
     "agentRuntimeArn",
     "agentRuntimeId",
@@ -124,26 +126,6 @@ _SSH_REPOSITORY = re.compile(
     r"^git@github\.com:(?P<owner>[A-Za-z0-9][A-Za-z0-9._-]*)/(?P<repo>[A-Za-z0-9][A-Za-z0-9._-]*?)(?:\.git)?$"
 )
 
-# The gate is this one: an *allowlist*, because a denylist admits every token type
-# nobody thought of, and each of those fails 25 minutes later inside a provisioned
-# container rather than here. The system supports exactly one credential -- a
-# fine-grained personal access token scoped to one repository. `{6,}` rather than a real
-# token's 93 characters because `_common._TOKEN_PATTERN` already spells the shape that
-# way, and one definition of "looks like a fine-grained PAT" in the bundle beats two.
-_FINE_GRAINED = re.compile(r"^github_pat_[A-Za-z0-9_]{6,}$")
-
-# A classic personal access token: the `ghp_` prefix, or the bare 40-hex shape of a
-# pre-2021 one. **Accepted**, with a warning -- see `_require_supported_token`.
-_CLASSIC_PREFIX = re.compile(r"^ghp_")
-_CLASSIC_HEX = re.compile(r"^[0-9a-f]{40}$")
-
-# The three GitHub App token prefixes, which stay refused. Not a security judgement: they
-# expire an hour after they are issued and nothing in this codebase refreshes one, so an
-# accepted `ghs_` registers fine and then fails inside a container an hour later, which is
-# the worst failure shape available. `gho_` is an OAuth user token and is refused with them
-# -- accepting it buys nothing a `ghp_` does not, and it cannot be scoped either.
-_EXPIRING_OR_OAUTH_PREFIX = re.compile(r"^gh[osur]_")
-
 
 def _new_config_id() -> str:
     return f"cfg_{secrets_module.token_hex(6)}"
@@ -165,100 +147,41 @@ def _repository_from_url(url: str) -> str:
     return f"{match.group('owner')}/{match.group('repo')}"
 
 
-def _require_supported_token(token: str) -> bool:
-    """The shape of a credential this system can use, checked without a network call.
-    Returns `True` when the token is a classic one, so the caller can warn.
-
-    **A classic PAT is accepted, and that is a deliberate trade.** It cannot be scoped to a
-    single repository, so a stolen one reaches everything its owner can -- but it takes three
-    decisions to create where a fine-grained token takes about nine, and the setup churn was
-    turning people away before they ever saw the agent run. The bound that matters is stated
-    in `README.md` instead and is the same one this system already relies on for AWS: a
-    dedicated, disposable account. On an account that owns only the demo repository the
-    distinction is academic; on an account that owns real work it is not, which is why the
-    README says so in as many words rather than leaving it implied.
-
-    Still an allowlist, and two shapes stay out:
-
-    * `ghs_`/`ghu_`/`ghr_` GitHub App tokens, because they expire an hour after issue and
-      nothing here refreshes one. Accepting one means registration succeeds and every task an
-      hour later fails inside a container -- later and more confusing than refusing it now.
-    * `gho_` OAuth user tokens, for the same expiry reason and because they buy nothing a
-      classic PAT does not.
-
-    Anything unrecognised is refused rather than passed through, for the reason the allowlist
-    has always had: an unknown shape is discovered 25 minutes later as a `git clone` failure
-    inside a provisioned container.
-
-    Free, and first: `_require_pushable` must never be reached by a token this can refuse.
-    """
-    if _FINE_GRAINED.match(token):
-        return False
-    if _CLASSIC_PREFIX.match(token) or _CLASSIC_HEX.match(token):
-        LOG.warning(
-            "a classic personal access token was accepted; it cannot be scoped to one "
-            "repository, so its blast radius is every repository its owner can reach"
-        )
-        return True
-    if _EXPIRING_OR_OAUTH_PREFIX.match(token):
-        raise ApiError(
-            400,
-            "ExpiringTokenRejected",
-            "that is a GitHub App installation or OAuth token. The API would accept it and "
-            "it expires an hour later, and this codebase has no refresh path -- so it would "
-            "register cleanly and then fail inside a container an hour from now. Use a "
-            "personal access token: fine-grained (github_pat_...) scoped to this repository "
-            "with contents: write and pull_requests: write, or a classic one (ghp_...), "
-            "which is accepted and is not scoped to a single repository.",
-        )
-    raise ApiError(
-        400,
-        "UnsupportedTokenType",
-        "that does not look like a GitHub personal access token. This system takes a "
-        "fine-grained token (github_pat_...) scoped to this repository with contents: write "
-        "and pull_requests: write, or a classic one (ghp_...). The check is an allowlist on "
-        "purpose -- anything else is accepted here and then fails inside a provisioned "
-        "container, half an hour after the mistake was made.",
-    )
-
-
-def _require_pushable(repository: str, token: str) -> None:
-    """PLAN Tier 0 #2, the live half: prove the token can push, before storing it.
+def _push_verdict(repository: str, token: str) -> dict[str, Any]:
+    """Can this authorisation actually push to this repository? A verdict, never a raise.
 
     A read-only check is not evidence. Selecting a repository grants `Metadata: read`
     automatically, so `GET /repos/{owner}/{repo}` answers 200 for a token with no
-    `Contents` permission at all -- a token was declared good three times that way and
-    still failed the push. `github_probe` therefore creates a throwaway ref and deletes
-    it, which is the only check that actually proves a write.
+    `Contents` permission at all -- and with a GitHub App the same call answers 200 for a
+    *public* repository the app was never installed on, because `permissions.push` there
+    reports the **user's** rights rather than the token's. Measured, and it is the trap this
+    function exists for. `github_probe` therefore creates a throwaway ref and deletes it,
+    which is the only check that proves a write.
 
-    The 400 carries GitHub's own sentence and the permission its
-    `x-accepted-github-permissions` header names. This system's contribution here is
-    delivering that accurate message in a few hundred milliseconds instead of 25 minutes;
-    rewording it would be a step backwards.
+    So the one failure an operator is overwhelmingly likely to hit -- authorising the app
+    but forgetting to install it on *this* repository -- is detected here rather than 25
+    minutes later inside a container. GitHub's answer to that is a 403 "Resource not
+    accessible by integration", which is passed through verbatim beside the install link.
 
-    A GitHub that cannot be reached, or that answers 5xx, or a repository with no commit
-    to branch from, is **not** a registration failure: the token is stored with a warning,
-    because a control plane that cannot register a repository during a GitHub incident is
-    worse than one that finds out late.
+    A verdict rather than an `ApiError`, because this runs on a *status* route: the
+    authorisation is real either way, and the console shows "authorised, but the app is not
+    installed here" as a state with an action attached, not as a failed request. A GitHub
+    that cannot be reached is `"unknown"` for the same reason -- an incident at GitHub must
+    not make a registered repository look misconfigured.
     """
     try:
         github_probe.check_can_push(repository, token=token)
     except github_probe.PushDenied as denied:
-        raise ApiError(
-            400,
-            "TokenCannotPush",
-            f"that token cannot push to {repository}. GitHub says: {denied.github_message}",
-            repository=repository,
-            githubStatus=denied.status,
-            acceptedPermissions=denied.accepted_permissions,
-        ) from denied
+        return {
+            "canPush": False,
+            "reason": denied.github_message,
+            "githubStatus": denied.status,
+            "acceptedPermissions": denied.accepted_permissions,
+        }
     except github_probe.ProbeUnavailable as unavailable:
-        LOG.warning(
-            "could not check whether the token can push to %s (%s); storing it anyway -- an "
-            "unreachable GitHub must not fail a registration",
-            repository,
-            unavailable,
-        )
+        LOG.warning("could not check push access to %s: %s", repository, unavailable)
+        return {"canPush": None, "reason": str(unavailable)}
+    return {"canPush": True, "reason": ""}
 
 
 def _public(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -374,9 +297,9 @@ def _retire_failed(config_id: str) -> None:
     """Send a stale `FAILED` configuration down the ordinary teardown path.
 
     Exactly what `delete` does, and deliberately the same two lines: a failed CREATE has
-    already made an IAM role at `provisioner.ROLE_PATH` and a secret at
-    `rca/github/{configId}`, and `provisioner._delete` is the only code that takes the
-    runtime, the role, its inline policy, the secret and the item in dependency order --
+    already made an IAM role at `provisioner.ROLE_PATH` and an AgentCore memory, and
+    `provisioner._delete` is the only code that takes the runtime, the memory, the role, its
+    inline policy and the item in dependency order --
     tolerating whatever the failed attempt never got as far as creating (`_is_gone`).
     Marking it `DELETING` first is what makes that teardown resumable (invariant 22) and
     what keeps it out of `_already_registered` while it drains.
@@ -409,9 +332,32 @@ def create(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
     # The only line in this module that sees a request body, and it is scrubbed. The
     # non-credential half is genuinely useful when a registration goes wrong.
     LOG.debug("registering %s", scrub(body))
-    repository_url, token = require(body, "repositoryUrl", "githubToken")
+    (repository_url,) = require(body, "repositoryUrl")
     repository = _repository_from_url(repository_url)
-    _require_supported_token(token)
+    if "githubToken" in body:
+        # Named rather than ignored. An operator -- or a script, or an older plugin -- still
+        # sending a PAT has to be told it is not used, because silently dropping it would
+        # leave them believing a credential was stored and then confused by a
+        # `GitHubNotAuthorized` on their first task.
+        raise ApiError(
+            400,
+            "TokenNotAccepted",
+            "registration takes no credential. This deployment authenticates through one "
+            "GitHub App held in AgentCore Identity, so there is no token to store: register "
+            "the repository, then authorise it at "
+            "POST /configurations/{configId}/github-authorize.",
+        )
+
+    if not github_app.is_connected():
+        # Before anything is written: a repository registered against a deployment with no
+        # GitHub App can never be authorised, so it would provision a runtime for 10 minutes
+        # and then be useless.
+        raise ApiError(
+            409,
+            "GitHubAppNotConnected",
+            "no GitHub App is connected to this deployment yet; connect one first "
+            "(the console's Connect GitHub page, or POST /github-app)",
+        )
 
     siblings = _repository_configurations(repository)
     existing = _already_registered(siblings)
@@ -424,16 +370,9 @@ def create(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
             repository=repository,
         )
 
-    # After the 409 and before every write: there is no point spending seconds against
-    # GitHub for a request that is about to conflict, and a token refused here must not
-    # have retired a stale configuration or created a secret on its way to the 400.
-    _require_pushable(repository, token)
-
-    # Before the secret, not after: a FAILED configuration serves nothing, so retiring it
-    # first costs no availability -- and if the registration below then fails, the operator
-    # retries against a repository that is genuinely free. The other order leaves an IAM
-    # role AND a secret holding a live GitHub token orphaned when the retirement write
-    # fails, and failing to tear down beats leaking a credential.
+    # A FAILED configuration serves nothing, so retiring it first costs no availability --
+    # and if the registration below then fails, the operator retries against a repository
+    # that is genuinely free.
     #
     # Only FAILED, never DELETING: a DELETING configuration's teardown is already in
     # flight, and a second DELETE message would be a redundant replay.
@@ -446,14 +385,6 @@ def create(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
         _retire_failed(stale_id)
 
     config_id = _new_config_id()
-    # The secret is written **before** the item, so a stored configuration always has a
-    # resolvable `secretArn` -- the execution role's inline policy names that literal
-    # ARN, and an item pointing at nothing is a runtime that can never authenticate.
-    secret = _common.secrets.create_secret(
-        Name=f"rca/github/{config_id}",
-        SecretString=token,
-        Description=f"GitHub token for {repository}",
-    )
     stamp = _common.now_iso()
     item: dict[str, Any] = {
         "configId": config_id,
@@ -461,7 +392,6 @@ def create(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
         "repositoryUrl": repository_url,
         "status": "PENDING",
         "statusReason": "",
-        "secretArn": secret["ARN"],
         "createdAt": stamp,
         "updatedAt": stamp,
     }
@@ -471,14 +401,9 @@ def create(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
         # detection, and an empty string is a *declared* "run nothing".
         if isinstance(value, str) and value.strip():
             item[field] = value
-    try:
-        _common.config_table.put_item(Item=item, ConditionExpression=Attr("configId").not_exists())
-    except ClientError:
-        # Ordering the secret first buys a resolvable ARN at the cost of this arm: an
-        # orphan secret holds the name `rca/github/<configId>` and a scheduled deletion
-        # would make it unrecoverable for 7 days.
-        _common.secrets.delete_secret(SecretId=secret["ARN"], ForceDeleteWithoutRecovery=True)
-        raise
+    # One write and no credential to order it against: with the secret gone, the item is the
+    # first thing this registration creates, so a failure here leaves nothing behind at all.
+    _common.config_table.put_item(Item=item, ConditionExpression=Attr("configId").not_exists())
 
     provisioner.enqueue(config_id, "CREATE")
     response = _public(item)
@@ -502,7 +427,15 @@ def list_(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
         arguments["ExclusiveStartKey"] = cursor
     page = _common.config_table.scan(**arguments)
     return 200, {
-        "items": [_public(item) for item in page.get("Items", [])],
+        # `github_app.SETTINGS_ID` is filtered here and not by a scan filter: a
+        # `FilterExpression` is applied *after* `Limit`, so a page that happened to contain
+        # the sentinel would come back one item short and a reader would see a gap rather
+        # than a hidden item. One item, removed in Python, costs nothing.
+        "items": [
+            _public(item)
+            for item in page.get("Items", [])
+            if item.get("configId") != github_app.SETTINGS_ID
+        ],
         "nextCursor": encode_cursor(page.get("LastEvaluatedKey")),
     }
 
@@ -596,8 +529,10 @@ def patch(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
                 f"{field} is not editable; the editable fields are "
                 f"{', '.join(EDITABLE_FIELDS)}. repositoryUrl is deliberately absent -- "
                 "re-register the repository rather than repointing an existing "
-                "configuration at a different one. githubToken goes to "
-                f"PUT /configurations/{config_id}/github-token.",
+                "configuration at a different one. There is no credential field: this "
+                "deployment authenticates through one GitHub App, so what a repository "
+                "needs is an authorisation, at "
+                f"POST /configurations/{config_id}/github-authorize.",
                 field=field,
                 editable=list(EDITABLE_FIELDS),
             )
@@ -662,8 +597,14 @@ def delete(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
                 404, "NotFound", "no configuration with that id", configId=config_id
             ) from err
         raise
-    # The item is removed by the provisioner, after the runtime, the role and the secret
+    # The item is removed by the provisioner, after the runtime, the memory and the role
     # are gone (invariant 22). A `202` says exactly that: accepted, not finished.
+    #
+    # The GitHub authorisation held in the token vault under this `configId` is *not* torn
+    # down here and does not need to be: it is keyed on an id that will never be issued
+    # again, so it is unreachable the moment the item is gone. What revokes credentials
+    # wholesale is `DELETE /github-app`, which deletes the provider and with it every
+    # authorisation in its vault entry.
     provisioner.enqueue(config_id, "DELETE")
     return 202, {"configId": config_id, "status": "DELETING", "queued": True, "phase": "DELETE"}
 
@@ -689,50 +630,113 @@ def runtime_update(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
 
 
 @handler
-def rotate_token(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
+def github_authorize(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Start -- or restart -- the 3LO leg that gives this repository a GitHub credential.
+
+    Returns either `authorizationUrl` for the console to open, or `authorized: true` when the
+    vault already holds a live authorisation for this configuration and `force` was not
+    asked for. One route for both because `GetResourceOauth2Token` answers both from one
+    call, and asking separately would be a second round trip that could disagree with the
+    first.
+
+    `consoleOrigin` is where AgentCore returns the operator's browser once GitHub is done,
+    and it has to be one of the URLs registered on the workload identity -- which is why the
+    console sends its own origin here and `github_app.connect` registered it. An
+    unregistered one is refused by the service, which is the check that stops a caller
+    redirecting an authorisation somewhere it chose.
+
+    No `READY` gate. Authorising is independent of provisioning and takes seconds where
+    provisioning takes 8-12 minutes, so the two deliberately run in parallel: an operator
+    who had to wait for `READY` first would spend that wait unable to do the one thing left
+    to do.
+    """
     config_id = path_param(event, "configId")
     body = parse_body(event)
-    unexpected = sorted(field for field in body if field != "githubToken")
-    if unexpected:
-        # The credential/settings split, enforced rather than documented: a route that
-        # quietly accepted `verifyCommand` here would be a second writer of the item,
-        # and this is the one request body in the system that is never echoed back.
-        raise ApiError(
-            400,
-            "CredentialBodyOnly",
-            "this route takes githubToken and nothing else; settings go to "
-            f"PATCH /configurations/{config_id}",
-            unexpected=unexpected,
-        )
-    (token,) = require(body, "githubToken")
-    _require_supported_token(token)
-
     config = _load_config(config_id)
-    secret_arn = config.get("secretArn")
-    if not secret_arn:
+    (console_origin,) = require(body, "consoleOrigin")
+    if not github_app.is_connected():
         raise ApiError(
             409,
-            "NoSecret",
-            "this configuration has no secret to rotate; re-register the repository",
+            "GitHubAppNotConnected",
+            "no GitHub App is connected to this deployment yet; connect one first",
             configId=config_id,
         )
-    # The probe needs the repository, so it cannot run before the item is loaded -- but it
-    # still runs before the write. A stored configuration always carries `repository`; if
-    # one somehow does not, an unprobed rotation beats a 500 on the route the operator
-    # reaches for *because* their token is wrong.
-    repository = config.get("repository")
-    if repository:
-        _require_pushable(str(repository), token)
-    else:
-        LOG.warning(
-            "configuration %s carries no repository; rotating without the push check", config_id
+    answer = github_app.resolve_token(
+        config_id,
+        return_url=github_app.require_https(str(console_origin), "consoleOrigin"),
+        force=bool(body.get("force")),
+    )
+    if answer["accessToken"]:
+        return 200, {
+            "configId": config_id,
+            "authorized": True,
+            "repository": config.get("repository"),
+        }
+    if not answer["authorizationUrl"]:
+        raise ApiError(
+            500,
+            "NoAuthorizationUrl",
+            "AgentCore returned neither a token nor an authorization URL",
+            configId=config_id,
         )
-    # A new **version** of the existing secret, never a second secret: the execution
-    # role's inline policy names this literal ARN, so a second secret would be
-    # unreadable by the runtime that needs it.
-    rotated = _common.secrets.put_secret_value(SecretId=secret_arn, SecretString=token)
-    LOG.info("rotated the github token for config %s", config_id)
-    return 200, {"rotated": True, "configId": config_id, "versionId": rotated.get("VersionId")}
+    return 200, {
+        "configId": config_id,
+        "authorized": False,
+        "authorizationUrl": answer["authorizationUrl"],
+        "repository": config.get("repository"),
+    }
+
+
+@handler
+def github_status(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Is this repository authorised, and can that authorisation actually push to it?
+
+    Two questions, because an operator can get the first right and the second wrong -- the
+    app is authorised account-wide but installed per repository, and forgetting to install
+    it on *this* one is the single most likely mistake in the whole setup. `_push_verdict`
+    settles it with a real write, and a refusal carries GitHub's own sentence plus the
+    install URL.
+
+    `canPush` is deliberately three-valued: `true`, `false`, or `null` when GitHub could not
+    be reached. A GitHub incident must not make a correctly configured repository look
+    broken.
+
+    This route holds a live GitHub token in memory for the duration of the probe and returns
+    **no part of it** -- not a prefix, not a length. The response is a verdict.
+    """
+    config_id = path_param(event, "configId")
+    config = _load_config(config_id)
+    repository = str(config.get("repository") or "")
+    if not github_app.is_connected():
+        return 200, {
+            "configId": config_id,
+            "repository": repository or None,
+            "authorized": False,
+            "reason": "no GitHub App is connected to this deployment",
+            "canPush": None,
+        }
+    # No `return_url`, no `force`: this is a read, and passing a return URL would make a
+    # status check capable of starting an authorisation.
+    answer = github_app.resolve_token(config_id)
+    token = answer["accessToken"]
+    if not token:
+        return 200, {
+            "configId": config_id,
+            "repository": repository or None,
+            "authorized": False,
+            "reason": "this repository has not been authorised yet",
+            "canPush": None,
+        }
+    verdict = _push_verdict(repository, token) if repository else {"canPush": None, "reason": ""}
+    return 200, {
+        "configId": config_id,
+        "repository": repository or None,
+        "authorized": True,
+        **verdict,
+        # Only when the answer is a definite no: an install link beside a working repository
+        # is an invitation to change something that is already right.
+        "installUrl": github_app.install_url() if verdict.get("canPush") is False else None,
+    }
 
 
 # The one definition of this module's routes. `infra/stacks/api_stack.py` wires them up and
@@ -745,6 +749,7 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
     ("PATCH", "/configurations/{configId}", "patch"),
     ("DELETE", "/configurations/{configId}", "delete"),
     ("POST", "/configurations/{configId}/runtime-update", "runtime_update"),
-    ("PUT", "/configurations/{configId}/github-token", "rotate_token"),
+    ("POST", "/configurations/{configId}/github-authorize", "github_authorize"),
+    ("GET", "/configurations/{configId}/github-status", "github_status"),
     ("GET", "/configurations/{configId}/memory", "memory"),
 )

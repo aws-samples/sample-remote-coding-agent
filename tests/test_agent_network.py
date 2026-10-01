@@ -97,7 +97,7 @@ def test_the_only_egress_the_agent_security_group_allows_is_443(template: Templa
     six interface endpoints gets a security group of its own, so the template carries seven.
     """
     groups = _properties(template, "AWS::EC2::SecurityGroup")
-    assert len(groups) == 7, (
+    assert len(groups) == 6, (
         f"{len(groups)} security groups: the interface endpoints bring their own, so a "
         f"test that assumes one silently asserts against an endpoint's group instead"
     )
@@ -131,12 +131,16 @@ def test_every_aws_call_that_carries_content_has_a_vpc_endpoint(template: Templa
     halves of ECR are load-bearing -- `ecr.api` hands out the auth token and `ecr.dkr`
     serves the layers, and one without the other fails the image pull, which presents as a
     runtime that never reaches `READY`."""
-    template.resource_count_is("AWS::EC2::VPCEndpoint", 8)
+    # Seven, not eight: `secretsmanager` went with the secret. The container's GitHub
+    # credential now comes from the AgentCore data plane, which `.bedrock-agentcore` below
+    # already covers, and AgentCore Identity's own Secrets Manager write happens service-side
+    # from a control-plane Lambda outside this VPC -- so an endpoint for it would be an ENI in
+    # every AZ with no client.
+    template.resource_count_is("AWS::EC2::VPCEndpoint", 7)
     endpoints = _properties(template, "AWS::EC2::VPCEndpoint")
     names = [_service_name(endpoint["ServiceName"]) for endpoint in endpoints]
     for suffix in (
         ".bedrock-runtime",
-        ".secretsmanager",
         ".ecr.api",
         ".ecr.dkr",
         ".logs",

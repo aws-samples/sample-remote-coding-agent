@@ -76,10 +76,9 @@ _DEFAULT_STACK_NAME = "SampleCodingAgentApi"
 def repository_from_url(url: str) -> str:
     """`owner/repo` for a GitHub clone URL, or `ValueError` naming both accepted forms.
 
-    Checked here, before the request, because `register_repository`'s body carries the
-    operator's GitHub token: a typo'd URL should fail locally rather than have the token
-    signed and sent to a route that answers 400 `InvalidRepositoryUrl`. The wording is
-    the control plane's, so the two failures read the same.
+    Checked here, before the request, so a typo fails on this machine rather than as a signed
+    call to a route that answers 400 `InvalidRepositoryUrl`. The wording is the control
+    plane's, so the two failures read the same.
     """
     match = _HTTPS_REPOSITORY.match(url) if isinstance(url, str) else None
     match = match or (_SSH_REPOSITORY.match(url) if isinstance(url, str) else None)
@@ -133,17 +132,6 @@ def _steps_line(steps: Any) -> str:
     return line
 
 
-def _secret_name(arn: Any) -> str:
-    """The secret's *name*, never the ARN and never the value. The name is
-    `rca/github/<configId>`, which is all anyone needs to find it in the console."""
-    text = str(arn or "")
-    if ":secret:" not in text:
-        return "stored in Secrets Manager"
-    tail = text.split(":secret:", 1)[1]
-    # Secrets Manager appends `-AbCdEf` to the name in the ARN.
-    return tail.rsplit("-", 1)[0] if "-" in tail else tail
-
-
 def _config_line(config: Mapping[str, Any]) -> str:
     return (
         f"- {config.get('configId', '?')}  {config.get('repository') or 'unknown repository'}  "
@@ -157,7 +145,7 @@ def repositories(payload: Mapping[str, Any]) -> str:
     if not items:
         return (
             "no repositories are registered yet. register_repository takes a GitHub clone URL "
-            "and a fine-grained personal access token, and only with the operator asking for it."
+            "and no credential, and only with the operator asking for it."
         )
 
     shown = items[:_MAX_ROWS]
@@ -193,12 +181,6 @@ def repository(payload: Mapping[str, Any]) -> str:
     ):
         if payload.get(field):
             lines.append(f"{label}: {_truncate(payload.get(field), _MAX_SHORT)}")
-    if payload.get("secretArn"):
-        # The name, and never the token: the token is write-only by design and is not
-        # readable from any route this package can reach.
-        lines.append(
-            f"github token: {_secret_name(payload.get('secretArn'))} (never readable again)"
-        )
     if payload.get("agentRuntimeId"):
         lines.append(f"agent runtime: {payload.get('agentRuntimeId')}")
     # Reported in both states, unlike `agent runtime:` above. A model told nothing about
@@ -236,18 +218,21 @@ def registered(payload: Mapping[str, Any]) -> str:
         f"registered {payload.get('repository') or 'the repository'} as "
         f"{payload.get('configId', '?')}",
         f"status: {payload.get('status') or 'PENDING'} — the AgentCore runtime, its execution "
-        "role and the GitHub secret are being provisioned now.",
+        "role and its memory are being provisioned now.",
     ]
     if payload.get("replacedConfigIds"):
         lines.append(
             "this replaced the earlier failed configuration "
             f"{', '.join(str(c) for c in payload['replacedConfigIds'])}; its runtime, its "
-            "execution role and its GitHub secret are being cleaned up now."
+            "execution role and its memory are being cleaned up now. The replacement does "
+            "not inherit its GitHub authorisation: it has a new configuration id, which is "
+            "what that authorisation is keyed on."
         )
     lines.append(_NOT_READY_NOTE)
     lines.append(
-        "the token went straight into Secrets Manager and is not readable from any tool "
-        "here; it is not repeated back."
+        "registration stores no credential. Tell the operator to authorise this repository "
+        "in the console — GitHub access → Authorise GitHub — which is a browser step no tool "
+        "here can take, and without which a task is refused with 409 GitHubNotAuthorized."
     )
     return "\n".join(lines)
 

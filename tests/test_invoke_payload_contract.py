@@ -111,7 +111,6 @@ def test_the_graph_turns_the_wire_payload_into_the_state_the_nodes_read() -> Non
     assert state["description"] == payload["prompt"]
     for wire, key in graph.PAYLOAD_TO_STATE.items():
         assert state[key] == payload[wire], f"{wire} did not reach the state as {key}"
-    assert state["secretArn"] == payload["secretArn"]
     assert state["verifyCommand"] == payload["verifyCommand"]
     assert state["setupCommand"] == payload["setupCommand"]
     # The payload has no say in this one; `run_task` re-asserts it off the checkpoint.
@@ -154,7 +153,14 @@ def test_every_field_the_dispatcher_sends_is_classified() -> None:
 def test_every_field_the_container_reads_is_sent_or_declared() -> None:
     """The direction that would have caught `secretArn`, which the container read from the
     payload and the dispatcher sent under no spelling at all -- so every container clone
-    was anonymous and no pull request could be opened."""
+    was anonymous and no pull request could be opened.
+
+    `secretArn` is no longer on either side: the GitHub credential comes from AgentCore
+    Identity's token vault keyed on `configId`, which is already a required payload field. The
+    lesson the test encodes is unchanged, and the removal is exactly the kind of edit it exists
+    to police -- a field dropped from the dispatcher while the container still read it would
+    fail the other direction of this pair.
+    """
     read = set(graph.PAYLOAD_TO_STATE) | set(graph.OPTIONAL_PAYLOAD_FIELDS)
     sent = set(invoke_payload.FIELDS)
 

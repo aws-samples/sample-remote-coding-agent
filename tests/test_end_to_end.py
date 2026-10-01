@@ -15,8 +15,10 @@ reasons, none of them added for tests:
 - **DynamoDB** -- `store._table` returns `None` when its variable is unset and every writer
   returns early, so with `TASKS_TABLE` and `CONFIG_TABLE` absent no client is built. That is the
   same path `local_run` takes, and `agent_helpers.no_aws` is the switch.
-- **Secrets Manager** -- `checkout` reads the PAT only `if state.get("secretArn")`, and `submit`
-  is guarded identically. No `secretArn` on the state, no lookup.
+- **The GitHub credential** -- `store.github_token` returns `""` and builds no client when
+  `CONFIG_TABLE` is unset, which is the same switch the DynamoDB writers use. `submit` reads
+  `GITHUB_TOKEN` from the environment first, which is the local path and the only one that can
+  produce a token here.
 - **Bedrock** -- `subagents.run_role` is the one call that reaches a model, and `RoleRecorder`
   replaces it. Its `side_effect` is what makes this a test of the nodes rather than of a mock:
   the stand-in *writes the files a real role would write*, so every node still reads its input
@@ -142,12 +144,12 @@ def origin(tmp_path: Path) -> Path:
 
 
 def _state(origin_path: Path, **overrides: Any) -> dict[str, Any]:
-    """The cold-start state, with the two fields that keep this offline left off.
+    """The cold-start state, with the field that keeps this offline left off.
 
-    No `secretArn` (so no Secrets Manager) and no `memoryId` (so no memory client). Spelling
-    them as absent rather than empty is the point: `checkout` and `submit` both branch on
-    `state.get("secretArn")` being falsy, and `TaskMemory.enabled` on `memoryId`, so absence is
-    the documented disabled signal rather than a second falsy spelling of it.
+    No `memoryId`, so no memory client: `TaskMemory.enabled` branches on it, and spelling it as
+    absent rather than empty is the point -- absence is the documented disabled signal rather
+    than a second falsy spelling of it. The GitHub credential needs nothing on the state at all
+    now; it is keyed on `configId` and gated on `CONFIG_TABLE`, which this suite never sets.
     """
     return {
         "taskId": TASK_ID,
@@ -340,7 +342,7 @@ async def test_a_failing_check_routes_back_to_plan_and_the_second_attempt_submit
 
     compiled = graph_module.build_graph()
     final = await compiled.ainvoke(
-        _state(origin, secretArn="", **{"noSubmit": False}), graph_module.graph_config(TASK_ID)
+        _state(origin, **{"noSubmit": False}), graph_module.graph_config(TASK_ID)
     )
 
     # The second pass through the plan node runs the **`replan`** role, not `plan` -- a different
@@ -406,7 +408,7 @@ async def test_nothing_in_the_loop_builds_an_aws_client(
     def forbidden(service: str, *args: Any, **kwargs: Any) -> Any:
         raise AssertionError(
             f"the loop built a boto3 client for {service!r}. With no TASKS_TABLE, no "
-            "CONFIG_TABLE, no secretArn and no memoryId, every AWS path is supposed to be "
+            "CONFIG_TABLE and no memoryId, every AWS path is supposed to be "
             "switched off -- see this module's docstring for the four of them."
         )
 

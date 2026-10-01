@@ -49,7 +49,7 @@ CONFIG_EXAMPLE = WEB / "config.example.js"
 # so an empty directory (or a module deleted in a refactor) fails here instead of turning
 # every parametrised test in this file into a vacuous pass.
 MODULES = ("activity", "api", "app", "auth", "configs", "status", "transitions", "ui")
-VIEWS = ("board", "card", "register", "sidebar", "task")
+VIEWS = ("board", "card", "connect", "register", "sidebar", "task")
 
 # `from "./x.js"` and `import("./views/x.js")`: `app.js` loads the four routed views
 # dynamically, so a `from`-only reader would see none of them.
@@ -369,9 +369,11 @@ def test_the_router_is_hash_only_so_cloudfront_never_sees_a_deep_link() -> None:
         f"text/html -- in the same change that adds the route."
     )
     offenders = _files_containing("replaceState")
-    assert offenders == {"js/auth.js"}, (
-        f"`replaceState` appears in {sorted(offenders)}. The one permitted use is auth.js "
-        f"stripping the OAuth `?code=` out of the address bar, which rewrites the query and "
+    assert offenders == {"js/auth.js", "js/views/connect.js"}, (
+        f"`replaceState` appears in {sorted(offenders)}. The two permitted uses are the same "
+        f"shape: `auth.js` stripping Cognito's OAuth `?code=` out of the address bar, and "
+        f"`views/connect.js` stripping GitHub's app-manifest `?code=` out of it -- both "
+        f"single-use codes that must not survive a reload. Each rewrites the **query** and "
         f"leaves `location.pathname` exactly as it was. Anywhere else it is a path-based "
         f"route wearing a quieter name, and it costs the same thing: `web_stack.py` has no "
         f"`error_responses` to catch the path, so the deep link is S3's "
@@ -504,45 +506,77 @@ def test_the_example_configuration_names_no_real_deployment() -> None:
     )
 
 
-def test_the_register_view_prefills_the_token_scope_and_warns_about_it() -> None:
-    """The register view links at a token page with the scope already ticked, and says what
-    that scope costs.
+def test_the_register_view_asks_for_no_credential_and_says_why() -> None:
+    """Registration takes a repository URL and nothing else, and the view has to *say* so.
 
-    The link points at the **classic** page, and that is the whole reason it can prefill:
-    `/settings/tokens/new` honours `scopes` and `description`, while GitHub documents no query
-    parameters for `/settings/personal-access-tokens/new` and ignores them. Getting a classic
-    token is ~3 decisions against ~9 in a list of about fifty permissions, which is the churn
-    this removes.
+    This replaced a pair of links to GitHub's token pages. There is no token to paste -- one
+    GitHub App serves the deployment and AgentCore Identity holds its credentials -- and the
+    absence needs explaining at the point an operator looks for the field, or they conclude the
+    form is broken. So two things are asserted: that no password input and no token page URL
+    survive anywhere in this view, and that it points at the two steps that replaced them.
 
-    What it must not do is remove the churn quietly. A classic token cannot be limited to one
-    repository, so the view has to say so where the operator is choosing, and the fine-grained
-    page has to stay offered as the tighter option. Asserted as text over the module, like
-    every other contract here: there is no DOM in this suite.
+    Asserted as text over the module, like every other contract here: there is no DOM in this
+    suite.
     """
     source = (WEB / "js" / "views" / "register.js").read_text(encoding="utf-8")
 
-    assert "https://github.com/settings/tokens/new" in source, (
-        "the primary link must be the classic token page -- it is the only one that honours "
-        "`?scopes=`, which is what makes a prefilled link possible at all."
-    )
-    assert "scopes: scope" in source or "scopes=" in source, (
-        "the link must pass the scope as a query parameter, or nothing is prefilled and the "
-        "operator is back to picking from a list."
-    )
-    assert "https://github.com/settings/personal-access-tokens/new" in source, (
-        "the fine-grained page must stay offered: it is the only shape that limits a leaked "
-        "token to one repository."
-    )
-    assert "not" in source and "limited to one repository" in source, (
-        "a classic token reaches every repository its owner can. The view must say so at the "
-        "point of choice, not only in the README."
-    )
-    for scope in ("repo", "public_repo"):
-        assert scope in source, (
-            f"the view must name the {scope!r} scope: `repo` is what the link pre-ticks, and "
-            "`public_repo` is the tighter answer for a public repository, which a URL cannot "
-            "know."
+    for forbidden in (
+        "github.com/settings/tokens/new",
+        "github.com/settings/personal-access-tokens/new",
+        "github_pat_",
+        'type: "password"',
+    ):
+        assert forbidden not in source, (
+            f"{forbidden!r} is still in the register view. There is no credential field any "
+            f"more, and a token input that survived a refactor would be storing something the "
+            f"rest of the system has nowhere to put."
         )
+    assert "No token to paste." in source, (
+        "an operator who expects to paste a token looks for the field; its absence has to be "
+        "explained where they look, not discovered as a 400 later."
+    )
+    assert "#/connect" in source, (
+        "the view has to link the GitHub App page, which is where installing happens and the "
+        "one step this form cannot do for them."
+    )
+    assert "Authorise GitHub" in source, (
+        "the settings half owns the per-repository authorisation, and it must be named: "
+        "installing and authorising are separate steps and both are needed."
+    )
+    assert "installUrl" in source, (
+        "the authorised-but-cannot-write state is the most likely mistake in the whole setup, "
+        "and its fix is on GitHub -- so the panel has to carry the install link."
+    )
+
+
+def test_the_connect_view_is_the_only_place_a_github_app_is_created() -> None:
+    """One click, and the three things that make it one.
+
+    The manifest has to be POSTed as a **form** rather than fetched: the request carries the
+    operator's github.com session and ends in GitHub rendering its own confirmation, which is a
+    navigation and not a response this code may read. `request_oauth_on_install` has to be
+    false -- true bounces the operator into the OAuth leg before the provider holds any
+    credentials, and AgentCore's callback answers a bare validation error naming `cookie` and
+    `state`, which was a real dead end. And the callback URL in the manifest has to be
+    AgentCore's, never the console's, or the authorisation code never reaches the vault.
+    """
+    source = (WEB / "js" / "views" / "connect.js").read_text(encoding="utf-8")
+
+    assert 'method: "POST"' in source and "form.submit()" in source, (
+        "the manifest is submitted as a form in this tab; a fetch cannot carry the operator's "
+        "github.com session or end in GitHub's own confirmation page."
+    )
+    assert (
+        "manifestFormUrl" in source and "callbackUrl" not in source.split("renderConnected")[0]
+    ), (
+        "both the form target and the callback come from the API: this view builds no "
+        "github.com URL of its own, so there is one place the callback can be wrong."
+    )
     assert "noopener" in source, (
-        "the token links open pages where a credential is created, so they must carry rel=noopener."
+        "the links open GitHub, where an app is created and an authorisation granted."
+    )
+    assert "location.search" in source, (
+        "GitHub appends `?code=` to the bare origin, so the code is in the query and never in "
+        "the hash -- a query goes before a fragment, so a `#/connect` redirect_url would put "
+        "the code inside the fragment where URLSearchParams never sees it."
     )

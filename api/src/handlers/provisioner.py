@@ -268,7 +268,7 @@ def _set_config(config_id: str, **fields: Any) -> None:
 
     The condition is invariant 23: `update_item` *creates* an absent item, so a late
     `CHECK` landing after a successful teardown would resurrect a configuration whose
-    runtime, role and secret are all gone -- and would even flip it to `READY`. A lost
+    runtime, role and memory are all gone -- and would even flip it to `READY`. A lost
     condition is therefore expected, not an error.
     """
     fields["updatedAt"] = _common.now_iso()
@@ -294,7 +294,7 @@ def _live_config(config_id: str, phase: str) -> dict[str, Any] | None:
 
     The other half of invariant 23: a message for a configuration that is gone, or on
     its way out, is finished work. Without it a late `CHECK` landing after a successful
-    teardown resurrects a configuration whose runtime, role and secret are all gone --
+    teardown resurrects a configuration whose runtime, role and memory are all gone --
     and flips it to `READY`.
     """
     config = _get_config(config_id)
@@ -331,27 +331,35 @@ def _role_name(config_id: str) -> str:
     return f"rca-{config_id}"
 
 
-def _account_and_region(config: Mapping[str, Any]) -> tuple[str, str]:
-    """The account and region for the trust policy's `aws:SourceAccount` and the table
-    ARNs in `_execution_role_policy`, read off the configuration's own `secretArn`
-    (`arn:aws:secretsmanager:<region>:<account>:secret:...`).
+def _account_and_region(_config: Mapping[str, Any] | None = None) -> tuple[str, str]:
+    """The account and region for the trust policy's `aws:SourceAccount` and the ARNs in
+    `_execution_role_policy`, read from this Lambda's own environment.
 
     Deliberately **not** `sts:GetCallerIdentity`: this Lambda's grant surface is exactly
-    the table `infra/stacks/api_stack.py` declares, and an STS client would widen it for
-    a value every provisioned configuration already carries. Same reasoning keeps
-    `_ensure_role` off `iam:GetRole`. `AWS_REGION` and a `*` account are the fallbacks,
-    so a half-written configuration still produces a policy IAM will accept.
+    the table `infra/stacks/api_stack.py` declares, and an STS client would widen it for a
+    value the deploy already knows at synth time. Same reasoning keeps `_ensure_role` off
+    `iam:GetRole`.
+
+    `AWS_ACCOUNT_ID` is forwarded by `_provisioner_environment` rather than derived. This
+    used to be parsed off the configuration's own `secretArn`, which worked only because
+    every configuration carried one; with the GitHub credential in AgentCore Identity's
+    token vault there is no per-configuration ARN left to read an account off, and the
+    alternatives -- the runtime ARN, the role ARN -- do not exist yet at the point `_create`
+    needs this. `*` and `AWS_REGION` stay as the fallbacks, so a local run with no
+    environment still produces a policy IAM will accept.
+
+    The parameter is kept, unused, so that every call site reads the same and a future value
+    that genuinely is per configuration has somewhere to come from.
     """
-    parts = str(config.get("secretArn") or "").split(":")
-    region, account = (parts[3], parts[4]) if len(parts) > 5 else ("", "")
-    return account or "*", region or os.environ.get("AWS_REGION", "") or "*"
+    account = os.environ.get("AWS_ACCOUNT_ID", "").strip()
+    return account or "*", os.environ.get("AWS_REGION", "") or "*"
 
 
 def _asset_repository_arn(image_uri: str) -> str:
     """The ECR repository ARN the agent image lives in, read off `AGENT_IMAGE_URI`
     (`<account>.dkr.ecr.<region>.amazonaws.com/<repository>[:<tag>|@<digest>]`) in the
-    same spirit as `_account_and_region` reading the account off `secretArn`: the value
-    is derivable from something every deploy already carries, so it needs no second
+    same spirit as `_account_and_region` reading its account out of the environment: the
+    value is derivable from something every deploy already carries, so it needs no second
     environment variable and no `ecr:DescribeRepositories` grant.
 
     `""` for an empty URI, and for anything that is not an ECR URI -- a Docker Hub image
@@ -540,13 +548,36 @@ def _execution_role_policy(config: Mapping[str, Any]) -> dict[str, Any]:
                 "Condition": own_partition,
             },
             {
-                "Sid": "ReadOwnSecret",
+                "Sid": "UseGitHubCredential",
                 "Effect": "Allow",
-                "Action": ["secretsmanager:GetSecretValue"],
-                # The **literal** ARN, which is why rotation writes a new *version* of
-                # this secret and never a second secret: a second one would not be
-                # readable by this role at all.
-                "Resource": str(config.get("secretArn") or ""),
+                # The two calls `agent/src/coding_agent/store.github_token` makes, and the
+                # whole of this container's credential path: mint a workload access token
+                # for this configuration's id as the 3LO `userId`, then exchange it for the
+                # GitHub token AgentCore Identity holds in its vault. No
+                # `secretsmanager:GetSecretValue` anywhere, because there is no secret.
+                "Action": [
+                    "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+                    "bedrock-agentcore:GetResourceOauth2Token",
+                ],
+                # **Both resources are as narrow as the service permits, and neither is a
+                # fence.** Measured against a throwaway role: `GetWorkloadAccessTokenForUserId`
+                # is denied on an individual `workload-identity/<name>` ARN and on
+                # `workload-identity-directory/default*`, and allowed only on
+                # `workload-identity-directory/*`; `GetResourceOauth2Token` is denied on the
+                # provider's own ARN, on `token-vault/default/*` and on `token-vault/*`, and
+                # allowed only on `*`. There is also no condition key for the user id. So
+                # unlike `UseOwnMemory` beside it, this statement cannot name one
+                # repository's credential.
+                #
+                # What bounds it instead is stated rather than implied, in `CLAUDE.md`'s
+                # "What remains exposed": a container knows exactly one `configId` -- its own,
+                # because invariant 31 lets it read exactly one configuration item -- and the
+                # GitHub App's installation list is what bounds the token's reach on GitHub.
+                # Do not reword this into a claim of least privilege it does not have.
+                "Resource": [
+                    f"arn:aws:bedrock-agentcore:{region}:{account}:workload-identity-directory/*",
+                    "*",
+                ],
             },
             {
                 "Sid": "WriteRuntimeLogs",
@@ -836,10 +867,11 @@ def _configuration_environment(config: Mapping[str, Any]) -> dict[str, str]:
     """Create-time defaults for the per-configuration keys. On an update these lose to
     whatever the live runtime carries, because the live value is the one the container
     has been using."""
-    return {
-        "CONFIG_ID": str(config.get("configId", "")),
-        "SECRET_ARN": str(config.get("secretArn") or ""),
-    }
+    # `CONFIG_ID` alone, and it is now load-bearing twice over: it keys the container's
+    # DynamoDB reads *and* it is the 3LO `userId` the GitHub credential is stored under, so
+    # `store.github_token` needs no second variable. `SECRET_ARN` used to be here and is
+    # gone with the secret.
+    return {"CONFIG_ID": str(config.get("configId", ""))}
 
 
 def _container_uri(spec: Mapping[str, Any]) -> str | None:
@@ -1496,15 +1528,10 @@ def _delete(config_id: str) -> None:
             raise
         LOG.info("role %s was already gone", role_name)
 
-    secret_arn = str(config.get("secretArn") or "")
-    if secret_arn:
-        try:
-            _common.secrets.delete_secret(SecretId=secret_arn, ForceDeleteWithoutRecovery=True)
-        except ClientError as err:
-            if not _is_gone(err):
-                raise
-            LOG.info("secret for config %s was already gone", config_id)
-
+    # No secret to delete, and no stored GitHub authorisation to revoke either: the token
+    # vault keys this repository's credential on `configId`, which is random and never
+    # reissued, so removing the item below is what makes it unreachable. `DELETE /github-app`
+    # is the wholesale revoke.
     _common.config_table.delete_item(Key={"configId": config_id})
     LOG.info("config %s torn down", config_id)
 

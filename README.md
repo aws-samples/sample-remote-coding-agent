@@ -36,10 +36,8 @@ it does not make untrusted code safe. A runtime or publishing failure may produc
 
 - A dedicated AWS account, with credentials for your intended profile and region.
 - Docker running, Python ≥ 3.11 (tested with 3.12), `uv`, Node ≥ 20, and the AWS CLI.
-- A trusted, disposable repository and a **GitHub PAT**. A classic token with the `repo`
-  scope is the quickest, but it is not limited to one repository; see
-  [Token scope](#token-scope-read-this). A fine-grained token with `contents: write` and
-  `pull requests: write` is the tighter choice. Step 3 links straight to either page.
+- A trusted, disposable repository and a GitHub account you can create an app under. No token
+  to paste — step 3 creates a **GitHub App**; see [GitHub access](#github-access-read-this).
 
 Preflight checks AgentCore/model availability and prints any required CDK bootstrap command.
 The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI works without it.
@@ -62,12 +60,20 @@ The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI work
 
 2. **Sign in at the console URL.** Cognito emails a temporary password to `EMAIL`; check spam and change it on first sign-in.
 
-3. **Register a disposable repository** with **+ Add repository**. Enter the repository URL
-   first, then use the **Create a token for … on GitHub — scope prefilled** link under the
-   token field: it opens GitHub with `repo` already ticked and the description naming that
-   repository, so you set an expiry and press Generate. Paste the token back and leave
-   Advanced folded. Wait **8–12 min** for `READY`; starting sooner returns
-   `409 ConfigurationNotReady`.
+3. **Connect GitHub.** With nothing registered the console opens on **Connect GitHub**.
+   Press **Create the GitHub App on GitHub** — the app arrives pre-described, you confirm it
+   there, and nothing is copied or pasted. Then **Install on GitHub** and choose **Only
+   select repositories**: that list bounds which repositories the agent can reach.
+
+4. **Register a disposable repository** with **+ Add repository**: the URL, Advanced folded,
+   no credential field. Then press **Authorise GitHub** on the settings page you land on and
+   approve in the tab that opens. The page notices on its own and confirms it by writing a
+   throwaway branch and deleting it; if it says the app cannot write here, the app is not
+   installed on this repository and the panel links the fix.
+
+   Provisioning runs in parallel and takes **8–12 min** to reach `READY`. A task started
+   sooner returns `409 ConfigurationNotReady`; one started before authorising returns
+   `409 GitHubNotAuthorized`.
 
    The agent pushes branches and opens PRs. Start with a small repository whose tests already
    pass. Declare setup/test entry points so verification can run:
@@ -146,7 +152,7 @@ It writes status/activity to DynamoDB; the console polls through the API. AgentC
 is created at registration and deleted at deregistration. Tasks can retrieve earlier lessons;
 a repository without memory runs without it.
 
-VPC endpoints connect runtime traffic to **Bedrock, AgentCore, Secrets Manager,
+VPC endpoints connect runtime traffic to **Bedrock, AgentCore,
 DynamoDB, ECR API/Docker, S3, and CloudWatch Logs**. Lambda runs outside the agent VPC.
 GitHub receives source code through clone/push/PR traffic. Package installation reaches
 PyPI/npm, and the documentation tool reaches AWS documentation. These are intended destinations,
@@ -188,40 +194,37 @@ Run `make setup`, `make test`, and `make lint`. Local tests use fake AWS service
 See [contribution guidelines](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md),
 and [maintainer reference](CLAUDE.md). Keep diagrams and previews in sync with UI changes.
 
-## Token scope: read this
+## GitHub access: read this
 
-The console offers two credentials and they are **not** equivalent.
+**Nothing here stores a GitHub token.** One GitHub App serves the deployment, AgentCore
+Identity's token vault holds its client secret, and each container fetches a short-lived
+token when it needs one. There is no secret to rotate and no credential field on any page.
 
-| | classic PAT (`ghp_…`) | fine-grained PAT (`github_pat_…`) |
+Two steps are separate and both are required:
+
+| | what it does | where |
 |---|---|---|
-| to create | ~3 decisions, scope pre-ticked from the console link | ~9 decisions, no prefill possible |
-| reach if leaked | **every repository its owner can access** | the one repository you selected |
-| scope to set | `repo`, or `public_repo` for a public repository | `contents: write`, `pull requests: write` |
+| **Install** | grants the app access to repositories | GitHub, per repository |
+| **Authorise** | gives the agent a credential to act with | console, per repository |
 
-A classic token **cannot be limited to one repository.** GitHub does not offer that, so a
-classic token registered here can read and write everything its owner can reach. This system
-runs an arbitrary repository's own setup and test commands with a model pointed at them, and
-it does not prevent prompt injection — so treat the token as reachable by that code.
+**The installation list is the blast radius.** A token issued to one repository's container
+can write to *every* repository the app is installed on. That is how a GitHub App works and it
+is the one thing this design gives up against a per-repository fine-grained token, so install
+it only where you intend to run the agent. This system runs an arbitrary repository's own setup
+and test commands with a model pointed at them and does not prevent prompt injection, so treat
+every token the app can issue as reachable by that code. **Use a GitHub account that owns
+nothing you mind losing** — the same bound this sample asks for on the AWS side.
 
-Both are accepted because the fine-grained flow was turning people away before they saw a
-single run: nine decisions in a list of about fifty permissions, none of which can be
-pre-filled from a link. The classic page can be, so it is one click from Generate.
-
-**If you use a classic token, use a GitHub account that owns nothing you mind losing.** That
-is the same bound this sample already asks for on the AWS side — a dedicated account — and it
-is what makes the wider scope survivable rather than merely convenient. For anything else,
-spend the extra clicks on a fine-grained token.
-
-GitHub App and OAuth tokens (`ghs_`, `ghu_`, `ghr_`, `gho_`) are refused, and not on security
-grounds: they expire an hour after issue and nothing here refreshes one, so registration
-would succeed and every task an hour later would fail inside a container.
+Disconnecting on the **GitHub App** page revokes every repository's authorisation at once. The
+app belongs to your GitHub account; delete it there when you are finished.
 
 ## Limitations
 
-- **The token is minted by hand.** GitHub has no API to create a PAT, so this cannot be
-  automated. The alternative is a GitHub App, which needs an App registered and installed
-  before the first repository can be added — more setup than it saves for one repository.
-- **A classic token's blast radius is its owner's whole account**, as above.
+- **Installing the app is a manual step**, once per repository. GitHub requires a human to
+  grant an app access to a repository, and authorising requires a human to approve it — there
+  is no machine-to-machine path, because GitHub implements no `client_credentials` grant.
+- **One app covers every registered repository**, so its installation list is the blast
+  radius, as above.
 - **Commit attribution** defaults to an address that matches no GitHub account, so checks
   that gate on it will refuse the agent's pull requests. Pass `-c gitAuthorName=` and
   `-c gitAuthorEmail=` at deploy time to fix it.
@@ -230,8 +233,8 @@ would succeed and every task an hour later would fail inside a container.
 
 ## Security
 
-Protect the default branch of the repository you register. Read [Token scope](#token-scope-read-this)
-before choosing a credential.
+Protect the default branch of the repository you register. Read
+[GitHub access](#github-access-read-this) before installing the app anywhere.
 The account boundary does not stop repository code from making outbound HTTPS requests.
 [Remaining exposure](CLAUDE.md#what-remains-exposed)
 
