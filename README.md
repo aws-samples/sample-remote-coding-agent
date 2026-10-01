@@ -225,9 +225,6 @@ app belongs to your GitHub account; delete it there when you are finished.
   is no machine-to-machine path, because GitHub implements no `client_credentials` grant.
 - **One app covers every registered repository**, so its installation list is the blast
   radius, as above.
-- **Commit attribution** defaults to an address that matches no GitHub account, so checks
-  that gate on it will refuse the agent's pull requests. Pass `-c gitAuthorName=` and
-  `-c gitAuthorEmail=` at deploy time to fix it.
 - **AgentCore Runtime V2 only**, so deployment is limited to `us-east-1`, `us-east-2`,
   `us-west-2`, `eu-west-1` and `ap-northeast-1`.
 

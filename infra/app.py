@@ -243,17 +243,19 @@ def main() -> None:
         # existing runtime rather than leaving each one with whatever it was born with
         # (invariant 24).
         goal_enabled=_flag_context(app, "codeGoalEnabled", default=True),
-        # The identity every run's commit carries, and the reason it is a context key rather
-        # than a constant: the container's default, `agent@localhost`, matches no GitHub
-        # account, so GitHub resolves no author and any check that gates on commit
-        # attribution refuses the pull request -- a Vercel preview answers `Deployment was
-        # blocked` and never builds. Set both to an address GitHub can resolve, e.g.
-        #   make deploy EMAIL=... CDK_CONTEXT='-c gitAuthorEmail=<id>+<user>@users.noreply.github.com'
-        # A dedicated bot account is the honest choice over a human's address: the commits
-        # were not written by a person, and the audit trail should not claim they were.
-        # Empty is passed through deliberately -- `git_ops._identity` reads "" as unset and
-        # uses its own default, so clearing the key restores the default rather than setting
-        # an empty identity git would reject.
+        # The identity every run's commit carries. **Both default to empty on purpose, and
+        # empty does not mean broken**: `provisioner._git_identity` falls back to the
+        # connected GitHub App's own bot account, which is a dedicated bot rather than a
+        # human's address -- the commits were not written by a person and the audit trail
+        # should not claim they were. So a deploy sets neither of these and attribution still
+        # resolves, which is why the walkthrough configures nothing.
+        #
+        # They remain as an override for a deployment that wants its own bot identity:
+        #   make deploy EMAIL=... CDK_CONTEXT='-c gitAuthorEmail=<botUserId>+<login>@users.noreply.github.com'
+        # Either one present selects the pair, so a name from here and an address from the
+        # app is not a combination anyone can end up with. Empty is passed through
+        # deliberately -- the group is carried forward if a key is omitted, so sending "" is
+        # what makes clearing the key fall back rather than freeze the old value.
         git_author_name=_context(app, "gitAuthorName", ""),
         git_author_email=_context(app, "gitAuthorEmail", ""),
         env=env,
