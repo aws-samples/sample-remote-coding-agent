@@ -181,7 +181,7 @@ _WALKTHROUGH_HEADING = "## Quick start"
 # reach the server as these three variables (`plugins/sample-rca/.mcp.json`), and
 # `mcp/src/rca_mcp/client.py::resolve_endpoint` gives `RCA_API_URL` precedence over both the
 # `~/.rca/endpoint.json` cache and stack discovery.
-_ENDPOINT_OVERRIDES = ("RCA_API_URL", "AWS_REGION", "RCA_STACK_NAME")
+_ENDPOINT_OVERRIDES = ("RCA_API_URL", "RCA_REGION", "RCA_STACK_NAME")
 
 # Any one of these words, in the step that names the overrides, is enough to say an override
 # BEATS discovery rather than merely existing. A word list and not a sentence match: the prose is

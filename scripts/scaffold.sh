@@ -276,4 +276,12 @@ git -C "$repo_dir" push --quiet --set-upstream origin "HEAD:refs/heads/$branch" 
 
 slug=$(printf '%s' "$remote_url" | sed -E 's#^(https://github\.com/|git@github\.com:)##; s#\.git$##')
 printf '\nscaffold: pushed %s to %s.\n' "$branch" "$slug"
-printf 'Next: register %s in the console with + Add repository, wait for READY, then start a task.\n' "$slug"
+# The full URL, not the slug: the console's repository field accepts only
+# https://github.com/owner/repo or git@github.com:owner/repo.git, and refused the shorthand
+# this line used to print. The install comes first because registering an uninstalled
+# repository succeeds and then cannot be authorised.
+printf 'Next:\n'
+printf '  1. Install the GitHub App on %s: the console'"'"'s GitHub App page, then Install on GitHub.\n' "$slug"
+printf '  2. Register https://github.com/%s in the console with + Add repository.\n' "$slug"
+printf '  3. Wait for READY, then start a task.\n'
+

@@ -95,6 +95,24 @@ esac
 _SOURCE_PATHSPEC = (".", ":(exclude).agent", ":(exclude).agent.repo")
 
 
+# What a repository's own setup and test commands leave behind, as `.gitignore` patterns.
+# Written to the clone's `.git/info/exclude` -- local to the clone, never pushed, and never
+# an edit to the repository's own `.gitignore` -- because `commit` stages with `git add -A`
+# and a repository with no `.gitignore` otherwise ships its bytecode: a live run against a
+# repository without one opened a pull request carrying `src/__pycache__/*.pyc`. Tracked
+# files are untouched (an exclude only hides *untracked* paths), so a repository that
+# deliberately commits one of these keeps doing so.
+BUILD_ARTIFACT_PATTERNS = (
+    "__pycache__/",
+    "*.py[cod]",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    ".venv/",
+    "node_modules/",
+)
+
+
 class GitError(RuntimeError):
     """A git command failed, timed out, or ran somewhere unusable.
 
@@ -264,6 +282,21 @@ def create_branch(repo: Path, branch: str) -> None:
         _git(["checkout", branch], cwd=repo)
         return
     _git(["checkout", "-b", branch], cwd=repo)
+
+
+def exclude_build_artifacts(repo: Path) -> None:
+    """Add `BUILD_ARTIFACT_PATTERNS` to the clone's `.git/info/exclude`, once each.
+
+    Idempotent, because a resumed task re-runs `checkout` against the same clone.
+    """
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    present = exclude.read_text(encoding="utf-8").splitlines() if exclude.exists() else []
+    missing = [pattern for pattern in BUILD_ARTIFACT_PATTERNS if pattern not in present]
+    if not missing:
+        return
+    lines = [*present, "# build artefacts the agent never commits (git_ops)", *missing]
+    exclude.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def current_branch(repo: Path) -> str:

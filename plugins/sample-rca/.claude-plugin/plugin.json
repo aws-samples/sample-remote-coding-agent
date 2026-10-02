@@ -1,6 +1,6 @@
 {
   "name": "sample-rca",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Dispatch a coding task to a remote agent running in your own AWS account, and get a pull request back.",
   "homepage": "https://github.com/aws-samples/sample-remote-coding-agent",
   "repository": "https://github.com/aws-samples/sample-remote-coding-agent",
@@ -15,7 +15,7 @@
       "type": "string",
       "title": "AWS region",
       "required": false,
-      "description": "Optional override for the region the deployment lives in. Leave it empty to use the region your AWS credentials already resolve to. Setting it exports AWS_REGION, which pins the region and so takes precedence over the region named in the ~/.rca/endpoint.json endpoint document `make deploy` writes — an unpinned region would otherwise follow that document into whichever region was deployed to last. Set it only if you deploy into more than one region; every tool prints the region it used on its `endpoint used:` line."
+      "description": "Optional override for the region the deployment lives in. Leave it empty to use the region your AWS credentials already resolve to. Setting it exports RCA_REGION, which pins the region and so takes precedence over the region named in the ~/.rca/endpoint.json endpoint document `make deploy` writes — an unpinned region would otherwise follow that document into whichever region was deployed to last. Set it only if you deploy into more than one region; every tool prints the region it used on its `endpoint used:` line. It is RCA_REGION and not AWS_REGION on purpose: AWS_REGION is left exactly as your shell and Claude Code set it, and is never read as a pin."
     },
     "stack_name": {
       "type": "string",

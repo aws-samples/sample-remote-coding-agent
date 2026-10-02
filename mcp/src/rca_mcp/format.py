@@ -230,9 +230,12 @@ def registered(payload: Mapping[str, Any]) -> str:
         )
     lines.append(_NOT_READY_NOTE)
     lines.append(
-        "registration stores no credential. Tell the operator to authorise this repository "
-        "in the console — GitHub access → Authorise GitHub — which is a browser step no tool "
-        "here can take, and without which a task is refused with 409 GitHubNotAuthorized."
+        "registration stores no credential, so the repository still has to be authorised, "
+        "which is a browser step no tool here can take. Tell the operator to open this "
+        "repository's page in the console: the page starts the authorisation by itself, and "
+        "if their GitHub account has already approved the app, GitHub sends them straight "
+        "back with nothing to click (otherwise: GitHub access → Authorise GitHub). Until it "
+        "is done a task is refused with 409 GitHubNotAuthorized."
     )
     return "\n".join(lines)
 
@@ -243,7 +246,7 @@ def registered(payload: Mapping[str, Any]) -> str:
 # incident this line exists for.
 _ENDPOINT_SOURCES = {
     "env": (
-        "supplied by the RCA_API_URL override — the rca plugin's `api_url` userConfig "
+        "supplied by the RCA_API_URL override — the sample-rca plugin's `api_url` userConfig "
         "setting is one of these, and it takes precedence over the endpoint document "
         "~/.rca/endpoint.json that `make deploy` writes. If this is not the deployment "
         "you meant, clear `api_url` and the endpoint document wins instead."
@@ -253,8 +256,8 @@ _ENDPOINT_SOURCES = {
         "at the end of the last deploy from this machine. No RCA_API_URL override is set."
     ),
     "cloudformation": (
-        "discovered from the ApiUrl output of the CloudFormation stack "
-        f"{_DEFAULT_STACK_NAME} (RCA_STACK_NAME names a different one), because neither "
+        "discovered from the ApiUrl output of the CloudFormation stack — "
+        f"{_DEFAULT_STACK_NAME}, unless RCA_STACK_NAME names another — because neither "
         "an RCA_API_URL override nor a usable ~/.rca/endpoint.json was found."
     ),
     "explicit": (

@@ -119,7 +119,7 @@ both at once. Watch **Planning → Coding → Verifying → Done** and click the
    /plugin install sample-rca@sample-remote-coding-agent
    ```
 
-   Leave the config fields empty for discovery. `RCA_API_URL`, `AWS_REGION`, and
+   Leave the config fields empty for discovery. `RCA_API_URL`, `RCA_REGION`, and
    `RCA_STACK_NAME` overrides **outrank** discovery and may select another fleet.
    Check the `endpoint used:` line. Restarting loads the plugin's MCP tools.
 

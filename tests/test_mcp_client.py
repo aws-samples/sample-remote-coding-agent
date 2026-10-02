@@ -8,7 +8,7 @@ needs both -- the stale-cache recovery -- uses both at once.
 `HOME` is redirected to `tmp_path` wherever the cache is in play. `client.cache_path()`
 is `Path.home() / ".rca" / "endpoint.json"` rather than an invented `RCA_HOME` precisely
 so that redirect is the whole of the isolation, and so the path a test writes is the same
-one `/sample-rca:setup` writes.
+one `make deploy` writes.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from rca_mcp.client import (
     DEFAULT_STACK_NAME,
     ApiClient,
     ApiError,
+    RcaError,
     cache_path,
     resolve_endpoint,
 )
@@ -136,9 +137,12 @@ def test_a_blank_override_is_not_an_endpoint(home: Path, monkeypatch: pytest.Mon
         )
 
 
-def test_the_cache_is_read_and_written(home: Path) -> None:
+def test_the_cache_is_read_and_written(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """One `describe_stacks` per machine, and a cache that refuses to serve the wrong
     deployment or a corrupt file."""
+    # Pinned, so the region half of the cache guard is live below. `RCA_REGION` and not
+    # conftest's `AWS_REGION`: the ambient variable never pins.
+    monkeypatch.setenv("RCA_REGION", _REGION)
     with mock_aws():
         _create_stack()
 
@@ -160,8 +164,8 @@ def test_the_cache_is_read_and_written(home: Path) -> None:
         # of these would otherwise dispatch a task into the wrong account.
         _write_cache("https://other.example.com", stack="OtherApi")
         assert resolve_endpoint() == (_API_URL, "cloudformation", _REGION)
-        # Specifically the *pinned* case: conftest's `_aws_env` sets AWS_REGION, which is
-        # what keeps the region half of the guard live here. Unpinned, the cache's own
+        # Specifically the *pinned* case: `RCA_REGION` above is what keeps the region half
+        # of the guard live here. Unpinned, the cache's own
         # region would be honoured instead -- see the cross-region tests below.
         _write_cache("https://other.example.com", region=_OTHER_REGION)
         assert resolve_endpoint() == (_API_URL, "cloudformation", _REGION)
@@ -227,6 +231,56 @@ def test_a_cache_naming_another_stack_is_ignored_even_unpinned(
         assert resolve_endpoint() == (_OTHER_URL, "cloudformation", _OTHER_REGION)
 
 
+def test_an_ambient_aws_region_does_not_pin_the_region(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code on Bedrock sets `AWS_REGION` in its own settings `env` for the *model's*
+    region, and a project-scoped server inherits it. Read as a pin, that sent `/remote` to
+    the model's region and answered "not deployed" while the endpoint document named the
+    deployment's -- measured from a checkout whose Claude Code ran on Bedrock in us-west-2
+    against a fleet in us-east-1. Ambient, the endpoint document's own region wins.
+    """
+    monkeypatch.delenv("RCA_REGION", raising=False)
+    monkeypatch.setenv("AWS_REGION", _OTHER_REGION)
+    _write_cache(_API_URL, region=_REGION)
+
+    assert resolve_endpoint() == (_API_URL, "cache", _REGION)
+
+
+def test_rca_region_is_the_pin(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The plugin's `aws_region` field arrives as `RCA_REGION`, and that one does pin."""
+    monkeypatch.setenv("RCA_REGION", _OTHER_REGION)
+    _write_cache(_API_URL, region=_REGION)
+
+    with mock_aws():
+        _create_stack(url=_OTHER_URL, region=_OTHER_REGION)
+        assert resolve_endpoint() == (_OTHER_URL, "cloudformation", _OTHER_REGION)
+
+
+def test_an_unreachable_endpoint_names_where_its_url_came_from(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deleted deployment's URL answered `[Errno 8] nodename nor servname provided`, and
+    the fix depends entirely on which source supplied it -- so the message names it."""
+
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("[Errno 8] nodename nor servname provided", request=request)
+
+    monkeypatch.setenv("RCA_API_URL", _STALE_URL)
+    with pytest.raises(RcaError) as raised:
+        ApiClient(transport=httpx.MockTransport(unreachable)).get("/configurations")
+    assert "stale456.execute-api" in str(raised.value)
+    assert "RCA_API_URL" in str(raised.value) and "api_url" in str(raised.value)
+
+    monkeypatch.delenv("RCA_API_URL")
+    _write_cache(_STALE_URL)
+    with pytest.raises(RcaError) as raised:
+        ApiClient(transport=httpx.MockTransport(unreachable)).get("/configurations")
+    assert "endpoint.json" in str(raised.value), (
+        f"a dead cached URL is fixed by deleting the document; say so. Got {raised.value}"
+    )
+
+
 def test_an_explicitly_pinned_region_ignores_a_cache_from_another_one(home: Path) -> None:
     """A developer with two deployments who names one must not be served the other.
 
@@ -269,7 +323,7 @@ def test_provenance_reports_the_settled_endpoint_without_resolving_one(
 
     `endpoint()` is lazy so `main()` starts against an account with no deployment; an
     accessor that resolved on demand would turn a line of *reporting* into a
-    `describe_stacks` on every tool call, and would make the "/sample-rca:setup" answer
+    `describe_stacks` on every tool call, and would make the "not deployed" answer
     depend on a credential chain. Both stubs are armed: any AWS session is an assertion,
     and so is any request reaching the transport.
 

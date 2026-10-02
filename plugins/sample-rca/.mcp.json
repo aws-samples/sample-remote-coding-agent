@@ -4,12 +4,12 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/aws-samples/sample-remote-coding-agent@ebc906eb03c7e307268e9c5e1929c787a2298d96#subdirectory=mcp",
+        "git+https://github.com/aws-samples/sample-remote-coding-agent@70d88f132da1ceb7420d6dda6894cda7449f1a72#subdirectory=mcp",
         "rca-mcp"
       ],
       "env": {
         "RCA_API_URL": "${user_config.api_url}",
-        "AWS_REGION": "${user_config.aws_region}",
+        "RCA_REGION": "${user_config.aws_region}",
         "RCA_STACK_NAME": "${user_config.stack_name}"
       }
     }

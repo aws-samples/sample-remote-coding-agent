@@ -201,6 +201,16 @@ already been settled — `mcp/src/rca_mcp/client.py::provenance` — rendered by
 `mcp/src/rca_mcp/server.py::call_tool`, so no tool pays a `describe_stacks` for it and a
 tool that failed during discovery prints no line at all.
 
+**The region pin is `RCA_REGION`, and `AWS_REGION` never pins.** Claude Code on Bedrock sets
+`AWS_REGION` in its own `settings.json` `env` for the model's region, and every MCP server it
+starts inherits it. Read as a pin, that sent the project-scoped server -- the un-namespaced
+`/remote` -- to the model's region (us-west-2) and answered "not deployed" while
+`~/.rca/endpoint.json` named the fleet's (us-east-1); and the plugin exporting its
+`aws_region` field *as* `AWS_REGION` blanked the shell's own value whenever the field was
+empty. So the plugin exports `RCA_REGION`, `client.resolve_endpoint` treats only that and
+`RCA_STACK_NAME` as pins, and `tests/test_plugin_manifest.py` refuses an `AWS_REGION` in
+either `.mcp.json`.
+
 **The plugin name and the stack prefix are both qualified, and that is not cosmetic.**
 Claude Code derives MCP tool names as `mcp__plugin_<pluginName>_<serverName>__<tool>`, so two
 installed plugins that share a name collapse onto the same tool names and only one of them
@@ -284,9 +294,8 @@ Everything the walkthrough used to attribute inline lives here, in the order an 
   follows a task; `/sample-rca:scaffold` turns an empty repository into one the agent can run
   tasks against. Deploying is `make deploy EMAIL=...` from a checkout — the targets exist nowhere
   else, so wrapping them in a skill only helped an operator who already had the Makefile.
-  `/sample-rca:setup` was that wrapper and it is gone as of plugin 0.3.0; `mcp/src/rca_mcp/client.py`
-  still names it in the message it emits when no deployment answers, because moving the sha
-  `plugins/sample-rca/.mcp.json` pins needs a commit that is already on `origin/main`.
+  `/sample-rca:setup` was that wrapper and it is gone as of plugin 0.3.0; the message
+  `mcp/src/rca_mcp/client.py` emits when no deployment answers names `make deploy` instead.
 - **Deregistration is console-only.** `DELETE /configurations/{configId}` is reachable from neither
   the plugin (`ApiClient.ALLOWED_METHODS` is `{"GET", "POST"}`) nor the `aws` CLI, which cannot
   SigV4-sign an arbitrary `execute-api` URL. It returns `202` and stays `DELETING` while
