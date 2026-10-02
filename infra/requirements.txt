@@ -3,3 +3,5 @@
 # (invariant 29) -- CDK v3 will not be source-compatible with v2.
 aws-cdk-lib>=2.150.0,<3
 constructs>=10.0.0,<11
+# `app.py::_agent_zones` asks EC2 which AZ names map to the IDs AgentCore accepts.
+boto3>=1.43.95,<2

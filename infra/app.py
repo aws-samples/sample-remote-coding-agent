@@ -39,7 +39,7 @@ from typing import NamedTuple
 import aws_cdk
 from stacks import account_stack
 from stacks.account_stack import AccountStack
-from stacks.agent_stack import AgentStack
+from stacks.agent_stack import AgentStack, select_agent_zones
 from stacks.api_stack import ApiStack
 from stacks.data_stack import DataStack
 from stacks.web_stack import WebStack
@@ -188,6 +188,38 @@ def _flag_context(app: aws_cdk.App, key: str, *, default: bool) -> bool:
     return str(value).strip().lower() not in ("0", "false", "no", "off")
 
 
+def _agent_zones(app: aws_cdk.App, region: str | None) -> list[str]:
+    """The AZ names the agent VPC goes in, from `-c agentAvailabilityZones=` or this account.
+
+    The only AWS call a synth makes outside the CDK's own lookups, and it is one for the same
+    reason those exist: the name -> ID mapping is per account, so the template cannot know
+    which names AgentCore accepts without asking. The mapping never changes for an account,
+    so the same deploy still produces the same template -- the property the module
+    docstring guards context for. The override is for an account that wants to pin them.
+
+    No region means an environment-agnostic synth, where no runtime is ever created, so
+    there is nothing to ask and `add_agent_network` keeps `max_azs`.
+    """
+    override = _context(app, "agentAvailabilityZones", "")
+    if override:
+        return [zone.strip() for zone in override.split(",") if zone.strip()]
+    if not region:
+        return []
+    # Imported here rather than at the top: `tests/test_layout_infra.py` imports this module
+    # to prove the entry point loads, and that must not need a credential chain.
+    import boto3
+
+    answer = boto3.client("ec2", region_name=region).describe_availability_zones(
+        Filters=[
+            {"Name": "zone-type", "Values": ["availability-zone"]},
+            {"Name": "state", "Values": ["available"]},
+        ]
+    )
+    return select_agent_zones(
+        region, [(zone["ZoneName"], zone["ZoneId"]) for zone in answer["AvailabilityZones"]]
+    )
+
+
 def main() -> None:
     app = aws_cdk.App()
 
@@ -222,6 +254,7 @@ def main() -> None:
         # nobody hears. Empty leaves the DNS Firewall alarm actionless and annotates the
         # synth to say so.
         alert_email=_context(app, "budgetAlertEmail", ""),
+        availability_zones=_agent_zones(app, region),
         env=env,
     )
 
