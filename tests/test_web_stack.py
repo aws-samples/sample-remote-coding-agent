@@ -249,11 +249,8 @@ def test_the_policy_permits_the_github_app_manifest_post(template: Template) -> 
     own github.com session and answer with its own confirmation page, which is a navigation
     and not a response JavaScript may read.
 
-    Under `'none'` the browser refuses that submit and the console sits on "Preparing the
-    GitHub App…" with nothing to go on -- measured on the live deployment, where every
-    server-side signal was green: `POST /github-app` ran, returned a manifest and logged a
-    clean request line, and nothing was ever sent to GitHub. `curl` does not enforce CSP, so
-    no probe outside a browser can see it, which is why the assertion belongs on the template.
+    Under `'none'` the browser refuses the submit. `curl` does not enforce CSP, so no probe
+    outside a browser can see the failure, which is why the assertion belongs on the template.
 
     The origin is derived from `github_app._MANIFEST_FORM_URL` rather than written out, so
     changing where the manifest is posted fails here instead of shipping a console that

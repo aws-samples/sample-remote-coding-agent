@@ -72,10 +72,9 @@ RUNTIME_LOG_GROUP_PREFIX = "/aws/bedrock-agentcore/runtimes"
 # the expensive place to find out: the deploy succeeds, and then every `POST /configurations`
 # fails ten minutes later, at provisioning, against a VPC nothing in the repository can move.
 #
-# IDs and not names, and that is the whole bug this table fixes. `max_azs=2` takes the
-# account's first two AZ *names*, and the name -> ID mapping is shuffled per account -- so
-# `us-east-1a` is `use1-az4` in one account and `use1-az6` (unsupported) in the next, and the
-# same template provisions in one and fails in the other. `select_agent_zones` maps back.
+# IDs and not names: the name-to-ID mapping differs per account, so the same AZ name can
+# map to a supported ID in one account and an unsupported one in the next. `select_agent_zones`
+# maps the account's AZ names back to IDs and keeps only the supported ones.
 #
 # A region missing here is one AgentCore does not support VPC mode in, so the synth stops
 # there rather than guessing. When the guide gains a region or a zone, add it here.
@@ -177,10 +176,7 @@ BLOCKED_VENDOR_DOMAINS: tuple[str, ...] = (
 DNS_QUERY_LOG_RETENTION = logs.RetentionDays.ONE_MONTH
 DNS_BLOCK_METRIC_NAME = "BlockedVendorLookups"
 # The field is documented as populated only when DNS Firewall matched a rule with
-# action ALERT or BLOCK, so this pattern is exactly "a deny-list hit". It is also the one
-# thing here checked against documentation rather than against a real log record: if the
-# alarm never fires on a live deploy, compare this against an actual line in the query log
-# group before believing the docs a second time.
+# action ALERT or BLOCK, so this pattern is exactly "a deny-list hit".
 DNS_BLOCK_FILTER_PATTERN = '{ $.firewall_rule_action = "BLOCK" }'
 
 
@@ -262,11 +258,11 @@ def add_agent_network(
     # traverse the internet. Without them the same traffic works fine over the NAT
     # gateway, and the claim becomes a sentence in a document that nothing enforces.
     #
-    # `SECRETS_MANAGER` used to be in this list and is **gone with the secret**: the
-    # container's GitHub credential now comes from the AgentCore data plane, which the
-    # `AgentCore` endpoint below already covers. AgentCore Identity does keep the GitHub
-    # App's client secret in a Secrets Manager secret of its own, but that is written and
-    # read *service-side* from a control-plane Lambda outside this VPC, so an endpoint here
+    # `SECRETS_MANAGER` is absent: the container's GitHub credential comes from the
+    # AgentCore data plane, which the `AgentCore` endpoint below already covers. AgentCore
+    # Identity does keep the GitHub App's client secret in a Secrets Manager secret of its
+    # own, but that is written and read *service-side* from a control-plane Lambda outside
+    # this VPC, so an endpoint here
     # would be an ENI in every AZ with no client -- the same reasoning the AgentCore comment
     # below applies to `bedrock-agentcore-control`.
     private_subnets = ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
@@ -453,10 +449,10 @@ def execution_role_boundary_statements(
     a reason rather than passing as a silent change. Same idiom as
     `provisioner._execution_role_policy`'s docstring pointing back at this ceiling.
 
-    `app_name` used to be a parameter and is gone: the only statement that needed it was
-    `MayReadOneSecret`, naming the `rca/github/*` secret prefix, and there is no secret any
-    more. A boundary parameter that no statement reads is a signature a reader has to check
-    against the body.
+    `app_name` is absent: the only statement that needed it was `MayReadOneSecret`, naming
+    the `rca/github/*` secret prefix, and the container uses no secret. A boundary
+    parameter that no statement reads is a signature a reader has to check against the
+    body.
 
     `asset_repository_arn` is the one parameter that is not a name: the union above cannot
     be written without naming the repository the agent image lives in, and this function is
@@ -523,14 +519,13 @@ def execution_role_boundary_statements(
                 "bedrock-agentcore:GetResourceOauth2Token",
             ],
             # Declared in `execution_boundary.WIDER_RESOURCES`, and the widest entry in this
-            # list by some distance. It is not a choice: measured against a throwaway role,
-            # `GetWorkloadAccessTokenForUserId` is denied on an individual
-            # `workload-identity/<name>` ARN and allowed only on
+            # list by some distance. It is not a choice: `GetWorkloadAccessTokenForUserId`
+            # is denied on an individual `workload-identity/<name>` ARN and allowed only on
             # `workload-identity-directory/*`, and `GetResourceOauth2Token` is denied on the
             # credential provider's own ARN, on `token-vault/default/*` and on
             # `token-vault/*`, and allowed only on `*`. No condition key exists for the user
             # id either. So neither this ceiling nor the grant under it can name one
-            # repository's credential, and `CLAUDE.md`'s "What remains exposed" states the
+            # repository's credential. `docs/security.md`'s "What remains exposed" states the
             # consequence rather than letting the shape of this list imply a fence.
             resources=["*"],
         ),
@@ -539,9 +534,8 @@ def execution_role_boundary_statements(
             effect=iam.Effect.ALLOW,
             # The ceiling over `provisioner._execution_role_policy`'s `RefreshGitHubCredential`.
             # AgentCore Identity reads the GitHub App's client secret **with the caller's
-            # permissions** whenever it refreshes a token, so a container that cannot read it
-            # can use a token for eight hours and then cannot -- measured against an
-            # 11-hour-old authorisation.
+            # permissions** when it refreshes a token, so a container that cannot read it
+            # exhausts its current token and cannot refresh.
             #
             # `GetSecretValue` only, and declared in `execution_boundary.WIDER_RESOURCES`: the
             # boundary is minted once per deploy, before any GitHub App is connected, so it can
@@ -647,10 +641,9 @@ def execution_role_boundary_statements(
             # correct default: this list is a named denial of the actions a future edit is
             # most likely to add, not an enumeration of the service.
             #
-            # `ecr:*` used to be on this list and is deliberately **not** any more: an
-            # explicit Deny beats the two Allow statements above it, so leaving it here makes
-            # the image-pull grant a dead letter -- the diff reads as fixed and the runtime
-            # still cannot pull. Nothing widens: a boundary is a whitelist, so `ecr:PutImage`,
+            # `ecr:*` is deliberately absent: an explicit Deny beats the two Allow statements
+            # above it, so including it makes the image-pull grant a dead letter -- the
+            # runtime cannot pull the agent image. Nothing widens: a boundary is a whitelist, so `ecr:PutImage`,
             # `ecr:DeleteRepository`, `bedrock-agentcore:ListAgentRuntimes` and every other
             # unlisted action are denied by not being Allowed above. `s3:*` **stays**: an ECR
             # layer download is a presigned S3 URL, which needs no `s3:` permission on the

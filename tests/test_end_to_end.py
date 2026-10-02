@@ -38,8 +38,7 @@ uses; the other runs `submit` with the wire stubbed and asserts what `push` *wou
 
 What this deliberately does **not** cover: the prompts, the Claude Code CLI, the hooks, the MCP
 servers, `ALLOWED_TOOLS`. All of those live *below* `run_role`, and asserting them needs a real
-session against Bedrock. `CLAUDE.md`'s "What was probed against the pinned SDK" section is the
-record of those having been measured by hand; nothing here re-measures them.
+session against Bedrock, so they are out of scope here.
 """
 
 from __future__ import annotations

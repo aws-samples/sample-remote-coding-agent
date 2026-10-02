@@ -98,9 +98,8 @@ _SOURCE_PATHSPEC = (".", ":(exclude).agent", ":(exclude).agent.repo")
 # What a repository's own setup and test commands leave behind, as `.gitignore` patterns.
 # Written to the clone's `.git/info/exclude` -- local to the clone, never pushed, and never
 # an edit to the repository's own `.gitignore` -- because `commit` stages with `git add -A`
-# and a repository with no `.gitignore` otherwise ships its bytecode: a live run against a
-# repository without one opened a pull request carrying `src/__pycache__/*.pyc`. Tracked
-# files are untouched (an exclude only hides *untracked* paths), so a repository that
+# and a repository with no `.gitignore` would otherwise ship its bytecode as untracked files.
+# Tracked files are untouched (an exclude only hides *untracked* paths), so a repository that
 # deliberately commits one of these keeps doing so.
 BUILD_ARTIFACT_PATTERNS = (
     "__pycache__/",
@@ -216,10 +215,11 @@ _export()
 def probe_repository(root: Path) -> None:
     """Prove git can actually operate under `root`, with a throwaway repository.
 
-    `mkdir` reporting success proves nothing about the mount: it is exactly what let
-    three real tasks die thirty seconds later, inside the clone, with an error nobody
-    connected to the directory that had been created happily. So this does a real
-    `git init` plus a real `git status` and raises `GitError` carrying git's stderr.
+    `mkdir` reporting success proves nothing about the mount: on a filesystem whose
+    ownership the container does not control, git raises `fatal: detected dubious
+    ownership` on a directory created moments earlier. A real `git init` plus `git
+    status` catches that before the clone starts, and raises `GitError` carrying git's
+    stderr.
     """
     probe = root / f".probe-{os.getpid()}"
     try:
@@ -323,8 +323,8 @@ def has_origin_head(repo: Path) -> bool:
     `!git log --no-decorate origin/HEAD...`, and where this ref does not resolve it
     aborts **before any model call** and the CLI still returns `subtype: "success"`,
     `is_error: false`, `num_turns: 0`, `total_cost_usd: 0` and an empty `result` in about
-    100 ms -- a silent no-op that reads as a clean pass (probe-verified against CLI
-    2.1.236). The ref is absent from a local clone and from a `git init` scratch repo,
+    100 ms -- a silent no-op that reads as a clean pass. The ref is absent from a local
+    clone and from a `git init` scratch repo,
     which is exactly `local_run.py`'s situation, so the caller has to ask first.
     """
     return bool(_origin_head_ref(repo))

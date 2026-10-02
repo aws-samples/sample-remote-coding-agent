@@ -8,11 +8,10 @@ agent package and not importable from a Lambda.
 **Read-only checks are not evidence.** Selecting a repository grants `Metadata: read`
 automatically, so `GET /repos/{owner}/{repo}` answers 200 for a token with no `Contents`
 permission at all, and `GET .../git/ref/heads/{branch}` and `GET .../contents/{path}`
-need only `Contents: read`. A token was declared good three times on those checks and
-still failed the push. So `check_can_push` does the thing that settled it: it creates a
-throwaway git ref and deletes it again, and on a refusal it reports GitHub's own
-sentence plus the `x-accepted-github-permissions` header, which states exactly which
-permission the call wanted.
+need only `Contents: read`. `check_can_push` therefore creates a throwaway git ref and
+deletes it: that is the only call that proves write access. On a refusal it reports
+GitHub's own sentence plus the `x-accepted-github-permissions` header, which states
+exactly which permission the call wanted.
 
 Every request goes through `_request`, which is the only function in this module that
 opens a socket. A test fakes GitHub by monkeypatching that one module attribute, and

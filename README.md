@@ -82,7 +82,7 @@ Preflight checks AgentCore/model availability and prints any required CDK bootst
 
    The agent pushes branches and opens PRs. Start with a small repository whose tests already
    pass. Declare setup/test entry points so verification can run:
-   [command detection details](CLAUDE.md#why-the-makefile-targets-are-named-that-way).
+   [command detection details](docs/operations.md#why-the-makefile-targets-are-named-that-way).
 
 ### Choose how to submit tasks
 
@@ -174,13 +174,13 @@ DynamoDB, ECR API/Docker, S3, and CloudWatch Logs**. Lambda runs outside the age
 GitHub receives source code through clone/push/PR traffic. Package installation reaches
 PyPI/npm, and the documentation tool reaches AWS documentation. These are intended destinations,
 **not an enforced domain allowlist**: NAT permits outbound TCP 443, and the DNS firewall
-blocks named vendor domains only. [Boundary details](CLAUDE.md#the-boundary-claim-and-where-it-is-qualified)
+blocks named vendor domains only. [Boundary details](docs/security.md#the-data-boundary)
 
 ## Costs and cleanup
 
 NAT gateways, interface VPC endpoints, WAF, images, logs, and stored data can cost money
-even between tasks. Tasks add Runtime, Bedrock, and memory usage. No measured whole-stack
-monthly or per-task cost estimate is published yet.
+even between tasks. Tasks add Runtime, Bedrock, and memory usage. No whole-stack
+monthly or per-task cost estimate is published.
 
 The default **$200 monthly Bedrock budget sends email notifications**, not a hard spending
 cap, and does not cover every service. Monitor your actual account charges.
@@ -190,16 +190,16 @@ Deregister every repository in the console **first** — settings → **Deregist
 then **Disconnect** on the GitHub App page, and only then destroy the stacks. The other order
 orphans the runtime, the IAM role, the memory and the credential provider, which no stack owns
 and which keep costing money. The GitHub App belongs to your GitHub account; delete it there.
-Follow the [exact five-stack teardown](CLAUDE.md#tearing-a-fleet-down) for your prefix and region.
+Follow the [exact five-stack teardown](docs/operations.md#tearing-a-fleet-down) for your prefix and region.
 Stack deletion retains tables, the Cognito pool, access logs, bootstrap ECR images, and runtime
-log groups. Review the [retained-resource cleanup table](CLAUDE.md#what-deliberately-survives-a-destroy)
+log groups. Review the [retained-resource cleanup table](docs/operations.md#what-survives-a-destroy)
 before deleting them; some are the only history of your runs.
 
 ## Troubleshooting
 
 - **A tool recommends `/sample-rca:setup`.** That command is gone; run `make deploy EMAIL=you@example.com` from a checkout.
 - **Console returns AccessDenied XML.** Check that deployment uploaded `index.html` before changing IAM.
-- **Temporary password expired.** Redeployment does not resend it; see [operator recovery notes](CLAUDE.md#what-the-walkthrough-touches-and-where-it-lives).
+- **Temporary password expired.** Redeployment does not resend it; see [operator recovery notes](docs/operations.md#deploying).
 - **Tools succeed but the board is empty.** Check `endpoint used:` and stale API overrides for another deployment.
 - **Another `/remote` command answers.** Use `/sample-rca:remote`; other plugin namespaces are unrelated.
 - **The run fails at submit with `could not open a pull request ... (HTTP 422)` and `"field": "base", "code": "invalid"`.** The repository had no default branch when the task started. The agent assumed `main`, and GitHub rejected it as the PR base. The agent's branch is now the repository's only branch, and probably its default, so `scripts/scaffold.sh` and `/sample-rca:scaffold` will refuse the repository because it is no longer empty. Either push a `main` that builds and passes its tests yourself and set it as the default branch, or create a new empty repository, scaffold that, and register it instead. Then run the task again.
@@ -210,8 +210,8 @@ Setup notes worth reading before you deploy: [VPC quota](https://github.com/aws-
 ## Contributing
 
 Run `make setup`, `make test`, and `make lint`. Local tests use fake AWS services, not a deployed fleet.
-See [contribution guidelines](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md),
-and [maintainer reference](CLAUDE.md). Keep diagrams and previews in sync with UI changes.
+See [contribution guidelines](CONTRIBUTING.md), the [code of conduct](CODE_OF_CONDUCT.md),
+the [operations reference](docs/operations.md) and the [security reference](docs/security.md). Keep diagrams and previews in sync with UI changes.
 
 ## GitHub access: read this
 
@@ -252,12 +252,12 @@ app belongs to your GitHub account; delete it there when you are finished.
 Protect the default branch of the repository you register. Read
 [GitHub access](#github-access-read-this) before installing the app anywhere.
 The account boundary does not stop repository code from making outbound HTTPS requests.
-[Remaining exposure](CLAUDE.md#what-remains-exposed)
+[Remaining exposure](docs/security.md#what-remains-exposed)
 
 Bedrock invocation logging is a retention choice; default `global.` inference profiles can
 serve outside your deployment region. Review the
-[logging qualification](CLAUDE.md#qualification-1--model-invocation-logging-is-a-retention-choice)
-and [data residency](CLAUDE.md#data-residency) before sending sensitive code.
+[logging qualification](docs/security.md#model-invocation-logging-is-a-retention-choice)
+and [data residency](docs/security.md#data-residency) before sending sensitive code.
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
 

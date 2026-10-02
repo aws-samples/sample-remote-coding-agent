@@ -175,14 +175,12 @@ def test_the_fallback_model_is_validated_and_defaults_to_sonnet(
 def test_the_goal_switch_costs_no_background_model_call(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The switch on with no haiku model set is not worth a word, and that is the change.
+    """Enabling the goal switch with no haiku model set must not warn.
 
-    This used to warn: `/goal` was a slash command whose condition the CLI re-evaluated
-    after every turn, a separate small-fast-model call, which made
-    `ANTHROPIC_DEFAULT_HAIKU_MODEL` load-bearing for cost and not only for routing.
-    `nodes/code.py` now carries the condition in the coding role's session system prompt,
-    so there is no per-turn evaluator and no background call to pay for. The assertion is
-    about an absence, which is why the reason is written down here.
+    The goal condition lives in the coding role's system prompt, not in a per-turn evaluator.
+    There is no small-fast-model call to pay for, so `ANTHROPIC_DEFAULT_HAIKU_MODEL` is not
+    load-bearing for cost when the goal switch is on. The assertion is about an absence, which
+    is why the reason is written down here.
     """
     no_aws(monkeypatch)
 

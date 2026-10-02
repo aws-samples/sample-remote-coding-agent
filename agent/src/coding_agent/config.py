@@ -92,13 +92,10 @@ class RoleConfig:
 # The routing table. The roles differ enormously in what they need and in what they
 # cost, so the granularity is per role and not per configuration.
 #
-# `code` stays at effort `high` (invariant 8, verbatim): at `medium`, Opus 5 reported
-# the coding task complete with ZERO source edits, against 214 insertions at `high`
-# on the identical task. That measurement was made on Opus and `code` now runs
-# Sonnet, so it does not transfer -- effort stays `high` here and Sonnet-at-high is
-# an open question with a named comparison to run, not a settled default. The no-op
-# guard in `nodes/code.py` is what makes the experiment safe: under-performance
-# raises rather than passing quietly.
+# `code` stays at effort `high` (invariant 8): at `medium` effort a coding role can
+# report the task complete with no source edits, while the same task at `high` produces
+# real changes. The no-op guard in `nodes/code.py` bounds this: under-performance
+# raises rather than reporting success quietly.
 #
 # `review` keeps Opus at 40 turns because it is the one component whose failure is
 # silent -- a missed veto is a confident green PR containing untested code.

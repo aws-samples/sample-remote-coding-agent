@@ -20,12 +20,11 @@ the server still starts against an account that has never been deployed to, and 
 startup crash Claude Code reports as "server failed".
 
 **The region pin is `RCA_REGION`, never `AWS_REGION`.** `AWS_REGION` is ambient: Claude
-Code on Bedrock sets it in its own `settings.json` `env` for the *model's* region, and every
-MCP server it starts inherits it. Read as a pin, it sent a project-scoped server to that
-region and reported "not deployed" while `~/.rca/endpoint.json` named the right one; and the
-plugin exporting its `aws_region` field *as* `AWS_REGION` blanked the shell's own value. So
-the one variable that means "I chose this region" is this package's own, and `AWS_REGION`
-is left to boto3 as the ambient default it is.
+Code on Bedrock sets it for the *model's* region, and every MCP server it starts inherits
+it. Using it as a pin would send the server to the model's region regardless of where the
+API is deployed, and a plugin exporting `aws_region` as `AWS_REGION` would blank the
+shell's own value. `RCA_REGION` is the one variable that means "I chose this region";
+`AWS_REGION` is left to boto3 as the ambient default it is.
 
 No request body is ever logged. `register_repository`'s body carries the operator's
 GitHub token; method, path and status are the whole of what is interesting anyway.
@@ -72,8 +71,8 @@ class SetupRequired(RcaError):  # noqa: N818 -- the name is the instruction, not
 
     The message always names `make deploy`, because the failure this class exists for is a
     plugin installed *before* the deploy: a bare connection error there tells the operator
-    nothing, and the next step is a named command. It is not a skill: `/sample-rca:setup`
-    was removed in plugin 0.3.0, and the deploy targets exist only in a checkout.
+    nothing, and the next step is a named command. The deploy targets exist only in a
+    checkout of the repository.
     """
 
 
@@ -260,8 +259,7 @@ def resolve_endpoint(
         # No session on this arm: the override exists so a hand-run server needs no
         # `cloudformation:DescribeStacks`, and `""` means "no opinion on the region".
         # The URL's own region outranks the ambient `AWS_REGION`: an `execute-api` URL
-        # names the region it answers in, and signing for any other is a bare 403 --
-        # measured with Claude Code's `AWS_REGION=us-west-2` against a us-east-1 API.
+        # names the region it answers in, and signing for any other region returns 403.
         signing_region = (
             region or _env("RCA_REGION") or _region_from_url(override) or _env("AWS_REGION") or ""
         )

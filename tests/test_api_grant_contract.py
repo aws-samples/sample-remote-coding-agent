@@ -22,10 +22,9 @@ Two halves:
 
 The last tests in the file cross back into `infra/`, deliberately: they check that the
 boundary in `stacks/agent_stack.py` permits every action this policy grants. That
-agreement is what actually failed in production, and neither half alone shows it. It is now
-checked in **both** directions -- the boundary permits nothing the inline policy does not
-grant either -- against the classification in `tests/execution_boundary.py`, which is where
-a deliberately wider ceiling is declared with a reason rather than left as prose.
+agreement is checked in **both** directions -- the boundary permits nothing the inline policy
+does not grant either -- against the classification in `tests/execution_boundary.py`, which
+is where a deliberately wider ceiling is declared with a reason rather than left as prose.
 """
 
 from __future__ import annotations
@@ -633,11 +632,8 @@ def test_the_only_secret_a_container_can_read_is_the_apps_client_secret(
     """One action, one literal ARN -- and the statement exists because a refresh needs it.
 
     AgentCore Identity refreshes an expired GitHub token by reading the app's client secret
-    **with the caller's permissions**. Measured against an 11-hour-old authorisation: a role
-    holding only the two credential actions answered `AccessDenied ...
-    secretsmanager:GetSecretValue on ...bedrock-agentcore-identity!default/oauth2/rca_github-...`,
-    and the same call from a role with the read refreshed and stored the token. Without this
-    statement a container works for eight hours and then fails at `submit`.
+    with the caller's permissions. Without this statement a container works for eight hours
+    and then fails at `submit` with an `AccessDenied` on `secretsmanager:GetSecretValue`.
 
     Three properties, each a way to get it wrong:
 
@@ -679,12 +675,8 @@ def test_the_github_credential_statement_is_as_narrow_as_the_service_permits(
 ) -> None:
     """Two actions, and **neither resource is a fence** -- which is the point of the test.
 
-    Measured against a throwaway role rather than assumed:
-    `GetWorkloadAccessTokenForUserId` is denied on an individual `workload-identity/<name>`
-    ARN and on `workload-identity-directory/default*`, and allowed only on
-    `workload-identity-directory/*`; `GetResourceOauth2Token` is denied on the credential
-    provider's own ARN, on `token-vault/default/*` and on `token-vault/*`, and allowed only on
-    `*`. There is no condition key for the 3LO user id.
+    The service accepts no narrower resource for either action than `workload-identity-directory/*`
+    and `*` respectively, and no condition key exists for the 3LO user id.
 
     So this statement cannot name one repository's credential the way `UseOwnMemory` names one
     memory, and the test asserts the `*` deliberately: a future edit that *narrows* it will
@@ -807,19 +799,14 @@ def test_a_policy_for_a_configuration_with_no_memory_omits_the_memory_statement(
 
 
 def test_no_handler_names_a_cloudwatch_action_at_all() -> None:
-    """The mechanical form of "nothing under `api/src/handlers/` grants itself CloudWatch".
+    """No module under `api/src/handlers/` names a CloudWatch action in any position,
+    neither for its own role nor in a policy it writes for somebody else's.
 
-    This was once "no handler *but the provisioner*", because the provisioner minted a
-    `cloudwatch:PutMetricData` statement onto the container's execution role for Coding Agent
-    Insights. That feature is gone -- see `CLAUDE.md`'s note on why -- so the exception went
-    with it and the property is now the stronger one: no module here names a CloudWatch action
-    in any position, neither for its own role nor in a policy it writes for somebody else's.
-
-    Worth a test rather than a sentence because it is a security property, and the cheapest way
-    to break it is a helpful `put_metric_data` call in a handler that already has an IAM
+    Worth a test rather than a sentence because it is a security property, and the cheapest
+    way to break it is a helpful `put_metric_data` call in a handler that already has an IAM
     statement nearby to extend. Reintroducing an exporter means reintroducing this grant, the
-    boundary widening that ceilings it, and an egress destination -- so it should cost a failing
-    test and a deliberate edit, not a line.
+    boundary widening that ceilings it, and an egress destination -- so it should cost a
+    failing test and a deliberate edit, not a line.
     """
     naming: dict[str, list[str]] = {}
     for module in _MODULES:
@@ -872,15 +859,13 @@ def test_the_boundary_is_attached_to_every_minted_role(
 
 def test_creating_a_runtime_also_grants_the_endpoint_actions() -> None:
     """`agentcore:control` grants the four `*AgentRuntimeEndpoint` actions as well as the
-    four `*AgentRuntime` ones, even though no code in this repository calls them.
+    four `*AgentRuntime` ones, even though no code in this repository calls them directly.
 
     `CreateAgentRuntime` creates the DEFAULT endpoint for you (invariant 14 is why we never
-    create a custom one) and authorizes that as a *separate* action. Without the grant the
-    first provision of a fresh deployment fails with `not authorized to perform:
+    create a custom one) and authorizes it as a *separate* action. Without the grant the
+    first provision fails with `not authorized to perform:
     bedrock-agentcore:CreateAgentRuntimeEndpoint ... because no identity-based policy
-    allows` -- and it failed for 26 minutes before saying so, because the message contains
-    "not authorized" and `provisioner._is_role_propagation_error` read that as IAM
-    propagation. `ApiStack` bundles Docker so no test synthesizes it; this reads the source,
+    allows`. `ApiStack` bundles Docker so no test synthesizes it; this reads the source,
     in the idiom `tests/test_plugin_manifest.py` uses for the Makefile.
     """
     source = (REPO_ROOT / "infra/stacks/api_stack.py").read_text(encoding="utf-8")
@@ -914,14 +899,11 @@ def test_the_provisioner_may_create_agentcores_own_service_linked_roles() -> Non
     """A `networkMode: VPC` runtime (invariant 30) needs a service-linked role AgentCore
     creates for itself during `CreateAgentRuntime`.
 
-    Without `iam:CreateServiceLinkedRole` every `CreateAgentRuntime` in a live eu-west-1
-    deployment failed `Failed creating service linked role. Please verify that the calling
-    role has sufficient permissions to create a service linked role.` -- and because that
-    message contains the word "role", `provisioner._is_role_propagation_error` read it as
-    IAM propagation and retried it ten times over 26 minutes before reporting that the
-    execution role "was still not assumable", a problem the execution role never had. The
-    only provisioner in this account that creates runtimes successfully uses
-    `networkMode: PUBLIC`, which never needs this role.
+    Without `iam:CreateServiceLinkedRole` the failure message (`Failed creating service
+    linked role. Please verify that the calling role has sufficient permissions to create a
+    service linked role.`) contains the bare word "role". A keyword-based classifier must
+    not misread this as IAM propagation: the missing grant is permanent, and retrying it
+    cannot add a statement to the provisioner's own policy.
     """
     source = (REPO_ROOT / "infra/stacks/api_stack.py").read_text(encoding="utf-8")
     assert "iam:CreateServiceLinkedRole" in source, (

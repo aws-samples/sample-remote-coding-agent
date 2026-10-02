@@ -70,13 +70,11 @@ CONFIG_STATUSES = ("PENDING", "CREATING", "READY", "UPDATING", "FAILED", "DELETI
 # `DELETING` (unchanged): teardown is asynchronous, and refusing to re-register while it
 # drains would make the failure look permanent.
 #
-# `FAILED`: a failed CREATE was a dead end nothing could clear. `mcp/src/rca_mcp/client.py`'s
+# `FAILED`: a failed CREATE would be a dead end otherwise. `mcp/src/rca_mcp/client.py`'s
 # `ALLOWED_METHODS` is `{"GET", "POST"}` by construction, so removing a configuration is
 # unreachable from the plugin, and a permanent 409 here could only be cleared in the
-# console. Observed for real: a first registration failed on a missing
-# `bedrock-agentcore:CreateAgentRuntimeEndpoint` grant, and re-registering the same
-# repository after the grant was fixed was impossible. `create` therefore retires the
-# stale item down the ordinary teardown path and registers a new one.
+# console. `create` therefore retires the stale item down the ordinary teardown path and
+# registers a new one.
 #
 # Both strings are literals here rather than imported from `provisioner`: the import runs
 # the other way -- see `provisioner.py`'s comment above `CREATING, READY, ...`.
@@ -154,9 +152,8 @@ def _push_verdict(repository: str, token: str) -> dict[str, Any]:
     automatically, so `GET /repos/{owner}/{repo}` answers 200 for a token with no
     `Contents` permission at all -- and with a GitHub App the same call answers 200 for a
     *public* repository the app was never installed on, because `permissions.push` there
-    reports the **user's** rights rather than the token's. Measured, and it is the trap this
-    function exists for. `github_probe` therefore creates a throwaway ref and deletes it,
-    which is the only check that proves a write.
+    reports the **user's** rights rather than the token's. `github_probe` therefore creates
+    a throwaway ref and deletes it, which is the only check that proves a write.
 
     So the one failure an operator is overwhelmingly likely to hit -- authorising the app
     but forgetting to install it on *this* repository -- is detected here rather than 25

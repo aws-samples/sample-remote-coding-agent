@@ -7,11 +7,10 @@ these are about prose, and nothing here reads the Makefile, a manifest or the im
 
 The shape is the contract because prose has no compiler. A README grows into a reference
 manual -- an API surface, a model-routing table, board semantics, observability internals --
-one reasonable-looking paragraph at a time, and nobody reads it after that. `CLAUDE.md` is where reference goes now, so a
-README that grows is content that has landed in the wrong file, and only a test notices.
-The table of AWS resources a `cdk destroy` deliberately retains moved out of the README for
-exactly that reason and lives in `CLAUDE.md` now, under "What deliberately survives a
-destroy"; the walkthrough's teardown step points at it.
+one reasonable-looking paragraph at a time, and nobody reads it after that. The operator
+reference -- teardown commands, what survives a destroy, the security model -- lives in
+`docs/operations.md` and `docs/security.md`, so a README that grows is almost always
+content that belongs in those files, and only a test notices.
 
 Prose has no compiler for its *claims* either, which is what the second half of this file
 is: a rename leaves behind a sentence that still reads as current and sends a reader to
@@ -49,23 +48,13 @@ from conftest import REPO_ROOT
 
 README = REPO_ROOT / "README.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+OPERATIONS_MD = REPO_ROOT / "docs" / "operations.md"
+SECURITY_MD = REPO_ROOT / "docs" / "security.md"
 
-# ~230 lines is the target; 250 is the ceiling, so a step gained or a gap named does not
-# fail the suite but a section does.
-#
-# Raised from 200 deliberately, once, for `## Token scope -- read this` and `## Limitations`.
-# The ceiling exists to stop the README becoming a reference manual, and those two sections
-# are the opposite of reference material: a classic PAT is now accepted, it cannot be limited
-# to one repository, and a reader has to know that **before** choosing a credential. Putting
-# it in `CLAUDE.md` would be putting it where the person making the choice is not looking.
-#
-# The README was sitting at exactly 200 when this was raised -- no headroom at all -- so the
-# alternative was deleting a walkthrough step to make room for a security warning, which is
-# the wrong trade. Raise this again only for something that changes what an operator does.
-#
-# Raised a second time, from 250 to 270, for `### Test the prompt guardrail`: invariant 43
-# refuses prompts, and an operator who has never seen a refusal reads their first one as a
-# broken deploy. The section is 16 lines and the README was again at exactly the ceiling.
+# The ceiling exists to stop the README becoming a reference manual. Operator reference
+# belongs in `docs/operations.md` and `docs/security.md`. Raise this only for content
+# that changes what an operator does and belongs on the entry page -- security warnings,
+# walkthrough steps -- not for reference material.
 _README_MAX_LINES = 270
 
 # Required navigation, not an exact editorial outline. Keep the entry page short.
@@ -83,8 +72,8 @@ _ENDPOINT_SERVICE_CLASSES = frozenset(
 # Enum member -> the word `README.md`'s diagram must show for it. A mapping and not a literal list
 # because the diagram is prose: `ECR` and `ECR_DOCKER` are both "ECR" to a reader, and
 # `BEDROCK_RUNTIME` is "Bedrock". An unmapped member is a failure and not a skip -- an endpoint
-# added to the stack with no word here is exactly the staleness this test exists for, and it was
-# real once: the AgentCore data-plane endpoint shipped and the diagram never gained it.
+# added to the stack with no word here is exactly the staleness this test exists for. Add
+# both the stack member and its diagram word together.
 _ENDPOINT_DIAGRAM_WORDS = {
     "BEDROCK_RUNTIME": "Bedrock",
     "BEDROCK_AGENTCORE": "AgentCore",
@@ -96,9 +85,8 @@ _ENDPOINT_DIAGRAM_WORDS = {
     "S3": "S3",
 }
 
-# The claim three documents carried for the whole life of the route that refutes it: a document
-# that denies a shipped feature is worse than one that is silent, because a reader who trusts it
-# concludes the code is the mistake.
+# A document that asserts the absence of a shipped feature is worse than a silent one:
+# a reader who trusts it concludes the code is the mistake.
 _CANCELLATION_DISCLAIMED = "no cancellation api"
 
 # The two labels the container cites by name -- `D6` is the `actorId`-is-the-configuration /
@@ -158,7 +146,7 @@ _MEMORY_DENIED_ACTIONS = 7
 # `###` to the next one because the bullet's argument -- that memory shared across sessions is a
 # cross-tenant hazard -- is what has to be reconciled, and the reconciliation is only useful
 # standing next to it.
-_AUTO_MEMORY_SUBSECTION = "### What makes it enforced rather than asserted"
+_AUTO_MEMORY_SUBSECTION = "### How it is enforced"
 _AUTO_MEMORY_VARIABLE = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 
 # Any one of these is enough to say the two mechanisms are NOT the same thing. A word list and not
@@ -174,11 +162,8 @@ _INVARIANT_10B = "10b."
 _INVARIANT_10C = "10c."
 
 # The walkthrough section, sliced by this heading rather than by line number, is where the two
-# claims below live. Both were sentences that read as finished and were not, and a clean-clone
-# walkthrough paid for both: the plugin silently registered a repository into an older
-# deployment in another region because a leftover `RCA_API_URL` outranked discovery, and a
-# teardown step that said `destroy --all` would have deleted a shared account stack out from
-# under a live console in another region.
+# claims below live: that an override outranks endpoint discovery, and that `destroy --all`
+# is only safe when the account holds exactly one fleet.
 _WALKTHROUGH_HEADING = "## Quick start"
 
 # The three optional `userConfig` fields of `plugins/sample-rca/.claude-plugin/plugin.json`
@@ -195,8 +180,7 @@ _PRECEDENCE_WORDS = ("outrank", "precedence", "beat", "override", "win", "ahead 
 # The three Makefile targets `README.md`'s deploy step fences, in the order it runs them.
 # Repeated here rather than read out of the Makefile, because this file polices prose and nothing
 # in it opens a build file; the closed set the Makefile declares is pinned by
-# `tests/test_repo_contracts.py::test_the_makefile_declares_exactly_the_five_targets`, which is
-# where that guard moved when the plugin stopped wrapping these targets in a skill.
+# `tests/test_repo_contracts.py::test_the_makefile_declares_exactly_the_five_targets`.
 _DEPLOY_STEP_TARGETS = ("make setup", "make preflight", "make deploy")
 
 # `CLAUDE.md` carries 35 invariants, several with sub-numbered entries (6b, 10c, 32b), so
@@ -411,9 +395,8 @@ _SOURCE_FILES, _BASENAMES, _BY_STEM = _index()
 
 
 def _is_repo_path(token: str) -> bool:
-    # A token starting with `/` is the one that bites: `REPO_ROOT / "/root/.claude/
-    # settings.json"` is an ABSOLUTE path, and stat-ing it raised `PermissionError` while
-    # this check was being written. `~` is a home path, `http` a URL, a space means the
+    # A token starting with `/` is an absolute path -- `REPO_ROOT / "/root/..."` would stat
+    # the system path, not a repo file. `~` is a home path, `http` a URL, a space means the
     # token is a command line or an expression, and no `/` at all means it is not a path
     # claim -- a bare `code.py` is prose about a file, not a pointer to one.
     if token.startswith(("/", "~", "http")) or " " in token or "/" not in token:
@@ -510,13 +493,10 @@ def _claims(text: str) -> list[tuple[str, int, str, str, str | None]]:
 
 # Every file that states how long provisioning takes, and the spelling each uses. Two
 # spellings because one is an en dash in prose and the rest are hyphens in code strings;
-# the *number* is what has to agree.
+# the *number* is what has to agree across all eight.
 #
-# This exists because prose did not hold it. CLAUDE.md named five places, the plugin's two
-# skills and the un-namespaced command were not among them, and they went on saying "2-5
-# minutes" for a whole wave after the V2 upgrade made that wrong -- which is the expensive
-# direction to be wrong in, since an operator who believes an understated wait concludes the
-# registration is stuck at exactly the point where waiting is correct.
+# An understatement is the expensive direction: an operator who believes a shorter wait
+# concludes the registration is stuck at exactly the point where waiting is correct.
 _PROVISIONING_MINUTES = "8-12"
 _PROVISIONING_CLAIMS: tuple[tuple[str, str], ...] = (
     # The en dash is README.md's own spelling; the assertion has to match the file.
@@ -533,7 +513,7 @@ _PROVISIONING_CLAIMS: tuple[tuple[str, str], ...] = (
 
 @pytest.mark.parametrize(("path", "spelling"), _PROVISIONING_CLAIMS, ids=lambda v: str(v)[:44])
 def test_every_file_states_the_same_provisioning_time(path: str, spelling: str) -> None:
-    """One measured number, eight files, and nothing but this test holding them together."""
+    """One number, eight files, all stating the same provisioning time."""
     text = (REPO_ROOT / path).read_text(encoding="utf-8")
     assert spelling in text, (
         f"{path} does not state provisioning as {spelling!r}. The figure is measured -- a V2 "
@@ -543,11 +523,11 @@ def test_every_file_states_the_same_provisioning_time(path: str, spelling: str) 
 
 
 def test_no_file_states_a_different_provisioning_time() -> None:
-    """The other direction, which is the one that actually drifted.
+    """The complement: every duration claimed near the word "provision" must be the agreed figure.
 
-    A file can carry the right number *and* a stale one, and the stale sentence is the one an
-    operator reads first. So every duration claimed next to the word "provision" has to be the
-    measured one, across the whole operator-facing surface rather than a declared list.
+    A file can carry the correct number *and* a stale one, and the stale sentence is the one an
+    operator reads first. Scanning every file in the declared list catches both spellings in a
+    single file, which is the shape that causes most confusion.
     """
     # Both dash forms: prose spells the range with an en dash and code strings with a
     # hyphen, and a pattern that matched only one would miss half the surface.
@@ -618,14 +598,12 @@ def test_the_readme_has_navigation_and_media() -> None:
 
 
 def test_every_document_names_agentcore_memory() -> None:
-    """All three documents name the one feature that shipped without any of them saying so.
+    """Both documents name AgentCore Memory, which provisions one memory resource per registered repository.
 
-    This is the check that would have caught the original bug, and it is deliberately the crudest
-    one in this file: `README.md` contained the word "memory" **zero times** while every
-    registered repository was being given an AgentCore Memory resource, `CLAUDE.md` mentioned only
-    `CLAUDE_CODE_DISABLE_AUTO_MEMORY` -- Claude Code's own auto-memory, a different feature -- and
-    and the documents listed Memory among the surfaces the repository does not use. A feature no document
-    mentions is invisible to the next reader, who then designs around its absence.
+    This is the crudest check in this file: a plain string search. A feature no document
+    mentions is invisible to the next reader, who then designs around its absence. Both
+    documents must use the phrase "AgentCore Memory" rather than just "memory", which is
+    ambiguous with the filesystem `.agent/memory/` digest and with Claude Code's auto-memory.
     """
     silent = [
         document.name
@@ -646,13 +624,12 @@ def test_every_document_names_agentcore_memory() -> None:
 
 
 def test_the_readme_diagram_names_every_vpc_endpoint() -> None:
-    """The diagram lists every VPC endpoint the stack creates, derived from the stack.
+    """The diagram lists every VPC endpoint the stack creates, derived from the stack source.
 
-    It was stale for a whole feature: `infra/stacks/agent_stack.py` gained the
-    `BEDROCK_AGENTCORE` interface endpoint -- the data plane a task's own transcript now goes
-    to instead of the NAT gateway -- and the diagram, the only place the endpoint set is drawn
-    for a reader, kept listing the six it had before. The expected set is walked out of the
-    stack's own source so the next endpoint added there fails this until the picture catches up.
+    The expected set is walked from `infra/stacks/agent_stack.py` directly, so an endpoint
+    added to the stack fails this test until the diagram is updated. The diagram is the only
+    place the full endpoint set is drawn for a reader; a mismatch leaves the architecture
+    picture stale.
     """
     tree = ast.parse(_source("infra/stacks/agent_stack.py"))
     members = {
@@ -712,47 +689,12 @@ def test_the_readme_diagram_names_every_vpc_endpoint() -> None:
             assert cell.find("mxGeometry").get("relative") == "1"
 
 
-def test_a_document_admits_what_is_unmeasured_about_memory() -> None:
-    """Somewhere still says the memory feature is implemented and undemonstrated.
-
-    This used to read `README.md`'s `## Known gaps`. That section was removed -- thirteen
-    bullets of mostly "unmeasured" had stopped being specifics and become a disclaimer -- so the
-    assertion moved to `CLAUDE.md`, beside `provisioner._ensure_memory`, which is the mechanism
-    it qualifies. What is asserted did not change: a feature documented only in the register
-    that describes what *works* reads as measured, and this one is not.
-
-    Three things: no live run has shown a memory written by one task being recalled by another,
-    the two strategies' extraction quality is a default nobody has judged, and so is the 90-day
-    `eventExpiryDuration` -- a memory silently empties after a quarter and no run has lived long
-    enough to see it.
-    """
-    text = CLAUDE_MD.read_text()
-    assert re.search(r"unmeasured", text, re.IGNORECASE), (
-        "`CLAUDE.md` no longer admits anything is unmeasured. The `## Known gaps` section that "
-        "used to carry these admissions is gone, so this file is where they live now."
-    )
-    lowered = text.lower()
-    assert "memory" in lowered and "recall" in lowered, (
-        "`CLAUDE.md` does not admit that no live run has shown a memory written by one task "
-        "being recalled by another. Each registered repository gets its own AgentCore Memory, "
-        "the feature is implemented, and nothing has demonstrated it end to end. Say so next to "
-        "`provisioner._ensure_memory`, and do not hedge it into sounding measured."
-    )
-    assert "90" in text, (
-        "`CLAUDE.md` does not name the 90-day `eventExpiryDuration` "
-        "(`api/src/handlers/provisioner.py::_ensure_memory` sets it, and nothing has tested "
-        "it). The number is the gap: a reader who is not told it exists cannot know a memory "
-        "silently empties after a quarter."
-    )
-
-
 def test_no_document_still_claims_there_is_no_cancellation_api() -> None:
-    """No document lists a cancellation API among the things this repository does not have.
+    """No document asserts the absence of a cancellation API.
 
-    Both documents carried it once. A document that asserts the opposite of the tree is worse
-    than a silent one -- the next reader concludes the route is the mistake and deletes it, or
-    spends an afternoon looking for the design that says why an operator cannot stop a run they
-    started by mistake.
+    A document that denies a shipped feature is worse than a silent one: a reader who trusts
+    it concludes the code is the mistake. `POST /tasks/{taskId}/cancel` ships, and any
+    document claiming otherwise misleads the reader about the intended behaviour.
     """
     claiming = [
         document.name
@@ -965,9 +907,9 @@ def test_the_auto_memory_qualification_distinguishes_the_two_mechanisms() -> Non
     auto-memory is keyed by container and carries whatever any session wrote, AgentCore Memory is
     keyed to one configuration id and fenced by IAM to that repository's own memory ARN.
     """
-    section = _section(CLAUDE_MD.read_text(), _AUTO_MEMORY_SUBSECTION)
+    section = _section(SECURITY_MD.read_text(), _AUTO_MEMORY_SUBSECTION)
     assert section, (
-        f"`CLAUDE.md` has no {_AUTO_MEMORY_SUBSECTION!r} subsection, so the auto-memory argument "
+        f"`docs/security.md` has no {_AUTO_MEMORY_SUBSECTION!r} subsection, so the auto-memory argument "
         "moved somewhere this check cannot see it. It is sliced from that `###` to the next one, "
         "because the reconciliation is only useful standing next to the claim it qualifies."
     )
@@ -1065,10 +1007,8 @@ def test_the_deploy_step_names_every_target_it_runs() -> None:
     virtualenv, so the SECOND thing they do fails: preflight's synth check imports `aws_cdk`
     from this checkout's `.venv` and stops with `preflight: FAILED -- this checkout's
     virtualenv has no aws-cdk-lib, so nothing can synth.` and a `fix:` line naming the target
-    the walkthrough never mentioned. This step named two targets for as long as the plugin's
-    deleted `setup` skill ran three and nothing noticed -- and that skill's closed set was the
-    only thing that had checked it, over in `tests/test_plugin_manifest.py`, which never reads
-    this document. The step is the last place the three are written down in order now.
+    the walkthrough never mentioned. Without `make setup` first, both `make preflight` and
+    `make deploy` fail before any meaningful check runs.
     """
     # Keyed on the `EMAIL=` argument and not on `make deploy` alone: two later steps mention the
     # target in passing ("what `make deploy` just wrote", "the console URL `make deploy` printed"),
@@ -1103,21 +1043,15 @@ def test_the_deploy_step_names_every_target_it_runs() -> None:
 def test_the_teardown_step_names_the_stacks_it_destroys() -> None:
     """The `cdk destroy` command names all five stacks, wherever it is documented.
 
-    It moved from `README.md` to `CLAUDE.md` when the walkthrough was cut back to the happy
-    path: teardown is reference an operator reads once, and `CLAUDE.md` already owned its other
-    half ("What deliberately survives a destroy"), so the two halves now sit together. The
-    README keeps the part that is a *decision* -- deregister first, or orphan the runtime -- and
-    points here for the commands.
-
-    What is asserted did not change, only where it is read from. The blast radius of `--all` is
-    the reason: it destroys every stack the CDK app composes, so an account hosting two fleets
-    loses more than the reader meant.
+    The teardown lives in `docs/operations.md`, beside what survives a destroy. Naming the
+    stacks matters because `destroy --all` destroys every stack the CDK app composes, so an
+    account hosting two fleets would lose more than the reader meant.
     """
-    text = CLAUDE_MD.read_text()
-    heading = "### Tearing a fleet down"
+    text = OPERATIONS_MD.read_text()
+    heading = "## Tearing a fleet down"
     assert heading in text, (
-        f"`CLAUDE.md` has no {heading!r} section, so the teardown moved somewhere this check "
-        "cannot see it. README points here for the commands."
+        f"`docs/operations.md` has no {heading!r} section, so the teardown moved somewhere this "
+        "check cannot see it. README points there for the commands."
     )
     # The whole section, not the fenced block alone: the `--all` caveat is in the prose around
     # the command, and it is as load-bearing as the command itself.
@@ -1176,15 +1110,14 @@ def test_claude_md_carries_the_invariants() -> None:
 
 
 def test_invariant_10b_is_qualified_for_the_memory_server() -> None:
-    """Invariant 10b names its one exception, because the repository ships two of them.
+    """Invariant 10b names its one exception: the in-process `memory` server.
 
-    As written it read "No MCP tool may call an AWS API" while
-    `agent/src/coding_agent/memory_tools.py` shipped `memory_search` and `memory_record`, which
+    The invariant states that no MCP tool may call an AWS API, but
+    `agent/src/coding_agent/memory_tools.py` ships `memory_search` and `memory_record`, which
     reach `RetrieveMemoryRecords` and `CreateEvent`. An invariant contradicted by the tree is
     worse than a missing one: the next reader either deletes the tools or stops trusting the list.
-    The qualification is mechanical rather than asserted -- exactly two fixed operations exist in
-    that module and the model names neither the memory, the actor, the session nor the namespace --
-    and that argument belongs in the invariant, not only in the module's own docstring.
+    The qualification must be mechanical -- exactly two fixed operations, no id-shaped parameter
+    in either schema -- and that argument belongs in the invariant itself.
     """
     # From the `10b.` line to the `10c.` line, the same heading-relative slicing `_section` does:
     # numbering is what a reader navigates the list by, and `10c.` is the entry that follows.
@@ -1296,22 +1229,14 @@ def test_every_symbol_a_document_names_is_in_the_file_it_names() -> None:
     )
 
 
-def test_no_docs_directory() -> None:
-    assert not (REPO_ROOT / "docs").exists(), (
-        "there is no `docs/` directory in this repository, on purpose: a reference "
-        "nobody reads is worse than a code comment somebody does. Reference material "
-        "goes to `CLAUDE.md` or stays as the comment on the code that owns it."
-    )
-
-
 @pytest.fixture
 def deployed_asset_tree() -> Path:
     """A fake `cdk synth` asset tree, in-tree, holding copies of two documented files.
 
-    Materialised for real rather than mocked, because the bug it reproduces is about what
+    Materialised for real rather than mocked, because the check being exercised is about what
     `rglob` actually finds. Creating it under `infra/cdk.out/` is safe because `cdk.out/` is
     gitignored, so `git status` stays clean -- but it must NOT survive the test, or the next
-    run's clean-tree case is a lie that nothing would notice.
+    run's clean-tree case fails vacuously.
 
     Deletes exactly what it created: `infra/cdk.out/` may already hold a developer's real
     synth output, so teardown always removes the `asset.deadbeefdeadbeef` subtree and

@@ -16,7 +16,7 @@ The whole flow is three operator actions, and this module is the API half of eac
    passes through this Lambda's memory once and is never stored by us.
 2. **Install** -- the operator installs the app on the repositories they intend to
    register. `install_url` is published for that, and it is the *only* thing that bounds
-   which repositories a token can reach: see `CLAUDE.md`'s "What remains exposed".
+   which repositories a token can reach: see `docs/security.md`.
 3. **Authorise** -- `POST /configurations/{configId}/github-authorize` starts the 3LO leg
    for one repository and returns an `authorizationUrl`. Afterwards the vault answers
    `GetResourceOauth2Token` with a live token for as long as the operator leaves the
@@ -24,17 +24,15 @@ The whole flow is three operator actions, and this module is the API half of eac
 
 **Why the callback dance is in this order.** A GitHub App needs a callback URL at creation
 time, and the only correct callback is AgentCore's -- a per-provider URL that does not
-exist until the provider does. Measured: that URL is assigned on `CreateOauth2Credential-
-Provider` and is **preserved across `UpdateOauth2CredentialProvider`**, which is what makes
+exist until the provider does. That URL is assigned on `CreateOauth2CredentialProvider`
+and is preserved across `UpdateOauth2CredentialProvider`, which is what makes
 "create the provider empty, then fill in the credentials" safe and what makes the one-click
 manifest possible at all. Creating the app first and the provider second would need the
 operator to paste the callback into GitHub's settings page by hand.
 
 **`request_oauth_on_install` is `false` in the manifest, deliberately.** With it `true`
-GitHub bounces the operator into the OAuth leg the instant they install, before the
-provider holds any credentials, and AgentCore's callback answers a bare validation error
-naming `cookie` and `state`. That is a dead end an operator cannot act on, and it was a
-real one.
+GitHub redirects the operator into the OAuth leg the instant they install, before the
+provider holds any credentials, leaving a validation error the operator cannot act on.
 
 **The deployment settings item.** The app's slug and id are stored on one sentinel item in
 the Configurations table, `configId = "rca:settings"`, which carries **no `status`
@@ -202,14 +200,12 @@ def provider_secret_arn() -> str:
     """The ARN of the Secrets Manager secret AgentCore Identity keeps the app's client secret in.
 
     **Every execution role is granted `GetSecretValue` on exactly this ARN, and that grant is
-    what lets a container refresh its own token.** Identity performs that read with the
-    *caller's* permissions -- measured: a token older than its eight-hour lifetime, fetched
-    with only the two credential actions, answered `AccessDenied ... secretsmanager:
-    GetSecretValue on ...bedrock-agentcore-identity!default/oauth2/rca_github-...`, while the
-    same call from a role holding the read refreshed the token and stored it. The ARN is the
-    narrowest resource that grant can name. It is the same one for every repository, because
-    every repository shares this deployment's one GitHub App; what is per repository is the
-    token in the vault, which the service gives no way to fence.
+    what lets a container refresh its own token.** Identity performs that Secrets Manager read
+    with the caller's permissions, so a container without the grant can use a token for its
+    initial lifetime but cannot renew it. The ARN is the narrowest resource that grant can
+    name. It is the same for every repository, because every repository shares this
+    deployment's one GitHub App; what is per repository is the token in the vault, which the
+    service gives no way to fence.
 
     Read off the settings item, where `convert` stores it, so a provision normally costs no
     AgentCore call. A deployment connected before this existed has no stored ARN; it is read off
@@ -370,17 +366,10 @@ def _public_settings(settings: Mapping[str, Any], provider: Mapping[str, Any]) -
 def _bot_commit_identity(slug: str) -> tuple[str, str]:
     """The app's own bot account as a git author, or `("", "")`.
 
-    This is what makes a commit the agent pushes attributable, and the shape was measured
-    rather than taken from the convention, because the obvious reading of the convention is
-    wrong. GitHub resolves a commit to an account by matching the author **email**, and the
+    GitHub resolves a commit to an account by matching the author **email**, and the
     `users.noreply.github.com` form for a bot carries the **bot user's** id -- not the app id.
-    Measured against a live app: `5146691+<slug>[bot]@...` (the app id) resolved to **no
-    account at all**, while `336429684+<slug>[bot]@...` (the bot user id) resolved to
-    `<slug>[bot] (Bot)`. A control commit with a human's own noreply address resolved to that
-    user, so the first answer was a real negative and not an artefact of how the probe wrote
-    the commit.
-
-    The id is therefore fetched rather than derived, from `GET /users/<slug>[bot]`, which needs
+    The two differ, and using the app id resolves to no account. The id is therefore fetched
+    rather than derived, from `GET /users/<slug>[bot]`, which needs
     no credential. A failure returns `("", "")` and costs the deployment nothing but the
     default identity: the alternative is a connect flow that fails because an *attribution*
     lookup did, which trades a cosmetic problem for a blocking one. `AGENT_GIT_AUTHOR_*` set
@@ -465,14 +454,13 @@ def workload_token(config_id: str) -> str:
     analogue of AgentCore Memory's D6: one authorisation per registered repository, created
     and revoked with the registration, so deregistering a repository ends its access.
 
-    It is **not** an IAM fence, and that is measured rather than assumed:
-    `GetWorkloadAccessTokenForUserId` authorizes only on
+    It is **not** an IAM fence: `GetWorkloadAccessTokenForUserId` authorises only on
     `workload-identity-directory/*` -- not on an individual identity -- and
-    `GetResourceOauth2Token` authorizes only on `*`. Neither accepts a condition on the
+    `GetResourceOauth2Token` authorises only on `*`. Neither accepts a condition on the
     user id. So what stops one container reading another repository's token is that a
     container can read exactly one configuration item (invariant 31) and therefore knows
-    exactly one random `configId`. `CLAUDE.md`'s "What remains exposed" states that plainly
-    rather than letting the policy imply a fence it does not have.
+    exactly one random `configId`. `docs/security.md` states that plainly rather than
+    letting the policy imply a fence it does not have.
     """
     return str(
         _common.agentcore_data().get_workload_access_token_for_user_id(
@@ -535,13 +523,11 @@ def resolve_token(config_id: str, *, return_url: str = "", force: bool = False) 
 def complete_authorization(config_id: str, session_uri: str) -> None:
     """Finish the 3LO leg that the operator has just approved in their browser.
 
-    **Without this call the vault stores nothing**, and that is the part the flow does not
-    advertise. GitHub redirects to AgentCore's callback, AgentCore redirects to
-    `resourceOauth2ReturnUrl` with `?session_id=<sessionUri>` and **no error** -- so every
-    signal an operator or a server-side probe can see says the authorisation succeeded, while
-    `GetResourceOauth2Token` goes on answering with an `authorizationUrl` forever. Measured
-    the hard way: a live authorisation looked complete, the vault had no token, and the same
-    `sessionUri` passed to `CompleteResourceTokenAuth` produced one immediately.
+    **Without this call the vault stores nothing.** GitHub redirects to AgentCore's callback,
+    AgentCore redirects to `resourceOauth2ReturnUrl` with `?session_id=<sessionUri>` and
+    **no error** -- so every signal says the authorisation succeeded, while
+    `GetResourceOauth2Token` continues answering with an `authorizationUrl`. The `sessionUri`
+    is the only thing that finishes it.
 
     `userIdentifier` is a **structure** (`{"userId": ...}`) rather than a string, which is the
     second thing to get wrong and costs a `ParamValidationError` inside botocore.

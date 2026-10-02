@@ -9,14 +9,12 @@ every branch either writes an attribute the next scan filters on (`stoppedAt`, a
 `status`, a nudge count at its cap) or claims a bounded retry. A branch that only logged
 would log the same item every tick forever.
 
-The configuration half closes a bug seen live. The provisioner's chain is
+The configuration half recovers a stranded provisioning chain. The provisioner's chain is
 self-perpetuating: `CREATE` ends by queueing a `CHECK`, each `CHECK` queues the next, and
 the chain terminates only by writing `READY` or `FAILED`. So **one lost SQS message
 strands a configuration in `CREATING` forever** -- there is no redelivery to wait for,
-because the message that would have been redelivered is the one that never arrived. That
-is what happened: twelve minutes of `CREATING` with an empty DLQ, an enabled event-source
-mapping and no Lambda invocation at all, and injecting a single `CHECK` by hand promoted
-it to `READY` in fifteen seconds. Nothing recovered it on its own, and nothing would have.
+because the message that would have been redelivered is the one that never arrived. The
+sweep re-drives the chain by sending the next message the configuration needs.
 
 `lambda_handler` is undecorated and ignores its event: there is nothing in a scheduled
 EventBridge payload this needs, and `@handler` is for the HTTP surface. This module
@@ -116,7 +114,7 @@ CONFIG_STALLED_STATUSES = frozenset(CONFIG_DRIVERS) | {"PENDING"}
 # `MAX_CHECK_ATTEMPTS` times `CHECK_DELAY_SECONDS` apart and then writes `FAILED` itself,
 # so 1800s is the longest a *healthy* chain is ever non-terminal. One five-minute tick of
 # slack on top means a configuration is only touched here once the chain that owned it is
-# provably gone. V2 provisioning was measured at ~508s, well inside that.
+# provably gone. V2 provisioning (snapshot preparation) takes several minutes, well inside that.
 CONFIG_STUCK_THRESHOLD_SECONDS = (
     provisioner.MAX_CHECK_ATTEMPTS * provisioner.CHECK_DELAY_SECONDS + 900
 )

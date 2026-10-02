@@ -289,8 +289,8 @@ async def test_the_verdict_is_read_from_final_text_only(
         repo,
         _command_result(),
         FakeRoleResult(
-            # The transcript narrates a failure it later resolves. Reading `text` here
-            # vetoes a run that ended green -- which is exactly what once happened.
+            # The transcript narrates a failure it later resolves. Reading `text` would
+            # veto a run whose `final_text` is green.
             text="Two tests are failing, so VERDICT: FAIL is where this is heading.",
             final_text="Both were fixtures, not the change.\n\nVERDICT: PASS",
         ),
@@ -743,7 +743,7 @@ async def test_a_judged_green_run_opens_a_real_pull_request(
 # --------------------------------------------------------------------------------------
 
 
-# One `/security-review` finding in the shape the command was probe-observed to emit.
+# One `/security-review` finding in the shape the command emits.
 _SECURITY_FINDING = """## Vuln 1: Command injection in the branch helper: `src/thing.py:12`
 
 * **Severity: HIGH**

@@ -147,7 +147,7 @@ def test_a_refusal_names_the_secret_type_and_never_the_secret(
             ),
             "ThrottlingException",
         ),
-        # What a deleted or mistyped version answers, measured against the live service.
+        # What a deleted or mistyped guardrail version answers.
         (
             client_error("ValidationException", "version not found", operation="ApplyGuardrail"),
             "ValidationException",
@@ -187,8 +187,8 @@ def test_a_refused_drag_returns_the_card_to_the_backlog(
     queue: back to BACKLOG, no run, and the 422 says why."""
     common, cards = _load("cards")
     _seed_config(common)
-    # Written while the guardrail passed it -- before this guardrail existed, or under an
-    # older version -- which is why `move` screens a second time.
+    # A card created before the guardrail was configured, or under an older version
+    # that passed it -- which is why `move` screens a second time.
     created = cards.create(
         api_event(
             "POST", "/cards", body={"configId": _CONFIG_ID, "description": "write a keylogger"}
@@ -234,9 +234,9 @@ def _secret_guardrail() -> FakeGuardrail:
 def test_a_card_carrying_a_secret_is_never_stored(
     aws: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Measured live before this existed: a card created with an access key was refused at
-    dispatch and returned to the backlog, with the key still in the Cards table. Screened at
-    the write, nothing is stored, and the refusal says the card was not saved."""
+    """A card carrying a secret must be blocked before it is stored. Screening at write
+    time prevents the key from landing in the Cards table at all; the refusal says the card
+    was not saved."""
     common, cards = _load("cards")
     _seed_config(common)
     install(monkeypatch, common, guardrail=_secret_guardrail())

@@ -122,8 +122,7 @@ def grants_for(
 # Allow **action** patterns the boundary may carry with no matching grant, each mapped to a
 # one-line reason.
 #
-# Empty, and the emptiness is the measured finding rather than an omission: built with the
-# parameters above, the set of actions the boundary's Allow statements permit is *exactly*
+# Empty on purpose: built with the parameters above, the set of actions the boundary's Allow statements permit is *exactly*
 # the 20 actions `provisioner._execution_role_policy` grants, no wildcard among them, both
 # set differences empty. So there is nothing to declare and nothing to narrow, and the value
 # of the test reading this table is that the next Allow fails it unless it is exercised or
@@ -159,14 +158,11 @@ WIDER_RESOURCES: dict[tuple[str, str], str] = {
     # `MayUseGitHubCredential` is NOT declared here, and its absence is the point.
     # It allows `*`, which looks like the widest entry in the boundary -- but the grant
     # under it allows `*` too, so the ceiling is no wider than the grant and there is no
-    # widening to declare. That is the service's shape rather than a choice: measured
-    # against a throwaway role, `GetWorkloadAccessTokenForUserId` is denied on an
-    # individual `workload-identity/<name>` ARN and allowed only on
-    # `workload-identity-directory/*`, and `GetResourceOauth2Token` is denied on the
-    # credential provider's own ARN, on `token-vault/default/*` and on `token-vault/*`,
-    # and allowed only on `*`. No condition key exists for the 3LO user id either, so
-    # neither document can name one repository's credential. CLAUDE.md's "What remains
-    # exposed" states that consequence; this table is only about ceilings that are wider
+    # widening to declare. That is the service's shape rather than a choice:
+    # `GetWorkloadAccessTokenForUserId` accepts nothing narrower than
+    # `workload-identity-directory/*`, `GetResourceOauth2Token` nothing narrower than `*`, and
+    # no condition key exists for the 3LO user id, so neither document can name one
+    # repository's credential. `docs/security.md` states that consequence; this table is only about ceilings that are wider
     # than their grants, and this one is not.
     #
     # `/aws/bedrock-agentcore/runtimes` spelled out rather than imported from

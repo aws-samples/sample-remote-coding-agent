@@ -1,11 +1,10 @@
 """The prompt guardrail `runs.screen_prompt` applies to every task prompt (invariant 43).
 
-A module rather than a stack, and applied **inside** `ApiStack`, its only consumer. It used
-to live in `DataStack`, and that was measured to be a deploy that breaks on its second
-change: `ApiStack` imports the guardrail's version, CloudFormation refuses to delete an
-export another stack imports, and a policy change publishes a new version -- so the producer
-rolled back with "Cannot delete export ... as it is in use by" the consumer. In one stack the
-new version is created, the Lambdas move to it, and the old one is removed in cleanup.
+A module rather than a stack, and applied **inside** `ApiStack`, its only consumer. Both
+must be in the same stack: `ApiStack` imports the guardrail's version, and CloudFormation
+refuses to delete an export another stack imports when a policy change publishes a new
+version. In one stack the new version is created, the Lambdas move to it, and the old one
+is removed in cleanup.
 
 A module and not a method on `ApiStack` because `ApiStack` bundles `../api` through Docker
 at construction, so no test can synthesize it; `add_prompt_guardrail` applied to a bare
@@ -127,14 +126,10 @@ def guardrail_properties(profile_arn: str) -> dict[str, Any]:
             content_filters_tier_config=bedrock.CfnGuardrail.ContentFiltersTierConfigProperty(
                 tier_name="STANDARD"
             ),
-            # LOW on both, and that is measured rather than lenient. Against the live
-            # Standard tier, LOW refused every attack in the probe set (two injections, a
-            # keylogger, ransomware, a credential stealer) and none of ten ordinary tasks.
-            # One step up started refusing legitimate work: PROMPT_ATTACK at MEDIUM refused
-            # "Ignore all previous lint warnings in legacy/ ...", and MISCONDUCT at MEDIUM
-            # refused "kill the child process with SIGKILL", "fix the SQL injection", "escape
-            # HTML to prevent XSS" and "add a fuzz test ... hostile inputs". A coding agent's
-            # security tasks are exactly the ones a stricter setting refuses.
+            # LOW on both. LOW blocks injections and malicious-code requests while leaving
+            # legitimate coding tasks -- security fixes, SIGKILL, SQL-injection remediation,
+            # fuzz tests -- unblocked. MEDIUM refuses those tasks on a coding agent, because
+            # a coding agent's security work is exactly what a stricter threshold targets.
             filters_config=[
                 # Jailbreak, prompt injection and prompt leakage. The output strength must be
                 # NONE for this filter type; the service rejects anything else.
@@ -187,8 +182,7 @@ def add_prompt_guardrail(stack: cdk.Stack, *, app_name: str, profile_id: str) ->
     A pinned version rather than `DRAFT`, because `DRAFT` is whatever the guardrail was last
     edited to, console included, and the template should say what screens prompts. The
     version's construct id carries a digest of the policies, so changing a policy publishes a
-    new version on the next deploy instead of leaving the old one pinned -- measured: a policy
-    change created version 2 and retired version 1 in the same update.
+    new version on the next deploy instead of leaving the old one pinned.
     """
     properties = guardrail_properties(
         f"arn:aws:bedrock:{stack.region}:{stack.account}:guardrail-profile/{profile_id}"

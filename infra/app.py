@@ -67,17 +67,12 @@ APP_NAME = "rca"
 #
 # The **account** suffix carries one thing more than the prefix: the consuming region, as
 # `FooAccountApSoutheast1`. That is one stack per *(fleet, region)* pair rather than per
-# account, and it is the fix for a measured cost, not tidiness. CDK's cross-region
-# reference machinery writes an `ExportsWriter` custom resource *per consuming region* into
-# the producing stack, and a synth only knows the one region it is deploying -- so while
-# every region shared one `{prefix}Account`, deploying from a second region submitted a
-# template that *deleted* the first region's `ExportsWriter`. CloudFormation reported
-# `DELETE_FAILED (skipped)` after ~6 minutes of retry on every deploy in both directions,
-# and left the stack in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`, where the next deploy was
-# refused outright. Per-region ownership means each producing stack has exactly one
-# consuming region, so its `ExportsWriter` is never absent from the template that replaces
-# it. The other four suffixes are untouched, because those stacks already live in the
-# consuming region.
+# account: CDK's cross-region reference machinery writes an `ExportsWriter` custom resource
+# *per consuming region* into the producing stack, and a synth only knows the one region it
+# is deploying. Per-region ownership means each producing stack has exactly one consuming
+# region, so its `ExportsWriter` is never absent from the template that replaces it. The
+# other four suffixes are untouched, because those stacks already live in the consuming
+# region.
 #
 # The five constants below are the **defaults**, i.e. `stack_names()` with no argument, and
 # `API_STACK_NAME` is a contract rather than a preference: `mcp/src/rca_mcp/client.py` pins

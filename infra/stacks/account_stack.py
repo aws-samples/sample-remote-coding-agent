@@ -202,22 +202,16 @@ class AccountStack(cdk.Stack):
             self,
             "BedrockSpend",
             budget=budgets.CfnBudget.BudgetDataProperty(
-                # NO explicit `budget_name`, and that is a reversal: it used to be
-                # `f"{app_name}-bedrock-monthly"` so that a second deployment into one account
-                # would collide loudly at `CreateBudget`. The collision it actually produced
-                # was this deployment colliding with *itself*. AWS Budgets is global and
-                # several `CfnBudget` properties replace rather than update, so any update
-                # that replaces the budget creates the new one before deleting the old --
-                # against a name the old one still holds:
+                # NO explicit `budget_name`. AWS Budgets is global and several `CfnBudget`
+                # properties replace rather than update, so any update that replaces the
+                # budget creates the new one before deleting the old -- against a name the
+                # old one still holds:
                 #
                 #   A budget or resource with the same name but a different internalId
                 #   already exists. (Service: Budgets, Status Code: 400)
                 #
-                # Observed on the first `make deploy` that passed `EMAIL` to a stack created
-                # without one: supplying `notifications_with_subscribers` for the first time
-                # is such a change. It fails the whole deploy, because `AccountStack` is in
-                # `cdk deploy --all`, and it keeps failing until a human deletes the budget by
-                # hand. A generated name is the only thing that survives a replacement.
+                # A generated name is the only thing that survives a replacement without
+                # requiring manual budget deletion.
                 #
                 # What that costs, stated rather than hidden: two deployments in one account
                 # now each get a budget, and because `BEDROCK_COST_FILTER` carries no

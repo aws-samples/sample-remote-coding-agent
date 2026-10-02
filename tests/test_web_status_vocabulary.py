@@ -93,10 +93,9 @@ def _python_names(path: Path) -> dict[str, Any]:
         if isinstance(node, ast.Tuple):
             return tuple(value(element) for element in node.elts)
         # `watchdog.RESUMABLE_STATUSES` and `runs.TERMINAL_STATUSES` are
-        # `frozenset({...})`, a call `ast.literal_eval` rejects -- so the loop's
-        # `except ValueError` was silently skipping exactly the constants this file
-        # needs to read, and a skipped constant is a `KeyError` in the test that reads
-        # it rather than a false pass.
+        # `frozenset({...})`, which `ast.literal_eval` rejects. A skipped constant
+        # produces a `KeyError` in the reading test rather than a false pass, so
+        # frozenset/set literals are handled explicitly here.
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -263,8 +262,8 @@ def test_every_non_terminal_container_status_is_resumable_by_the_watchdog() -> N
     `RESUMABLE_STATUSES` to the container's own non-terminal half, without going through
     either. Otherwise a new node status in `coding_agent.state.TaskStatus` reaches the
     console and the graph under existing tests and reaches the watchdog under none of them:
-    the sweep's filter never names it, a live run looks unknown rather than resumable, and
-    nothing ever rescues it.
+    the sweep's filter never names it, a run in that state looks unknown rather than
+    resumable, and nothing rescues it.
     """
     resumable = set(_python_names(WATCHDOG_PY)["RESUMABLE_STATUSES"])
     live = set(get_args(TaskStatus)) - TERMINAL_STATUSES

@@ -113,10 +113,7 @@ CONTAINER_DEFAULTS: dict[str, str] = {
 #     more of the same, which is why it once had a table of its own here. The ten above govern
 #     **Anthropic-bound** traffic, which on Bedrock does not exist; this is the only variable
 #     that turns the CLI's **OTLP** exporter on, and nothing in this deployment listens for
-#     OTLP. It carried the provisioner's `OTEL_METRICS_ENABLED` constant when an in-container
-#     ADOT collector signed the CLI's metrics to CloudWatch for Coding Agent Insights; that
-#     feature was removed (`CLAUDE.md` says why), so the value is now a literal `"0"` and the
-#     five `OTEL_*` names that configured the exporter are gone with it. A literal `"1"` here
+#     OTLP, so the value is a literal `"0"` and no `OTEL_*` variable is set. A literal `"1"` here
 #     points the CLI at a port nothing is listening on; any endpoint it *did* reach would be an
 #     egress destination invariant 33 has not sanctioned.
 CLI_SUPPRESSIONS: dict[str, str] = {
@@ -412,12 +409,10 @@ def test_every_container_environment_read_is_forwarded_or_a_declared_default() -
 
 
 def test_the_two_fleet_policy_knobs_are_classified_as_fleet() -> None:
-    """Invariant 24, and the failure this file exists to catch. `_desired_runtime` merges
-    `{**create-time defaults, **live, **fleet}`, so a key in the per-configuration group
-    is *carried forward* from whatever the live runtime was born with while a key in the
-    fleet group **converges**. Put a fleet-wide knob in the wrong group and every other
-    test still passes while a rollout quietly fails to take -- invisible until someone
-    diffs a live runtime with `GetAgentRuntime`.
+    """Invariant 24: `_desired_runtime` merges `{**create-time defaults, **live, **fleet}`,
+    so a key in the per-configuration group is *carried forward* while a key in the fleet
+    group **converges**. A fleet-wide knob in the wrong group fails to roll out; the
+    failure is invisible until the live runtime is read back with `GetAgentRuntime`.
     """
     fleet, per_configuration = _forwarded()
     # The two this phase adds, plus the four routing values they sit beside.

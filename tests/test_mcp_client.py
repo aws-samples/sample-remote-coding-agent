@@ -235,10 +235,9 @@ def test_an_ambient_aws_region_does_not_pin_the_region(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Claude Code on Bedrock sets `AWS_REGION` in its own settings `env` for the *model's*
-    region, and a project-scoped server inherits it. Read as a pin, that sent `/remote` to
-    the model's region and answered "not deployed" while the endpoint document named the
-    deployment's -- measured from a checkout whose Claude Code ran on Bedrock in us-west-2
-    against a fleet in us-east-1. Ambient, the endpoint document's own region wins.
+    region, and a project-scoped server inherits it. Read as a pin, it would send `/remote` to
+    the model's region rather than the deployment's. Ambient, the endpoint document's own
+    region wins.
     """
     monkeypatch.delenv("RCA_REGION", raising=False)
     monkeypatch.setenv("AWS_REGION", _OTHER_REGION)
@@ -262,9 +261,8 @@ def test_an_override_is_signed_for_the_region_its_url_names(
 ) -> None:
     """An `execute-api` URL names its region, and that outranks the ambient `AWS_REGION`.
 
-    Measured: with Claude Code's `AWS_REGION=us-west-2` and an `api_url` override pointing at
-    a us-east-1 API, every request was signed for us-west-2 and answered a bare 403.
-    `RCA_REGION` still wins, and a host that names no region falls back to the ambient one.
+    Signed for an ambient region that differs from the API's, every request would answer a
+    bare 403. `RCA_REGION` still wins, and a host that names no region falls back to the ambient one.
     """
     monkeypatch.setenv("AWS_REGION", _REGION)
     monkeypatch.delenv("RCA_REGION", raising=False)

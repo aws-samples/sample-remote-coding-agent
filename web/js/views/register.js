@@ -497,8 +497,8 @@ function mountSettings(root, configId) {
    * Authorising needs the operator's **browser** -- the token is a user-to-server one, so it
    * depends on their github.com session and no server can obtain it -- but it does not need a
    * decision: GitHub asks for consent once per user per app, and every authorisation after
-   * that is a silent redirect. A button the operator has to notice was therefore the wrong
-   * shape for the common case, and it was missed in a live walkthrough.
+   * that is a silent redirect. Starting it automatically suits the common case better than a
+   * button the operator has to notice.
    *
    * **Three guards, and the loop is why.** An automatic redirect fired whenever the status
    * reads unauthorised bounces the browser to GitHub and back forever when completion keeps

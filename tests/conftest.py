@@ -46,13 +46,11 @@ FAKE_FINE_GRAINED_REPLACEMENT_PAT = "github_pat_22ZYXWVUTSRQPONMLKJI9876543210"
 # token's shape -- `mcp/` logs a method, a path and a status, never a body.
 FAKE_UNLOGGED_PAT = "github_pat_11ABCDEFG_never_echoed"
 
-# Six more fake tokens -- one per App/OAuth prefix and the two classic shapes -- used to live
-# here, as inputs to the shape allowlist registration ran on every credential. They are
-# **deleted** rather than kept: the control plane accepts no credential at all now, so each one
-# was a constant nothing imported, and a token-shaped literal with no reader is exactly what the
-# next artifact scan flags for no reason anyone can act on. `FAKE_FINE_GRAINED_PAT` stays
-# because `configurations.create` still has to refuse a body carrying a token, and the refusal
-# needs something shaped like what an operator would try to paste.
+# `FAKE_FINE_GRAINED_PAT` is here because `configurations.create` must refuse a body
+# carrying a token, and the refusal test needs something shaped like what an operator
+# would try to paste. Token-shaped literals with no reader are not kept: a constant
+# nothing imports is exactly what the next artifact scan flags for no reason anyone can
+# act on.
 
 # `_aws_env` below puts the same pair in the environment for every test, which is where boto3
 # finds them. This mapping is for the one client built at *module import*, before any fixture has

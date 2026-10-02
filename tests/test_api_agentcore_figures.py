@@ -1,17 +1,17 @@
 """The three AgentCore figures, and the two vocabularies that must agree with them.
 
-Every assertion here is about a *number or a string that was measured against the live
-service* and cannot be re-derived from anything in the repository:
+Every assertion here is about a value that cannot be re-derived from anything in the
+repository:
 
 - `filesystemConfigurations[0].sessionStorage.mountPath = /mnt/workspace` -- without a
   session-storage mount the container's filesystem is gone on the next invoke, so a
   resume re-clones and re-plans and the run loops. `MountPath`'s own pattern allows
   exactly one level under `/mnt`, and botocore does **not** enforce a `pattern`
   client-side, so `/mnt/work/space` is a bare server-side `ValidationException`.
-- `lifecycleConfiguration.maxLifetime = 28800` -- the service default is 2 hours and a
-  real task ran 3h34m; the failure looks like the container crashing.
+- `lifecycleConfiguration.maxLifetime = 28800` -- the service default is 2 hours; a task
+  that exceeds it looks like the container crashing.
 - one `StopRuntimeSession` per terminal task -- a session left running bills for the
-  rest of `maxLifetime`, which with the figure above is eight hours per task.
+  rest of `maxLifetime`, which at the figure above is eight hours per task.
 
 The figures are asserted twice over: as constants, and as what `_desired_runtime`
 actually sends when the live runtime disagrees. That second half is invariant 24 -- the
@@ -151,9 +151,9 @@ def test_the_max_lifetime_is_eight_hours_and_the_service_accepts_it(
 
 
 def _drifted_runtime() -> dict[str, Any]:
-    """A live runtime that predates all three figures and carries two things nobody here
-    knows about: an idle timeout an operator raised, and an environment key a later
-    version of the agent added."""
+    """A runtime that lacks the three figures and carries two unknown members: an idle
+    timeout set outside this code, and an environment key from a later version of the
+    agent."""
     return {
         "agentRuntimeId": "rca_cfg_0123456789ab-ABC123",
         "agentRuntimeArn": (
@@ -180,9 +180,8 @@ def test_all_three_figures_converge_rather_than_carrying_forward(
 ) -> None:
     """The invariant-24 test. `UpdateAgentRuntime` is a full replace, so a field omitted
     is a field deleted -- which makes carry-forward the safe-looking default and exactly
-    wrong for a fleet figure. Both runtimes on the deploy this was measured against
-    predated session storage and the 8-hour lifetime; carried forward, neither would ever
-    have got them, and no number of re-issued runtime updates would have fixed it."""
+    wrong for a fleet figure: a runtime created before session storage and the 8-hour lifetime
+    would never get them, however many updates were issued."""
     provisioner, _watchdog, _runs = figures
     live = _drifted_runtime()
     desired = provisioner._desired_runtime(live, CONFIG)

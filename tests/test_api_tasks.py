@@ -297,13 +297,12 @@ def test_create_refuses_a_configuration_that_is_not_ready(aws: Any) -> None:
 
 
 def test_a_run_started_from_the_api_lands_on_the_board_in_planning(aws: Any) -> None:
-    """The whole point of the card being an invariant: a `/sample-rca:remote` run started
-    from Claude Code is a card in `Planning`, and it tracks the run from there.
+    """Every run has a card (invariant 38): a `/sample-rca:remote` run started from Claude
+    Code is a card in `Planning`, tracking the run from there.
 
-    `POST /tasks` is what the MCP `start_task` tool calls, so before this the board showed
-    nothing at all for a run started that way. Nothing is stored to keep the column up to
-    date -- `cards.derived_view` projects it off the run's own status on every read, which
-    is why the column follows the run with no second copy of that truth to drift.
+    `POST /tasks` is what the MCP `start_task` tool calls. Nothing is stored to keep the
+    column current -- `cards.derived_view` projects it off the run's own status on every
+    read, so the column follows the run with no second copy of that truth to drift.
     """
     common, cards, tasks = _load("cards", "tasks")
     _seed_config(common)

@@ -33,9 +33,9 @@ def _prepare_root(work_root: Path, work_dir: Path, repo_dir: Path) -> None:
 
     The session-storage mount arrives owned by another uid and *imposes* that ownership on
     what the container creates under it, so a directory this very process just made reads
-    as someone else's and git dies with `fatal: detected dubious ownership`. On a real
-    deploy that killed three tasks -- thirty seconds AFTER `mkdir` had reported success,
-    which is exactly why the probe below is a real `git init` and not another `mkdir`.
+    as someone else's and git dies with `fatal: detected dubious ownership`. A `mkdir`
+    succeeding proves nothing about this: `git_ops.probe_repository` runs a real
+    `git init` to catch the error before the clone starts.
     """
     for path in (work_root, work_dir, repo_dir):
         path.mkdir(parents=True, exist_ok=True)

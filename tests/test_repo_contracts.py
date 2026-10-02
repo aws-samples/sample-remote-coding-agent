@@ -248,11 +248,9 @@ def _defined_program(name: str, tmp_path: Path) -> Path:
 def test_the_outputs_reader_names_a_missing_stack_instead_of_raising(tmp_path: Path) -> None:
     """`json_output` must report a stack the outputs file does not carry as a sentence.
 
-    A bare `KeyError: 'FooConsole'` is what this used to be, and it arrived twenty minutes
-    into a deploy from a stack name `STACK_PREFIX` chose -- so the traceback named a
-    variable rather than the mistake. Only the value may reach stdout, because every call
-    site reads this through `$$(...)` and would otherwise write the diagnostic into
-    `web/config.js`.
+    A bare `KeyError` naming the stack is not actionable; the message must say which stack
+    is missing and why. Only the value may reach stdout, because every call site reads this
+    through `$$(...)` and would otherwise write the diagnostic into `web/config.js`.
     """
     program = _defined_program("RCA_OUTPUT", tmp_path)
     outputs = tmp_path / "stack-outputs.json"
@@ -499,21 +497,15 @@ def test_the_agent_image_bakes_the_skills_and_sets_no_work_root() -> None:
 def test_the_agent_image_carries_no_metrics_collector() -> None:
     """Nothing in the image, and nothing in the tree, exports the CLI's OTel metrics.
 
-    This replaces two tests that asserted the *presence* of an ADOT collector behind a build
-    arg, and its deploy-time default. Coding Agent Insights was removed: AWS documents two
-    supported paths -- a bearer token the CLI posts with directly, and a vendor gateway -- and
-    this repository could take neither. A bearer token is a long-term IAM-user credential,
+    AWS documents two supported paths for the CLI's metrics -- a bearer token the CLI posts
+    with directly, and a vendor gateway -- and this repository takes neither. A bearer token is a long-term IAM-user credential,
     which this container's whole credential story (one repository-scoped PAT, never in the
-    environment) refuses; the gateway is a vendor endpoint invariant 33 blocks by name. What
-    was built instead -- an in-container collector SigV4-signing to
-    `monitoring.<region>.amazonaws.com/v1/metrics` -- is a third path that was measured end to
-    end and produced no metric in any namespace.
+    environment) refuses; the gateway is a vendor endpoint invariant 33 blocks by name.
 
-    So this asserts the absence, in every place the feature had a limb, because each of them
+    So this asserts the absence in every place an exporter could appear, because each of them
     fails silently on its own: a collector with no permission exports nothing, exporter
     variables with no collector retry against a closed port, and a `cloudwatch:PutMetricData`
-    grant with neither is the fifth thing stolen container credentials reach. `CLAUDE.md`
-    carries the whole argument; this is the mechanical half.
+    grant with neither is one more thing stolen container credentials reach (invariant 32b).
     """
     raw = (REPO_ROOT / _DOCKERFILE).read_text()
     args = _dockerfile_args()
@@ -548,7 +540,7 @@ def test_the_agent_image_carries_no_metrics_collector() -> None:
             "without a rebuild."
         )
 
-    # The collector's own configuration directory, which `COPY otel /opt/otel` used to place.
+    # The collector's configuration directory: if it re-appears, the corresponding collector is back.
     assert not (REPO_ROOT / "agent" / "otel").exists(), (
         "agent/otel/ is back. It held the collector configuration -- a `sigv4auth` extension, a "
         "loopback OTLP receiver and an `otlphttp` exporter -- and nothing reads it now."

@@ -3,8 +3,7 @@
 This stack is separated from the other three by *lifecycle*, not by tidiness. All three
 tables are `RemovalPolicy.RETAIN` (invariant 22), because the teardown path for a
 repository is `DELETE /configurations/{id}` -- which deletes that configuration's rows
-and its runtime and nothing else -- and never `cdk destroy`, which would take the whole
-fleet's history with it. A `RETAIN` table outlives every other stack in the app, so it
+and its runtime and nothing else -- and never `cdk destroy`, which would remove every table and every task record. A `RETAIN` table outlives every other stack in the app, so it
 has to be alone in one.
 
 The key schema on `Tasks` is the decision in here worth reading twice: partition
@@ -169,16 +168,10 @@ class DataStack(cdk.Stack):
             # than symmetry: `TaskDlq` is itself consumed, by `ApiStack`'s `dlq_handler`
             # (`Duration.minutes(1)`), and SQS event source mappings are rejected outright
             # when a queue's visibility timeout is below its consumer's function timeout.
-            # Left at the 30-second default this failed at `CreateEventSourceMapping` --
-            # "Queue visibility timeout: 30 seconds is less than Function timeout: 60
-            # seconds" -- which rolled the whole of `ApiStack` back on a first deploy.
-            #
-            # Nothing caught it earlier because nothing could: this file's docstring pair
-            # in `tests/test_grant_contract.py` records that `ApiStack` bundles `../api`
-            # through Docker at construction time, so no test in this repository
-            # synthesizes it, and the constraint is enforced by SQS at create time rather
-            # than by CDK at synth time. The pairing is therefore a comment and a shared
-            # `visibility` argument rather than an assertion.
+            # The constraint is enforced by SQS at create time rather than by CDK at synth
+            # time (the `ApiStack` bundles Docker at construction, so no test synthesizes
+            # it), so the pairing is a shared `visibility` argument rather than an
+            # assertion.
             visibility_timeout=visibility,
         )
         queue = sqs.Queue(

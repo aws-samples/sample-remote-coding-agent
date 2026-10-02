@@ -46,11 +46,10 @@ _DETAIL_FIELDS = (
     "subagent_type",
 )
 
-# BOTH names, and the reason is a rename mid-2.1.x: `Task` became `Agent` in Claude Code
-# v2.1.63. Current releases emit `"Agent"` in tool-use blocks while the session's init
-# tool list still says `"Task"` -- probe-verified against CLI 2.1.236, the build bundled
-# with `claude-agent-sdk` 0.2.141. So any code reading the message stream checks both,
-# and a stream that switches back mid-flight still stamps its rows.
+# BOTH names, because `Task` was renamed to `Agent` in Claude Code v2.1.63. Current
+# releases emit `"Agent"` in tool-use blocks while the session's init tool list still
+# says `"Task"`. Any code reading the message stream checks both, so a stream that
+# switches back mid-flight still stamps its rows.
 #
 # It lives here rather than in `subagents.py` because `subagents` imports `activity` and
 # the arrow points one way; putting it there would make the cycle.

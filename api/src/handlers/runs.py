@@ -53,9 +53,9 @@ TASK_STATUSES = (
     "CANCELLED",
 )
 # The container's own `TERMINAL_STATUSES`: what the watchdog must never resume and what the
-# console renders as finished. `FAILED_VERIFICATION` and `CANCELLED` were missing, and a task
-# in either was in *neither* the watchdog's live half nor its finished half -- never listed,
-# so its AgentCore session billed until `MAX_LIFETIME_SECONDS`, and `done` never went true.
+# console renders as finished. All five statuses the graph can end with are present here --
+# omitting one leaves a task in neither the watchdog's live half nor its finished half,
+# so its AgentCore session bills until `MAX_LIFETIME_SECONDS` and `done` never goes true.
 TERMINAL_STATUSES = frozenset(
     {"SUCCEEDED", "SUCCEEDED_UNVERIFIED", "FAILED_VERIFICATION", "FAILED", "CANCELLED"}
 )
@@ -130,8 +130,8 @@ def screen_prompt(prompt: str, *, refused: str = "no run was queued") -> Screene
     except (ClientError, BotoCoreError) as err:
         # The service's own code goes into the message, because the 503 covers two very
         # different things: `ThrottlingException` clears on a retry, while
-        # `AccessDeniedException` or `ValidationException` (a deleted or mistyped version,
-        # measured) is a broken deploy that no retry fixes.
+        # `AccessDeniedException` or `ValidationException` (a deleted or mistyped version) is a
+        # broken deploy that no retry fixes.
         reason = (
             err.response.get("Error", {}).get("Code", "ClientError")
             if isinstance(err, ClientError)

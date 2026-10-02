@@ -112,7 +112,7 @@ class FileCheckpointer(InMemorySaver):
                 # checkpoint carries, and it would not round-trip -- which is the same fact
                 # the docstring above states from the other side, that rebuilding key by
                 # key is what preserves the `defaultdict` behaviour every later `put`
-                # relies on. `CLAUDE.md`'s "What remains exposed" carries this too.
+                # relies on. `docs/security.md`'s "What remains exposed" covers this too.
                 payload = pickle.load(handle)  # nosec B301 -- the exposure argued just above
             for thread_id, namespaces in payload["storage"].items():
                 for checkpoint_ns, checkpoints in namespaces.items():

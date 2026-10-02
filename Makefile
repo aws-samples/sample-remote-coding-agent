@@ -29,11 +29,10 @@ PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 # container and not. The agent image already carries claude-agent-sdk 0.2.142, boto3
 # and botocore 1.43.75, langgraph 1.2.11, bedrock-agentcore 1.22.0, mcp 1.29.0 and
 # pydantic 2.13.4 -- every one of them inside its declared bound, so pip installs none
-# of them and nothing resolves differently. Measured on the phase-7 tree: 1.1G without
-# the flag, 637M with it, `make test` 669 passed either way. claude_agent_sdk alone is
-# 318M of what the flag stops copying. The ~460M between those two numbers is most of a
-# container's spare disk, and `setup` runs before verification on every run that verifies
-# -- so that 460M is spent first and what still has to fit afterwards is the checkout,
+# of them and nothing resolves differently. The flag roughly halves the venv (about 1.1G
+# without it, 640M with it; claude_agent_sdk alone is over 300M), and `setup` runs before
+# verification on every run that verifies -- so that space is spent first and what still has
+# to fit afterwards is the checkout,
 # the `pip install -e`s and whatever the task under verification writes. If the image
 # ever ships a version outside a declared bound, pip installs the right one into .venv
 # and the venv's site-packages still shadows the system one -- the saving shrinks,
@@ -104,11 +103,10 @@ lint:
 # The operator front door. `preflight` is read-only and safe to run at any time;
 # `deploy` is the whole deploy, and both are idempotent, so a re-run of either is the
 # health check. Everything lives here rather than in a script: this file is the single
-# owner of every operator command. Nothing wraps these targets any more -- the plugin used to
-# ship a `setup` skill that ran `setup`, then `preflight`, then `deploy` and nothing else, and
-# it was removed in plugin 0.3.0 because an operator who installed the plugin from the
-# marketplace has no checkout for it to run them in. So a human runs them directly, in that
-# order, and `README.md`'s deploy step is the one place that spells the order out.
+# owner of every operator command. Nothing wraps these targets: an operator who installed the
+# plugin from the marketplace has no checkout for a skill to run them in, so a human runs
+# them directly, in order, and `README.md`'s deploy step is the one place that spells the
+# order out.
 # `tests/test_repo_contracts.py::test_the_makefile_declares_exactly_the_five_targets`
 # pins the target set to exactly five, so a helper target is not available as a hiding place.
 
@@ -119,11 +117,7 @@ lint:
 # Without it these objects carry **no** cache directive at all. Browsers then cache
 # heuristically, ES module imports especially so, and a console change can leave an operator
 # on stale JavaScript for an unbounded time with nothing to say so. `create-invalidation`
-# does not help: it clears CloudFront's copy, never the browser's. Measured rather than
-# reasoned -- a register-page change was confirmed live in S3 (`LastModified`, `ETag`) and at
-# the edge (fetched twice, with and without a query string), and the invalidation showed
-# `Completed`, while the browser still rendered a sentence that no longer existed anywhere
-# server-side. The operator looking at it reasonably concluded the deploy had not worked.
+# does not help: it clears CloudFront's copy, never the browser's.
 #
 # One directive for everything rather than long-lived caching for assets and `no-cache` for
 # the entry point, because `web/js` ships exactly as written: there is no build step and no
@@ -200,12 +194,10 @@ V2_REGIONS = us-east-1 us-east-2 us-west-2 eu-west-1 ap-northeast-1
 BOOTSTRAP_STACK ?= CDKToolkit
 API_STACK = $(STACK_PREFIX)Api
 CONSOLE_STACK = $(STACK_PREFIX)Console
-# The PRE-SPLIT, shared us-east-1 stack name: the console's WAF web ACL and the Bedrock
-# spend budget used to live in one stack per *account*, so every regional deploy of the same
-# fleet updated it. `infra/app.py::stack_names` now instances that stack per consuming
-# region, so this name is what a deploy from BEFORE that split left behind -- the deploy
-# resolves the name it actually builds inside the recipe from `infra/app.py::stack_names`
-# and closes by reporting this one as orphaned if it still exists. Kept as a variable
+# The unsuffixed account stack name. `infra/app.py::stack_names` instances the account stack
+# per consuming region, and the recipe resolves the name it builds from there; a stack with
+# this unsuffixed name is left over from an older layout, and the deploy closes by reporting
+# it as orphaned if it exists. Kept as a variable
 # because that notice, and nothing else, names it; nothing reads an output from it.
 ACCOUNT_STACK = $(STACK_PREFIX)Account
 
@@ -321,11 +313,9 @@ json_output = $(PYTHON) -c "$$RCA_OUTPUT" "$(OUTPUTS)"
 # is IAM-authorized `execute-api` and the `aws` CLI cannot sign a request to it at all -- the
 # in-tree `rca_mcp.client.ApiClient` is the only signer on this machine.
 #
-# **It asks for nothing.** This used to read a fine-grained PAT with `getpass` and send it as
-# `githubToken`; registration takes no credential now and the API refuses a body carrying one
-# with `400 TokenNotAccepted`, so the prompt was not merely redundant, it made the last step of
-# every deploy fail. What a repository needs instead is an authorisation, and that is a browser
-# step -- so this registers and then says where to finish.
+# **It asks for nothing.** Registration takes no credential, and the API refuses a body
+# carrying one with `400 TokenNotAccepted`. What a repository needs instead is an
+# authorisation, which is a browser step -- so this registers and then says where to finish.
 #
 # Every statement is inside a function on purpose. A column-0 `try:` or `else:` in this
 # block reads as a declared Makefile target to the regex in

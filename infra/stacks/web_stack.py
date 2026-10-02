@@ -81,27 +81,18 @@ from constructs import Construct
 #   made same-origin: the hosted UI is Cognito's own domain, and the exchange is a `fetch`
 #   and therefore governed by `connect-src` rather than by `form-action`.
 #
-# This was `connect-src 'self'` alone, and the console was unusable because of it. The
-# reasoning behind that string was entirely about the API, and the second destination was
-# never counted -- so the distribution answered every static asset, `/api/*` proxied
-# correctly, Cognito's domain was ACTIVE with correct CORS, sign-in reached the hosted UI
-# and redirected back, and then the browser refused the token POST before it left. `fetch`
-# rejects a CSP block with `TypeError: Failed to fetch`, which names no policy and no host,
-# so nothing on the wire and nothing in any log said why: every server-side probe passes
-# because `curl` does not enforce CSP. Only a browser could see it, which is why no test
-# and no live API run caught it.
+# `connect-src 'self'` alone is insufficient: the browser refuses a `fetch` that CSP
+# blocks before it leaves -- `TypeError: Failed to fetch` with no policy name -- and `curl`
+# does not enforce CSP, so the missing Cognito entry is invisible to any server-side probe.
 #
-# `form-action` is the **same failure, a second time**, and it is recorded here rather than
-# fixed quietly because the shape is what generalises. It was `'none'` on the reasoning that
-# every outbound call in this console is a `fetch` -- true until `web/js/views/connect.js`
-# submitted a real `<form>` to GitHub, which is the one thing the app-manifest flow cannot do
-# any other way: GitHub has to receive the manifest under the operator's own github.com
-# session and answer with its own confirmation page, which is a navigation and not a response
-# JavaScript may read. With `'none'` the browser refuses that submit silently, the console
-# sits on "Preparing the GitHub App…" forever, and every server-side signal is green -- the
-# API returns a manifest, its log line says so, and nothing is ever sent. The lesson is that
-# a CSP directive narrowed to what the code does today is a tripwire for the next thing it
-# does, and only a browser can trip it.
+# `form-action` follows the same pattern. `'none'` looks correct because every outbound
+# call in this console is a `fetch` -- until `web/js/views/connect.js` submits a real
+# `<form>` to GitHub, which is the one thing the app-manifest flow cannot avoid: GitHub
+# must receive the manifest under the operator's own session and answer with a confirmation
+# page, a navigation and not a response JavaScript may read. With `'none'` the browser
+# refuses that submit silently, every server-side signal stays green, and the console
+# blocks at "Preparing the GitHub App…" indefinitely. A CSP directive narrowed to current
+# behaviour is a tripwire for the next feature, which only a browser can trip.
 #
 # `tests/test_web_stack.py::test_the_policy_permits_the_github_app_manifest_post` ties this
 # entry to `github_app._MANIFEST_FORM_URL`, so the two cannot drift.
@@ -350,14 +341,12 @@ class WebStack(cdk.Stack):
             # console that can mint its own accounts is a console anyone can join.
             self_sign_up_enabled=False,
             # MFA is OFF, and this is a deliberate step DOWN from Tier 1 #13, taken for a
-            # demo and wrong for anything real. `Mfa.REQUIRED` made the hosted UI demand a
-            # TOTP enrolment before an operator ever saw the board, which is the first thing
-            # a new operator meets and the point at which several gave up. What it protected
-            # is not nothing: this console is a public CloudFront URL in front of an API that
-            # can register repositories -- so re-enable it, with `mfa_second_factor(otp=True,
-            # sms=False)`, before this is used for anything but a walkthrough. SMS is never
-            # the second factor to add back: it is redirectable at a phone shop and drags an
-            # SNS role into this stack.
+            # demo and wrong for anything real. `Mfa.REQUIRED` blocks the hosted UI from
+            # showing the board until a TOTP is enrolled. This console is a public
+            # CloudFront URL in front of an API that can register repositories -- re-enable
+            # MFA, with `mfa_second_factor(otp=True, sms=False)`, before this is used for
+            # anything but a walkthrough. SMS is never the second factor to add back: it is
+            # redirectable at a phone shop and drags an SNS role into this stack.
             #
             # `self_sign_up_enabled=False` stays, and it is what still bounds who can be an
             # operator at all: accounts are minted only by `admin-create-user`. Losing both

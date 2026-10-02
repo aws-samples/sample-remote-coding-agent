@@ -311,18 +311,12 @@ def test_every_override_carries_the_title_the_installer_demands() -> None:
     Claude Code validates this manifest *before* it copies anything into place, and its
     schema requires `title` on every entry. Without it `/plugin install` fails outright
     with one `userConfig.<name>.title: Invalid input: expected string, received
-    undefined` per entry -- so the plugin cannot be installed by anyone, on any machine,
-    however the deployment is configured.
+    undefined` per entry -- so the plugin cannot be installed on any machine, however the
+    deployment is configured.
 
-    The failure mode this pins is the suite's own: every other property of this block was
-    already asserted above -- the key set, `required`, `description` -- and `title` was
-    not, so `make test` stayed green on a manifest that was uninstallable. A green
-    checkout reads as a working plugin, and nothing on this side of the install says
-    otherwise; the first signal is an operator pasting the validator's error back.
-
-    `title` is the label the configuration UI puts on the field, so it is also the only
-    text an operator sees before opening `description` -- which is why it must not just
-    be the description again.
+    `title` is the label the configuration UI puts on the field, and the only text an
+    operator sees before opening `description` -- which is why it must not just be the
+    description again.
     """
     entries = json.loads(_PLUGIN_MANIFEST.read_text(encoding="utf-8"))["userConfig"]
     for name, entry in entries.items():
@@ -439,16 +433,12 @@ def test_the_project_server_runs_the_in_tree_package() -> None:
     # The plugin passes the three overrides through, and interpolates only names the
     # manifest declares -- an undeclared one would interpolate to nothing forever.
     #
-    # The `user_config.` prefix is load-bearing and it shipped wrong once. This env block
-    # read `${api_url}` / `${aws_region}` / `${stack_name}`, and a plugin `.mcp.json`
-    # addresses a userConfig field as `${user_config.<key>}`: the bare spelling is not a
-    # name Claude Code resolves, so installing the plugin and calling any tool failed with
-    # `'NoneType' object has no attribute 'split'` -- a traceback naming neither this file
-    # nor the field, from an operator's point of view a plugin that simply does not work.
-    # The check that was meant to catch it was itself written as `r"\$\{([a-z_]+)\}"`,
-    # which cannot match across the `.`, so it passed on the bug and would have failed on
-    # the fix. That is why the placeholders are parsed generically below and *then* judged:
-    # a pattern that only matches the correct form cannot see the incorrect one.
+    # The `user_config.` prefix is load-bearing. A plugin `.mcp.json` addresses a
+    # userConfig field as `${user_config.<key>}`; the bare `${<key>}` form is not resolved
+    # by Claude Code, and the failure surfaces at the first tool call as `'NoneType' object
+    # has no attribute 'split'` -- a traceback that names neither this file nor the field.
+    # The placeholders are parsed generically below and then judged: a regex that only
+    # matches the correct form cannot see the incorrect one.
     declared = set(json.loads(_PLUGIN_MANIFEST.read_text(encoding="utf-8"))["userConfig"])
     env = plugin[SERVER_NAME]["env"]
     placeholders = [
@@ -474,10 +464,10 @@ def test_the_project_server_runs_the_in_tree_package() -> None:
 def test_no_server_config_overwrites_the_ambient_aws_region() -> None:
     """Neither `.mcp.json` may set `AWS_REGION`.
 
-    The plugin used to export its `aws_region` field as `AWS_REGION`, so an unset field
-    arrived as `""` and blanked the region the operator's shell had exported, and a set one
-    overwrote it for every boto3 call the server made. The pin is `RCA_REGION`
-    (`mcp/src/rca_mcp/client.py`); `AWS_REGION` is the shell's and Claude Code's to set.
+    An unset `AWS_REGION` in an `.mcp.json` env block arrives as `""` and blanks the
+    region the operator's shell exported; a set one overwrites it for every boto3 call the
+    server makes. The server's own region pin is `RCA_REGION` (`mcp/src/rca_mcp/client.py`);
+    `AWS_REGION` is the shell's to set.
     """
     for path in (REPO_ROOT / ".mcp.json", REPO_ROOT / f"plugins/{_PLUGIN_NAME}/.mcp.json"):
         for name, server in json.loads(path.read_text())["mcpServers"].items():
@@ -520,32 +510,15 @@ def test_the_marketplace_lists_the_plugin_it_ships() -> None:
 def test_the_plugin_name_cannot_collide_with_another_plugin() -> None:
     """The plugin name is qualified, and the three places that spell it agree.
 
-    This plugin was once named with a bare acronym, and an unrelated product was already
-    installed on the same machine under that name -- listed in
-    `~/.claude/plugins/installed_plugins.json`, from its own marketplace. Two different
-    plugins, one name, and nothing warns about it.
     Claude Code derives MCP tool names as `mcp__plugin_<pluginName>_<serverName>__<tool>`,
-    so both collapsed onto `mcp__plugin_rca_remote-coding-agent__*` and only one of them
-    ever resolved. The other one did.
+    so two plugins installed under the same name collapse onto the same tool names and only
+    one resolves -- silently. A tool call that succeeds against a different deployment's
+    handler gives no indication that it reached the wrong place.
 
-    Every consequence was silent. `register_repository` reported complete success -- a
-    `configId`, then `PROVISIONING`, then `READY` -- while registering into the other
-    product's control plane in another region, and the freshly deployed fleet listed zero
-    configurations. The operator's GitHub token was written to that other deployment's
-    Secrets Manager: twice, with two different tokens, before the cause was found. The tool
-    list advertised tool names that have no
-    route, no handler and no table anywhere in this repository, and that visible
-    contradiction was explained away rather than followed. The only reliable tell was that
-    the two products mint different configuration id shapes -- 12 hex here against 16 there
-    -- and that is a tell no user has.
-
-    So the name carries a qualifier, and it is the same qualifier for the same reason one
-    layer down: `infra/app.py` sets `DEFAULT_STACK_PREFIX = "SampleCodingAgent"` because the
-    account already runs a `CodingAgent*` fleet built from another codebase. A plugin name
-    is unique per installation the way a stack name is unique per account and region. Do not
-    shorten this back to an acronym for tidiness -- a short name is not tidier, it is a name
-    somebody else already has, and the failure it buys is a tool call that answers
-    confidently from another product's deployment.
+    The name carries a qualifier for the same reason `infra/app.py` sets
+    `DEFAULT_STACK_PREFIX = "SampleCodingAgent"`: a plugin name is unique per installation
+    the way a stack name is unique per account and region. A bare acronym is a name another
+    product may already have taken, and the collision is undetectable from inside a session.
     """
     manifest = json.loads(_PLUGIN_MANIFEST.read_text(encoding="utf-8"))
     marketplace = json.loads(_MARKETPLACE.read_text(encoding="utf-8"))
@@ -942,17 +915,16 @@ def test_the_preflight_target_checks_every_prerequisite() -> None:
     The last two checks are worth an AWS call each because both failures otherwise land
     only AFTER the ~1.3 GB ARM64 image has been built and pushed -- and the profile one is
     worse than late: `MODEL_RE` in `agent/src/coding_agent/config.py` validates an id's
-    PATTERN and not its GEOGRAPHY, so a wrong-region profile passes the container's start-up
-    `validate_model` and fails at invocation time instead, which is a silent runtime failure
-    rather than a deploy-time one. The three `infra/app.py` defaults are all `global.` now,
-    so only an explicit geo-scoped override reaches that hazard -- `_DEFAULT_HAIKU_MODEL`
-    was `apac.`, which failed every deploy outside APAC and is why they are uniform. The assertions below are the sharp ones -- a `fix:` that is shell rather than a
-    printf argument is a fix nobody reads, a `bootstrap aws://` line that is NOT inside
-    a printf is preflight running bootstrap on the operator's behalf (bootstrap creates the
-    deploy role and the assets bucket, which is a different privilege level from a deploy,
-    and it is needed once per account and region rather than on every run), a constant
-    renamed in `infra/app.py` turns the profile check into a silent no-op, and an `aws` verb
-    that is not read-only makes a target documented as safe at any time unsafe.
+    PATTERN and not its GEOGRAPHY, so a wrong-region profile passes the container's
+    start-up `validate_model` and fails at invocation time instead, a silent runtime failure
+    rather than a deploy-time one. The three `infra/app.py` defaults are `global.` to avoid
+    this; only an explicit geo-scoped override reaches that hazard now. The assertions below
+    are the sharp ones -- a `fix:` that is shell rather than a printf argument is a fix
+    nobody reads, a `bootstrap aws://` line NOT inside a printf is preflight running
+    bootstrap on the operator's behalf (bootstrap is a different privilege level from a
+    deploy, and it is needed once per account and region rather than on every run), a
+    constant renamed in `infra/app.py` turns the profile check into a silent no-op, and an
+    `aws` verb that is not read-only makes a target documented as safe at any time unsafe.
 
     The AgentCore check is also held to what it can honestly claim. It may only make
     read-only calls -- this target is documented safe at any time and the read-only-verb
@@ -1262,15 +1234,12 @@ def test_the_deploy_target_does_what_the_skill_promises() -> None:
             f"the deploy prints exactly three labelled facts and {label!r} is not one of them"
         )
 
-    # The closing paragraph used to be unconditionally reassuring, and it is wrong for
-    # anyone who set a plugin override. `plugins/sample-rca/.claude-plugin/plugin.json`
-    # declares `api_url`, `aws_region` and `stack_name`; `plugins/sample-rca/.mcp.json`
-    # passes them as `RCA_API_URL`, `RCA_REGION` and `RCA_STACK_NAME`; and
-    # `mcp/src/rca_mcp/client.py::resolve_endpoint` returns an `RCA_API_URL` override
-    # without ever reading the cache, while `RCA_REGION`/`RCA_STACK_NAME` pin the region so
-    # the cached document's own region is not honoured. So a plugin configured with one
-    # silently keeps registering into the older deployment while the freshly deployed fleet
-    # lists zero configurations -- which is exactly what happened in a real walkthrough.
+    # The closing paragraph must name the override fields (`api_url`, `aws_region`,
+    # `stack_name`) because `mcp/src/rca_mcp/client.py::resolve_endpoint` returns an
+    # `RCA_API_URL` override without reading the cache, so a plugin configured with one
+    # keeps registering against the older deployment while the freshly deployed fleet lists
+    # zero configurations. Without the warning an operator following the deploy output would
+    # not know to clear the stale value.
     closing = recipe[recipe.index("endpoint.json carries that API URL now") :]
     assert "userConfig" in closing or all(
         name in closing for name in ("api_url", "aws_region", "stack_name")
@@ -1293,24 +1262,18 @@ def test_the_pinned_reference_is_not_older_than_the_fix_it_ships() -> None:
     Invariant 34 pins a sha, and `test_nothing_is_installed_from_a_moving_reference` checks
     the *shape* of that pin -- but a sha that is merely well-formed can still be older than
     the code it is supposed to ship, which is silent: the plugin installs, every tool runs,
-    and the operator gets wrong guidance from a working server. Enumerating the symbols the
-    pinned tree must contain, which is all this test used to do, only ever catches the one
-    regression someone already had: a pin can satisfy a symbol list and still be behind every
-    later change to `mcp/`. That is exactly what happened with 766004d6, which predates
-    a49572d ("Unit A -- the rename") and 884002a ("Unit B -- the /rca:setup literal the MCP
-    server emits") while still defining every symbol in `_PROVENANCE_SYMBOLS`. So the primary
-    property here is *currency* -- expressed as `git rev-list -1 <pin>..HEAD -- mcp/` printing
-    nothing -- and it goes red for any future `mcp/` change that lands without a re-pin,
-    including ones nobody has thought of yet. The `_PROVENANCE_SYMBOLS` loop stays afterwards
-    as a secondary check, because it is the one that speaks to *content* rather than ancestry:
-    a pin on an unrelated branch could conceivably pass the range check while missing them.
+    and the operator gets guidance from an older version. Enumerating the symbols the pinned
+    tree must contain is not sufficient: a pin can satisfy a symbol list and still be behind
+    every later change to `mcp/`. The primary property is *currency* -- expressed as
+    `git rev-list -1 <pin>..HEAD -- mcp/` printing nothing -- and it goes red for any future
+    `mcp/` change that lands without a re-pin. The `_PROVENANCE_SYMBOLS` loop stays as a
+    secondary check for *content* rather than ancestry: a pin on an unrelated branch could
+    conceivably pass the range check while missing expected symbols.
 
-    A skip is honest here because this asserts a property of *history*, and history is an
-    optional part of a checkout: a shallow clone or an image without git has the pin but not
-    the object it names, so there is no evidence either way. Going red there would report a
-    missing environment as a rotten pin -- the exact confusion invariant 35 exists to
-    prevent. The skip is narrow: once the commit is known to be present, a stale pin is a
-    hard failure.
+    A skip is appropriate here because this asserts a property of *history*, and history is
+    an optional part of a checkout: a shallow clone or an image without git has the pin but
+    not the object it names, so there is no evidence either way. The skip is narrow: once the
+    commit is known to be present, a stale pin is a hard failure.
     """
     sha = _pinned_reference()
     if not shutil.which("git") or not (REPO_ROOT / ".git").exists():

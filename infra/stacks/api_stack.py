@@ -152,14 +152,11 @@ _CAPABILITIES: frozenset[str] = frozenset(
 # The entry points that re-trigger themselves through the queue they consume, and so the
 # ones Lambda's recursive loop detection must be told to leave alone. `provisioner._check`
 # polls a runtime by queueing the next `CHECK` on the provision queue it is reading from,
-# and Lambda's default (`RecursiveLoop.TERMINATE`) drops the event after about 16 hops of
-# one chain -- measured: CREATE, a CREATE retry and CHECK 0-13 ran, CHECK 14 showed up in
-# `RecursiveInvocationsDropped`, was returned to the queue three times and dead-lettered.
-# That is ~7.5 minutes of polling against a runtime that takes 8-12 to reach READY, so with
-# detection on every registration sat at CREATING until the watchdog's 45-minute nudge.
-# The chain's own bound is what replaces the detector: `MAX_CHECK_ATTEMPTS` checks, then
-# FAILED, and a create retry that ends with its 90-second budget. Nothing else is here,
-# so a loop nobody meant to write keeps the default.
+# and Lambda's default (`RecursiveLoop.TERMINATE`) drops the event after ~16 hops, which is
+# fewer than the up-to-14 CHECK messages a healthy provision chain needs to reach READY.
+# The chain's own bound replaces the detector: `MAX_CHECK_ATTEMPTS` checks, then FAILED,
+# and a create retry that ends within its 90-second budget. Nothing else is here, so a
+# loop nobody meant to write keeps the default.
 SELF_CHAINING_ENTRY_POINTS: frozenset[tuple[str, str]] = frozenset(
     {("provisioner", "lambda_handler")}
 )
@@ -748,8 +745,8 @@ class ApiStack(cdk.Stack):
                         # on `*`, with no condition key for the user id, so neither can be
                         # narrowed further. That is why this capability is spelled out
                         # separately instead of folded into `agentcore:control`: a reader has
-                        # to see that it is wide, and `CLAUDE.md`'s "What remains exposed"
-                        # names it.
+                        # to see that it is wide, and `docs/security.md`'s "What remains
+                        # exposed" names it.
                         actions=[
                             "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
                             "bedrock-agentcore:GetResourceOauth2Token",
@@ -770,18 +767,9 @@ class ApiStack(cdk.Stack):
                         # **AgentCore Identity does its Secrets Manager work with the CALLER's
                         # permissions**, so the code exchange inside
                         # `CompleteResourceTokenAuth` reads the provider's client secret as this
-                        # role and fails `AccessDenied` without this. Measured the hard way: the
-                        # operator approved on GitHub, the console reported
-                        # `AuthorizationNotCompleted`, and the message named this exact secret
-                        # ARN and this exact role.
-                        #
-                        # This is the same property that disqualified the API-key credential
-                        # provider earlier -- Identity is a broker that borrows the caller's
-                        # reach rather than insulating it from the store -- and it is the reason
-                        # the OAuth path cannot honestly be described as "no Secrets Manager
-                        # anywhere". It is *narrower* here than it was there: only these four
-                        # control-plane Lambdas hold it, and only on AgentCore's own
-                        # service-linked prefix, never on a secret this repository creates.
+                        # role and fails `AccessDenied` without this. Only these control-plane
+                        # Lambdas hold it, and only on AgentCore's own service-linked prefix,
+                        # never on a secret this repository creates.
                         actions=["secretsmanager:GetSecretValue"],
                         resources=[
                             f"arn:aws:secretsmanager:{self.region}:{self.account}"
@@ -808,12 +796,11 @@ class ApiStack(cdk.Stack):
                             "bedrock-agentcore:GetWorkloadIdentity",
                             "bedrock-agentcore:UpdateWorkloadIdentity",
                             # `CreateTokenVault` is needed because the account's default token
-                            # vault is created lazily, by the first
-                            # `CreateOauth2CredentialProvider` -- measured: without it the
-                            # very first connect in a fresh account fails `AccessDenied`
-                            # naming a vault nobody asked for. `SetTokenVaultCMK` is **not**
-                            # granted: changing the vault's encryption key is not something a
-                            # console page should be able to do.
+                            # vault is created lazily by the first
+                            # `CreateOauth2CredentialProvider`, so this action is required for
+                            # the first connect in a fresh account. `SetTokenVaultCMK` is
+                            # **not** granted: changing the vault's encryption key is not
+                            # something a console page should be able to do.
                             "bedrock-agentcore:CreateTokenVault",
                             "bedrock-agentcore:GetTokenVault",
                         ],
@@ -832,21 +819,18 @@ class ApiStack(cdk.Stack):
                         #
                         # AgentCore Identity keeps a provider's client secret in a
                         # service-linked secret of its own and authorizes that write against
-                        # the *caller*, so `CreateOauth2CredentialProvider` fails
-                        # `AccessDenied` without `CreateSecret` and
-                        # `DeleteOauth2CredentialProvider` fails the same way without
-                        # `DeleteSecret` -- both measured, the second one only after the first
-                        # looked finished. `PutSecretValue` is the update path, which is what
-                        # writes the real client secret once the GitHub App exists.
+                        # the *caller*, so `CreateOauth2CredentialProvider` requires
+                        # `CreateSecret` and `DeleteOauth2CredentialProvider` requires
+                        # `DeleteSecret`. `PutSecretValue` is the update path, which writes
+                        # the real client secret once the GitHub App exists.
                         actions=[
                             "secretsmanager:CreateSecret",
                             "secretsmanager:PutSecretValue",
                             "secretsmanager:DeleteSecret",
                             "secretsmanager:TagResource",
                         ],
-                        # Scoped to AgentCore's own name prefix rather than `*`, which was
-                        # measured to work and matters: on `*` this Lambda could mint and
-                        # destroy any secret in the account. The `!` is part of the
+                        # Scoped to AgentCore's own name prefix rather than `*`: on `*`
+                        # this Lambda could mint and destroy any secret in the account. The `!` is part of the
                         # service-linked naming scheme (`bedrock-agentcore-identity!default/...`)
                         # and the trailing `*` also absorbs the six random characters every
                         # secret ARN ends with, so a pattern stopping at the name matches
@@ -919,28 +903,19 @@ class ApiStack(cdk.Stack):
                             f"bedrock-agentcore:{verb}WorkloadIdentity"
                             for verb in ("Create", "Get", "Update", "Delete")
                         ],
-                        # `*`, and NOT the `runtime/*` fence this used to carry. That fence
-                        # looked tighter and simply did not work: `CreateAgentRuntime` is
-                        # authorized before any runtime exists, so there is no runtime ARN for
-                        # `runtime/*` to match, and `CreateWorkloadIdentity` acts on a
-                        # different resource type altogether. `aws iam
-                        # simulate-principal-policy` against the real ARN is unambiguous --
-                        # `CreateAgentRuntimeEndpoint` came back `allowed` while
-                        # `CreateAgentRuntime` came back `implicitDeny` from the *same*
-                        # statement -- and every `CreateAgentRuntime` call failed
-                        # `AccessDenied` with a null message in CloudTrail.
+                        # `*`: a narrower resource pattern does not work here.
+                        # `CreateAgentRuntime` is authorized before any runtime exists, so
+                        # there is no runtime ARN for `runtime/*` to match, and
+                        # `CreateWorkloadIdentity` acts on a different resource type. The
+                        # fence is the ACTION LIST, not the resource. `CreateMemory` has the
+                        # same constraint: it is authorized before the memory exists, so no
+                        # `memory/*` pattern would match it either.
                         #
-                        # `CreateMemory` has the same shape as `CreateAgentRuntime` here: it
-                        # is authorized before the memory exists, so no `memory/*` pattern
-                        # would match it either.
-                        #
-                        # So the fence here is the ACTION LIST, not the resource: sixteen
-                        # named actions on one service, no wildcards. What still bounds which
-                        # role can be handed to a runtime is the `iam:PassRole` statement,
-                        # which stays scoped to `role/rca/rca-*` with an
-                        # `iam:PassedToService` condition -- that is the grant that actually
-                        # matters, because it is what stops this Lambda attaching an arbitrary
-                        # role to a container.
+                        # What bounds which role can be handed to a runtime is the
+                        # `iam:PassRole` statement, which stays scoped to `role/rca/rca-*`
+                        # with an `iam:PassedToService` condition -- that is the grant that
+                        # actually matters, because it stops this Lambda attaching an
+                        # arbitrary role to a container.
                         resources=["*"],
                     )
                 )
@@ -1015,9 +990,8 @@ class ApiStack(cdk.Stack):
                                 # profile in every destination region it may route to. The
                                 # profile id pins the geography, so `*` for the region adds
                                 # no reach beyond the regions that profile already lists. And
-                                # the `*` is required, not convenient: measured, a caller in
-                                # us-west-2 was denied on the us-east-1 profile ARN 15 calls
-                                # of 15 without it.
+                                # the `*` for the region is required: a caller in a different
+                                # region is denied on a region-scoped profile ARN without it.
                                 f"arn:aws:bedrock:*:{self.account}"
                                 f":guardrail-profile/{guardrail.profile_id}",
                             ],

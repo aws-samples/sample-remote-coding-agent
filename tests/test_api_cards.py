@@ -586,9 +586,9 @@ def test_delete_409s_while_the_claimed_run_is_live(aws: Any) -> None:
 
 @pytest.mark.parametrize("status", ["FAILED_VERIFICATION", "CANCELLED"])
 def test_a_vetoed_or_cancelled_run_is_not_refused_as_in_flight(aws: Any, status: str) -> None:
-    """`_refuse_while_live` asks `runs.is_terminal`, and neither status used to be terminal,
-    so a finished-and-vetoed card could be neither cleared off the board nor deleted -- the
-    operator's only handle on it was a 409 telling them to wait for a run that was over."""
+    """`_refuse_while_live` asks `runs.is_terminal`. A finished-and-vetoed or cancelled run
+    is terminal, so a card in either state may be moved and deleted rather than blocked by
+    a 409 from a guard that treats it as still in flight."""
     common, cards = _load("cards")
     _seed_config(common)
     card = _create(cards)

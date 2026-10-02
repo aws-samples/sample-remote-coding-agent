@@ -426,9 +426,9 @@ def test_a_session_that_is_already_gone_is_success_and_still_converges(
 
 def test_the_scan_lists_the_two_halves_and_nothing_else(aws: Any) -> None:
     """A live task, a finished one still holding a session, and neither a finished one
-    already stopped nor a finished one that never had a session. `eee` and `fff` are the two
-    statuses the api's vocabulary used to be missing: a vetoed run holding a session belongs
-    in the finished half, and a cancelled one already marked stopped belongs in neither."""
+    already stopped nor a finished one that never had a session. `eee` and `fff` cover the
+    two terminal statuses that carry sessions: a vetoed run belongs in the finished half,
+    and a cancelled run already marked stopped belongs in neither."""
     common, watchdog = _load("watchdog")
     for task_id, item in {
         "tsk_1700000000_aaa": {"status": "CODING", "sessionId": _SESSION_ID},
@@ -544,8 +544,8 @@ def test_a_stranded_creating_configuration_is_re_driven_with_a_check(
 def test_a_configuration_still_inside_the_window_is_left_alone(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """V2 provisioning was measured at ~508s and the threshold is 2700s, so the common case
-    is a chain that is simply working. Nudging it would be a duplicate `GetAgentRuntime` for
+    """Provisioning takes minutes and the threshold is 2700s, so the common case is a chain
+    that is simply working. Nudging it would be a duplicate `GetAgentRuntime` for
     every configuration being created, on every tick."""
     common, watchdog = _load("watchdog")
     _data(monkeypatch, common)

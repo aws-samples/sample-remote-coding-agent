@@ -1,4 +1,4 @@
-"""The provisioner: the four phases, and the two failures that cost the most to find.
+"""The provisioner: the four phases, and the two properties that fail silently.
 
 AgentCore is exercised through `FakeAgentCore` and never moto -- moto's
 `get_agent_runtime` drops `filesystemConfigurations`, so a carry-forward test written
@@ -6,20 +6,19 @@ against it would pass while the mount was being stripped. moto owns DynamoDB, SQ
 and Secrets Manager here, which are the parts whose real behaviour the code depends on
 (a conditional write that fails, a `NoSuchEntity` on a second teardown pass).
 
-Two properties get the most attention, because both were silent in production:
+Two properties receive the most coverage, because both fail silently:
 
 * `UpdateAgentRuntime` is a full replace, so every field is either carried forward from
   the live runtime or converged to fleet policy (invariant 24), and the idempotence
-  guard has to cover the converged fields rather than the image alone.
+  guard must cover the converged fields rather than the image alone.
 * IAM is eventually consistent, so a create that fails on an unassumable role is retried
   as a **new** SQS message (invariant 15), so the receive count resets rather than burning
   the redrive budget on a healthy configuration -- inside a wall-clock budget, and only
   for a failure the `_TRANSIENT_CREATE_FAILURES` allowlist names. An *unrecognised*
   message out of `CreateAgentRuntime` gets exactly one retry first -- the allowlist's
   floor, which is what a gap in the enumeration costs -- and is then terminal with the
-  vendor's own words in `statusReason`, because keyword-matching the vendor's prose
-  reported three separate permanent failures as an execution role that was never the
-  problem.
+  vendor's own words in `statusReason`, because keyword-matching vendor prose can
+  misclassify permanent failures as role propagation errors.
 """
 
 from __future__ import annotations
@@ -49,11 +48,9 @@ _PLAN_MODEL = "global.anthropic.claude-opus-4-5-20251101-v1:0"
 _CODE_MODEL = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
 _HAIKU_MODEL = "apac.anthropic.claude-haiku-4-5-20251001-v1:0"
 
-# The verbatim `Error.Message` from two real eu-west-1 registrations, and the string that
-# broke provisioning entirely: the six original propagation shapes were built around
-# "assume"/"assumed", AgentCore says "assumption", so nothing matched and every
-# `POST /configurations` failed on its first attempt. Pinned in full, character for
-# character, because a paraphrase of it is exactly what let this through.
+# The verbatim `Error.Message` the allowlist's propagation shapes must match. The
+# shapes are keyed on exact substrings, so a paraphrase here would pass while the real
+# message slips through -- pinned character for character for that reason.
 _LIVE_ROLE_VALIDATION_MESSAGE = (
     "Role validation failed for 'arn:aws:iam::111122223333:role/rca/rca-cfg_15af1931a731'. "
     "Please verify that the role exists and its trust policy allows assumption by this service"
@@ -204,7 +201,7 @@ def test_create_sends_the_mount_the_lifetime_and_the_work_root(
     assert call["environmentVariables"]["CONFIG_ID"] == _CONFIG_ID
     # `CONFIG_ID` and no credential variable: it is the only per-configuration value the
     # container needs, because it is also the 3LO `userId` its GitHub credential is stored
-    # under. `SECRET_ARN` used to be here and went with the secret.
+    # under.
     assert "SECRET_ARN" not in call["environmentVariables"]
     assert call["environmentVariables"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == _CODE_MODEL
     assert call["environmentVariables"]["CLAUDE_CODE_USE_BEDROCK"] == "1"
@@ -395,20 +392,17 @@ def test_the_memory_name_carries_no_hyphen(aws: Any, monkeypatch: pytest.MonkeyP
         # A throttle, the second allowlist entry, and the one whose code and operation are
         # the whole test: a throttle carries no cause worth matching.
         ("ThrottlingException", "Rate exceeded", True),
-        # The live `AccessDenied` whose CloudTrail `errorMessage` was null. Unclassifiable,
-        # so terminal -- and it used to `raise` rather than report anything at all.
+        # An `AccessDenied` with a null message: unclassifiable, so terminal.
         ("AccessDenied", "", False),
-        # The same code, a different cause. Retrying this ten times ends in a report
-        # about a role problem that does not exist, while the real fault -- a bad image
-        # tag -- goes unmentioned.
+        # The same code with a different, permanent cause. Retrying would produce a
+        # report about a role problem that does not exist, while the real fault goes
+        # unmentioned.
         ("ValidationException", "The container image could not be pulled from ECR", False),
         ("ValidationException", "agentRuntimeName failed to satisfy constraint", False),
         ("ResourceNotFoundException", "role not found", False),
-        # A missing grant, which is permanent. This exact message cost 26 minutes and ended
-        # in "the execution role was still not assumable": it contains "not authorized", so
-        # it matched the propagation arm, while the real cause -- no
-        # `bedrock-agentcore:CreateAgentRuntimeEndpoint` in the provisioner's policy -- was
-        # sitting in the same sentence. Waiting never adds a statement to a policy.
+        # A missing grant on the provisioner's own policy. Permanent: the message contains
+        # "not authorized" which could match the propagation arm, but the cause is absent
+        # permissions, not an unassumable role, so it must be terminal.
         (
             "AccessDeniedException",
             "User: arn:aws:sts::123456789012:assumed-role/Provisioner/Provisioner is not "
@@ -431,13 +425,9 @@ def test_the_memory_name_carries_no_hyphen(aws: Any, monkeypatch: pytest.MonkeyP
             "allows the action",
             False,
         ),
-        # The verbatim live eu-west-1 message, and the third time this report lied about the
-        # cause. It contains the bare word "role", which is how it matched the propagation
-        # arm: a permanent missing grant -- no `iam:CreateServiceLinkedRole` on the
-        # provisioner's own policy -- was retried ten times over 26 minutes and then
-        # reported as "the execution role was still not assumable", about a role that was
-        # never the problem. Propagation is a role that cannot be *assumed*, and this
-        # message never says so.
+        # Missing `iam:CreateServiceLinkedRole`. Contains the bare word "role", which a
+        # keyword-based match would misclassify as IAM propagation. Propagation is a role
+        # that cannot be *assumed*; this message describes a missing grant and is terminal.
         (
             "ValidationException",
             "Failed creating service linked role. Please verify that the calling role has "
@@ -451,10 +441,9 @@ def test_the_memory_name_carries_no_hyphen(aws: Any, monkeypatch: pytest.MonkeyP
             "Failed creating service-linked role for bedrock-agentcore.amazonaws.com",
             False,
         ),
-        # The live message, and the row whose absence stopped provisioning altogether: the
-        # service says "assumption", not "assume"/"assumed", so none of the six shapes above
-        # matched it. Covered by the table as well as by the dedicated pin below, because a
-        # shape this table does not exercise is a shape nobody notices losing.
+        # The propagation message the allowlist must recognise. Also covered by the
+        # dedicated pin below; a shape exercised only there would not be noticed if removed
+        # from the table.
         ("ValidationException", _LIVE_ROLE_VALIDATION_MESSAGE, True),
     ],
 )
@@ -501,11 +490,9 @@ def test_the_live_role_validation_message_is_classified_as_propagation(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The regression pin, and the only test in this file that names a vendor string in full.
-    `_LIVE_ROLE_VALIDATION_MESSAGE` is what AgentCore returned for two real registrations,
-    and it matched none of the six `assume`/`assumed` shapes, so every `POST /configurations`
-    was declared permanently failed on its first attempt -- provisioning was simply gone.
-    A paraphrase is what let that through, so the string is asserted character for
-    character."""
+    `_LIVE_ROLE_VALIDATION_MESSAGE` is the verbatim form AgentCore uses for role-propagation
+    failures. A paraphrase would not guard the exact match the allowlist depends on, so the
+    string is asserted character for character."""
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
     err = client_error(
@@ -625,11 +612,10 @@ def test_an_image_failure_is_not_retried_as_propagation(
 def test_a_missing_endpoint_grant_is_terminal_and_quotes_aws(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The first of the three live failures, and the one whose true cause was in the same
-    sentence as the wrong conclusion: `... because no identity-based policy allows the
-    bedrock-agentcore:CreateAgentRuntimeEndpoint action`. It contained "not authorized", so
-    the old keyword match retried it ten times over 26 minutes and then reported an
-    execution role that was never the problem. Waiting never adds a statement to a policy.
+    """A permanent missing-grant failure: `... because no identity-based policy allows the
+    bedrock-agentcore:CreateAgentRuntimeEndpoint action`. The message contains "not
+    authorized" but is not IAM propagation; waiting cannot add a statement to a policy,
+    so it is terminal.
 
     Driven at `attempt=1`: the allowlist's floor spends one retry on an unrecognised
     `CreateAgentRuntime` failure before the verdict, so this is terminal once that single
@@ -675,11 +661,9 @@ def test_a_missing_endpoint_grant_is_terminal_and_quotes_aws(
 def test_an_access_denied_with_no_message_still_writes_a_status_reason(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The third live failure: an `AccessDenied` whose CloudTrail `errorMessage` was null,
-    so `message` is `""`. This arm used to fall through to `raise`, which returned the
-    message to the queue and eventually DLQ'd it with the item still `PENDING` and **no
-    `statusReason` at all** -- the operator read the one field that matters and found
-    nothing. The absence is now reported as an absence.
+    """An `AccessDenied` with a null `errorMessage`, so `message` is `""`. Unclassifiable
+    and terminal. The status reason must still be written: an item left `PENDING` with no
+    reason gives an operator nothing actionable to read.
 
     Driven at `attempt=1`, because the allowlist's floor spends one retry on an unrecognised
     `CreateAgentRuntime` failure first; the reported absence is the same one attempt later."""
@@ -712,13 +696,11 @@ def test_an_access_denied_with_no_message_still_writes_a_status_reason(
 def test_a_missing_service_linked_role_is_terminal_and_reported_as_itself(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The live eu-west-1 failure, and both things that were wrong about it. A
-    `networkMode: VPC` runtime (invariant 30) needs a service-linked role AgentCore creates
-    during `CreateAgentRuntime`, and a provisioner without `iam:CreateServiceLinkedRole`
-    cannot make it, which is permanent. It was retried to the cap anyway, because the
-    message contains the bare word "role", and then reported as an execution-role problem.
-    So: no retry on the *first* attempt, and a `statusReason` naming the real cause where
-    the API and the console already read it."""
+    """A permanent failure: the provisioner lacks `iam:CreateServiceLinkedRole`, which a
+    VPC-mode `CreateAgentRuntime` requires (invariant 30). The message contains the bare
+    word "role", which must not cause a keyword-based match to misclassify it as IAM
+    propagation. The failure is terminal on the first attempt, with a `statusReason` naming
+    the missing grant."""
     _fleet(monkeypatch)
     common, provisioner = _load("provisioner")
     _seed(common)
@@ -774,11 +756,10 @@ def _unrecognised_control() -> FakeAgentCore:
 def test_an_unrecognised_create_failure_is_retried_exactly_once(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The floor on the allowlist, both halves. The live `assumption` message was not on the
-    list and provisioning stopped entirely, so the question this pins is "what does the NEXT
-    unenumerated phrasing cost?": one retry step, never an immediate permanent failure. And
-    exactly one -- an unclassified failure does not get the whole budget, or the allowlist's
-    default would be retry again, which is the defect it replaced."""
+    """The allowlist's floor, both halves. Any unrecognised `CreateAgentRuntime` failure
+    costs one retry step -- never an immediate permanent verdict. And exactly one: an
+    unclassified failure does not get the full transient budget, or "retry by default"
+    becomes the behaviour the allowlist was built to replace."""
     _fleet(monkeypatch)
     common, provisioner = _load("provisioner")
     _seed(common)
@@ -985,12 +966,9 @@ def test_the_trust_policy_fences_the_source_account_when_it_is_known(
 ) -> None:
     """The account comes from this Lambda's own environment -- deliberately not from
     `sts:GetCallerIdentity`, which would widen its grant surface for a value the deploy
-    already knows at synth time.
-
-    It used to be parsed off the configuration's own `secretArn`, which worked only because
-    every configuration carried one. With the GitHub credential in AgentCore Identity's token
-    vault there is no per-configuration ARN left to read an account off, and the alternatives
-    -- the runtime ARN, the role ARN -- do not exist yet at the point `_create` needs it.
+    already knows at synth time. There is no per-configuration ARN available at the point
+    `_create` needs the account; the alternatives (the runtime ARN, the role ARN) do not
+    exist yet.
     """
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
@@ -1061,8 +1039,8 @@ def test_the_execution_role_policy_is_fenced_to_one_configuration(
         assert forbidden not in granted, f"{forbidden} is not on the container's list"
     # Two statements may carry a wildcard resource, and both because the *service* leaves no
     # alternative: `ecr:GetAuthorizationToken` supports no resource types at all, and
-    # `GetResourceOauth2Token` is denied on every narrower ARN that was measured against it
-    # (see `tests/test_api_grant_contract.py`). Every other statement names what it may touch,
+    # `GetResourceOauth2Token` accepts no narrower resource (see
+    # `tests/test_api_grant_contract.py`). Every other statement names what it may touch,
     # so the next wildcard to land here fails this test rather than passing unnoticed.
     assert statements["AuthenticateToEcr"]["Resource"] == "*"
     assert "*" in statements["UseGitHubCredential"]["Resource"]
@@ -1295,9 +1273,8 @@ def test_update_carries_forward_what_it_cannot_know(
 
 
 def test_update_converges_fleet_policy(aws: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A runtime that predates session storage and the 8-hour lifetime -- which is what
-    both runtimes on the deploy this was measured against looked like -- has to *gain*
-    them from an update, not keep what it has."""
+    """A runtime lacking fleet-policy fields -- no session storage, no 8-hour lifetime --
+    must gain them from an update rather than carry forward the absent values."""
     _fleet(monkeypatch)
     common, provisioner = _load("provisioner")
     control = FakeAgentCore("bedrock-agentcore-control")
@@ -1425,9 +1402,9 @@ def test_no_live_vpc_and_no_configured_subnets_is_public(
 def test_the_idempotence_guard_covers_the_converged_fields_not_the_image_alone(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The measured failure: an image-only guard short-circuits before convergence, so a
-    runtime already on the current image never gains the mount or the 8-hour lifetime, no
-    matter how many runtime updates are issued."""
+    """The idempotence guard covers all converged fields, not the image alone. An image-only
+    guard short-circuits before convergence, leaving a runtime on the current image without
+    gaining the mount or the 8-hour lifetime, regardless of how many updates are issued."""
     _fleet(monkeypatch)
     common, provisioner = _load("provisioner")
     control = FakeAgentCore("bedrock-agentcore-control")
@@ -1573,8 +1550,8 @@ def test_update_rewrites_the_execution_role_even_when_the_runtime_is_converged(
     _run(provisioner, "CHECK")
     role_name = provisioner._role_name(_CONFIG_ID)
 
-    # Stand in for a role minted by an older deployment: a policy this code would never write
-    # now, naming a secret that no longer exists anywhere in the system.
+    # A policy shape from before the GitHub credential moved to AgentCore Identity:
+    # `ReadOwnSecret` is no longer written, but an update must still overwrite it.
     common.iam.put_role_policy(
         RoleName=role_name,
         PolicyName=provisioner._POLICY_NAME,
@@ -1691,9 +1668,7 @@ def test_teardown_is_replayable_when_the_runtime_is_already_gone(
 
     The fake answers `GetAgentRuntime` with `ResourceNotFoundException` and
     `DeleteAgentRuntime` with **`AccessDeniedException`**, which is what the live service
-    does for a runtime that no longer exists -- measured, and with administrator credentials,
-    so it is the service's answer for a missing resource and not a statement about the
-    caller. It is also indistinguishable from a real missing grant, which is why `_is_gone`
+    does for a runtime that no longer exists. It is also indistinguishable from a real missing grant, which is why `_is_gone`
     must never accept that code: doing so would turn an absent permission into a teardown
     that looks successful and leaves a live runtime billing.
 
@@ -1920,11 +1895,10 @@ def test_the_platform_version_is_fleet_policy_and_is_sent_on_create_and_update(
 def test_a_runtime_that_reports_no_platform_version_is_drift_and_converges_once(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Measured, not assumed: every runtime in the live fleet answered `GetAgentRuntime`
-    with `platformVersion` **absent**, because they predate the member.
-
-    Absence is the service's default, which is V1, so in a V2-only deployment such a runtime
-    is drift and one update moves it -- the same convergence any other fleet field gets
+    """A runtime that predates the `platformVersion` member returns it absent from
+    `GetAgentRuntime`. Absence is the service's default, which is V1, so in a V2-only
+    deployment such a runtime is drift and one update moves it -- the same convergence any
+    other fleet field gets
     (invariant 24). The reason `_matches_intent` normalises absence to `V1` rather than
     treating it as "unknown" is that it makes the convergence happen **exactly once**: after
     the update the runtime reports V2 and matches, instead of being updated on every
@@ -1955,14 +1929,11 @@ def test_a_runtime_that_reports_no_platform_version_is_drift_and_converges_once(
 def test_a_vendor_only_network_member_is_not_drift(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`requireServiceS3Endpoint` comes back on every VPC runtime and can never be sent.
-
-    This is the shape read off a live runtime. `_fleet_network` does not emit that member --
-    it is a `ValidationException` on `CreateAgentRuntime`, and on `UpdateAgentRuntime` for
-    any runtime created after the May 2026 rollout -- so whole-object equality on
-    `networkConfiguration` could never match and every reconcile issued an update. Under V2
-    each of those is a snapshot rebuild, so this is the difference between a converged fleet
-    and one that rebuilds itself on every redelivery.
+    """`requireServiceS3Endpoint` is returned by the service on VPC runtimes and must not
+    be sent back. `_fleet_network` does not emit that member -- it is a
+    `ValidationException` on both `CreateAgentRuntime` and `UpdateAgentRuntime` -- so
+    whole-object equality on `networkConfiguration` would never match and every reconcile
+    would issue an update. Under V2 each update is a snapshot rebuild.
     """
     subnets = "subnet-0aaa,subnet-0bbb"
     _fleet(monkeypatch, AGENT_SUBNET_IDS=subnets, AGENT_SECURITY_GROUP_IDS="sg-0ccc")
@@ -2016,23 +1987,17 @@ def test_a_stale_member_this_code_wants_removed_is_still_drift(
 def test_a_retired_fleet_variable_is_removed_from_a_live_runtime(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Deleting a key from `_fleet_environment` does not remove it from a runtime.
+    """Deleting a key from `_fleet_environment` does not remove it from a live runtime.
 
     `_desired_runtime` merges `{**create-time, **live, **fleet}` so that a key this version of
     the code has never heard of survives an update (invariant 24). The mirror of that rule is
     that a key this code has *stopped* sending is carried forward for the rest of the runtime's
     life -- it stops being converged rather than being removed.
 
-    Measured rather than reasoned about: removing the five `OTEL_*` exporter variables with the
-    metrics collector (invariant 32b) deployed cleanly, a `runtime-update` converged
-    `CLAUDE_CODE_ENABLE_TELEMETRY` from `1` to `0`, and every one of the five `OTEL_*` names was
-    still on the live runtime afterwards. Nothing failed, and invariant 32b's own claim that no
-    `OTEL_*` variable is set anywhere was false for every runtime that predated the removal.
-
-    `RETIRED_FLEET_KEYS` is the tombstone list that fixes it, and this is what holds it: a
-    retired name is removed, while an unknown name beside it is still carried forward, because
-    the second half is what stops the fix becoming a blanket "drop what the fleet does not
-    send" rule -- which would silently discard per-configuration keys too.
+    `RETIRED_FLEET_KEYS` is the tombstone list that removes a key explicitly, and this is what
+    holds it: a retired name is removed, while an unknown name beside it is still carried
+    forward, because the second half is what stops the fix becoming a blanket "drop what the
+    fleet does not send" rule -- which would silently discard per-configuration keys too.
     """
     _common, provisioner = _load("provisioner")
 

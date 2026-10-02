@@ -563,10 +563,9 @@ def test_the_manifest_return_marker_is_the_handlers_spelling() -> None:
     in three files.
 
     Cognito's PKCE sign-in returns to the console origin with a `code`, and so does GitHub's
-    app-manifest flow. `auth.complete()` runs first at boot, and without a way to tell whose
-    code it is, it claimed GitHub's, stripped the query before `views/connect.js` could read
-    it, and reported "that sign-in did not start in this tab" -- so the app was created on
-    GitHub and the conversion could never run. Measured on the live deployment.
+    app-manifest flow. `auth.complete()` runs first at boot and must distinguish between the
+    two: claiming GitHub's code strips the query before `views/connect.js` can read it and
+    the app conversion never runs.
 
     The API owns the spelling because it owns the `redirect_url` it hands GitHub. This asserts
     the two browser files agree with it, because a mismatch is **silent in the direction that
@@ -615,9 +614,9 @@ def test_the_manifest_return_marker_is_the_handlers_spelling() -> None:
 def test_the_authorisation_panel_comes_before_everything_it_blocks() -> None:
     """Authorising is the last required step and the easiest to miss, so it leads the page.
 
-    Reported from a live walkthrough: the panel sat below Settings, read as one more optional
-    section, and was skipped -- which is expensive, because nothing else on that page is
-    actionable until it is done and a task is refused with `409 GitHubNotAuthorized`.
+    Below Settings it reads as one more optional section, and skipping it is expensive:
+    nothing else on that page is actionable until it is done, and a task is refused with
+    `409 GitHubNotAuthorized`.
 
     Two things are asserted, and the second is the one prose cannot hold: the panel is above
     the repository's own facts, and within the unauthorised state the **button precedes the
@@ -697,11 +696,10 @@ def test_the_authorisation_starts_itself_and_cannot_loop() -> None:
 def test_the_authorise_button_stays_busy_until_the_page_is_replaced() -> None:
     """A button whose work ends in a navigation must not go back to looking idle.
 
-    Reported from a live walkthrough: clicking Authorise appeared to do nothing, so it was
-    clicked again -- the server log shows two authorisation sessions a minute apart. The cause
-    was in the view, not the API: `window.location.assign` does not block, so the `finally`
-    that cleared the control ran while the browser was still leaving, and `setRefusal` alone
-    only dims and sets a tooltip, which someone mid-click never sees.
+    `window.location.assign` does not block, so a `finally` that cleared the control would run
+    while the browser was still leaving, and the button would look idle and invite a second
+    click and a second authorisation session. `setRefusal` alone only dims and sets a
+    tooltip, which someone mid-click never sees.
 
     Two things are asserted. The label changes, because that is the feedback visible without
     hovering. And the navigation path **returns** rather than falling through to the cleanup,
@@ -736,7 +734,7 @@ def test_the_connect_view_is_the_only_place_a_github_app_is_created() -> None:
     navigation and not a response this code may read. `request_oauth_on_install` has to be
     false -- true bounces the operator into the OAuth leg before the provider holds any
     credentials, and AgentCore's callback answers a bare validation error naming `cookie` and
-    `state`, which was a real dead end. And the callback URL in the manifest has to be
+    `state`, a dead end the operator cannot act on. And the callback URL in the manifest has to be
     AgentCore's, never the console's, or the authorisation code never reaches the vault.
     """
     source = (WEB / "js" / "views" / "connect.js").read_text(encoding="utf-8")

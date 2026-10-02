@@ -2,13 +2,11 @@
 
 Registration writes **no credential at all** -- one GitHub App serves the whole deployment
 and AgentCore Identity's token vault holds its credentials -- so what is pinned here is the
-shape that replaced it: that a `githubToken` is refused rather than quietly ignored, that
-registering against a deployment with no GitHub App is refused before anything is written,
-and that `github_status` reaches a verdict by *writing* to the repository rather than
-reading from it. The read-is-not-evidence lesson carried over intact and got worse: with a
-GitHub App, `GET /repos/{owner}/{repo}` reports `push=True` for a public repository the app
-was never installed on, because that field describes the **user's** rights and not the
-token's.
+shape: that a `githubToken` is refused rather than quietly ignored, that registering against
+a deployment with no GitHub App is refused before anything is written, and that
+`github_status` reaches a verdict by *writing* to the repository rather than reading from
+it. `GET /repos/{owner}/{repo}` reports `push=True` for a public repository the app was
+never installed on, because that field describes the **user's** rights and not the token's.
 
 Handler modules build their clients at import, so `_load` reloads them inside `mock_aws`
 -- see `test_api_fakes.load_handlers`. `provisioner` is reloaded first because
@@ -79,10 +77,8 @@ class _FakeGitHub:
 def github(monkeypatch: pytest.MonkeyPatch) -> _FakeGitHub:
     """A GitHub that says the token can push, installed for every test in this file.
 
-    Autouse because *every* successful registration now probes GitHub, and a test that
-    forgot the fake would reach `api.github.com` for real -- which it can, from CI: the
-    stand-in token comes back 401 "Bad credentials" in milliseconds, so the symptom would
-    be ten unrelated tests failing with a 400 rather than a slow suite.
+    Autouse because every successful registration probes GitHub: without the fake any test
+    that triggers registration would reach `api.github.com` for real.
     """
     from handlers import github_probe
 
@@ -256,18 +252,13 @@ def test_a_body_carrying_a_token_is_refused_rather_than_ignored(aws: Any) -> Non
 def test_connecting_derives_the_apps_bot_account_as_the_commit_identity(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The demo path configures no git author, so connecting has to produce one.
+    """The demo path configures no git author, so connecting has to derive one.
 
     The address is `<botUserId>+<slug>[bot]@users.noreply.github.com`, and the **id is the bot
-    user's, not the app's**. That distinction is the whole test: both forms are well-formed,
-    both look like the documented convention, and only one resolves. Measured against a live
-    app -- the app-id form came back with `author: null`, the bot-user-id form resolved to
-    `<slug>[bot] (Bot)`, and a control commit with a human's own noreply address resolved to
-    that user, so the negative was real rather than an artefact of the probe.
-
-    Getting it wrong is silent in the worst way: the commits look attributed in the pull
-    request's own metadata and GitHub reports no author, so a Vercel preview answers
-    "Deployment was blocked" and a DCO check fails with a perfect diff (invariant 4b).
+    user's, not the app's**. Both forms are well-formed, both resemble the documented
+    convention, but only the bot-user-id form resolves to a GitHub account (invariant 4b).
+    Using the app id silently produces commits with no attributed author, which fails commit
+    attribution checks even when the diff is correct.
     """
     common, _provisioner = _load("provisioner")
     from handlers import github_probe
@@ -458,9 +449,8 @@ def test_registering_without_a_github_app_is_refused_before_anything_is_written(
 
 
 def test_registration_asks_github_for_nothing_at_all(aws: Any, github: _FakeGitHub) -> None:
-    """Registration used to spend three round trips on GitHub proving a token could push.
-
-    With no token to prove anything about, it spends none -- which is the point: the check
+    """Registration makes no GitHub calls. The push check is deferred to `github_status`,
+    where it can be re-run after the operator installs the app. The check
     moved to `github_status`, where it can be re-run after the operator installs the app,
     instead of being a one-shot gate at the moment they have the least information.
     """
@@ -536,12 +526,12 @@ def test_a_validation_error_about_anything_else_is_not_reported_as_unauthorised(
 def test_an_authorised_repository_is_proved_by_a_write_and_not_a_read(
     aws: Any, github: _FakeGitHub
 ) -> None:
-    """The read-is-not-evidence lesson, carried over and made worse by the GitHub App.
+    """`github_status` proves push access by writing, not reading.
 
-    `GET /repos/{owner}/{repo}` reports `push=True` for a public repository the app was never
-    installed on, because that field is the **user's** rights and not the token's -- measured
-    against a live app. So the verdict is still a throwaway ref created and deleted, and the
-    three calls are asserted in order.
+    `GET /repos/{owner}/{repo}` reports `push=True` for a public repository the app is not
+    installed on, because that field describes the **user's** rights and not the token's.
+    The verdict is therefore a throwaway ref created and deleted; the three calls are
+    asserted in order.
     """
     common, _provisioner, configurations = _load("provisioner", "configurations")
     _connect(common)
@@ -757,9 +747,10 @@ def test_a_repository_being_torn_down_can_be_registered_again(aws: Any) -> None:
 
 
 def test_a_failed_registration_can_be_registered_again(aws: Any) -> None:
-    """A `FAILED` configuration used to hold its repository name forever, and nothing the
-    plugin can send clears it -- `ApiClient.ALLOWED_METHODS` is `{"GET", "POST"}`. So the
-    registration succeeds and the stale item goes down the ordinary teardown path."""
+    """A `FAILED` configuration does not block re-registration: the new registration
+    succeeds and the stale item goes down the ordinary teardown path. The plugin cannot
+    send `DELETE` (`ApiClient.ALLOWED_METHODS` is `{"GET", "POST"}`), so automatic
+    retirement is the only route."""
     common, _provisioner, configurations = _load("provisioner", "configurations")
     _connect(common)
     _seed(

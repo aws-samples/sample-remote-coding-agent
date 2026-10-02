@@ -89,8 +89,8 @@ def _run(command: str, *, cwd: Path, timeout: int, label: str) -> CommandResult:
         # shell to be one (`&&`, `$PATH` lookup, quoting). It is not an injection site to
         # be closed either -- running an untrusted repository's own declared command is
         # the whole product, which the dedicated account, the repository-scoped PAT and
-        # `_base_env` are what bound. See `CLAUDE.md`, "Only register repositories you
-        # trust".
+        # `_base_env` are what bound. See `docs/security.md`, "Only register repositories
+        # you trust".
         # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit, python.lang.security.audit.dangerous-subprocess-use-audit.dangerous-subprocess-use-audit
         proc = subprocess.run(  # nosec B602 -- running the repository's own command IS the product
             command,

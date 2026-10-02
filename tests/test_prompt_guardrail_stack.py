@@ -56,8 +56,8 @@ def test_the_guardrail_screens_only_what_a_coding_prompt_needs(tmp_path: Path) -
     assert set(filters) == {"PROMPT_ATTACK", "MISCONDUCT"}, (
         "hate, insults, sexual and violence are false positives on code (`kill -9`)"
     )
-    # Measured against the live service (see `guardrail_properties`): MEDIUM on either one
-    # refuses ordinary security tasks, so raising one is a regression, not hardening.
+    # MEDIUM on either one refuses ordinary security tasks (see `guardrail_properties`), so
+    # raising one is a regression, not hardening.
     assert filters["PROMPT_ATTACK"]["InputStrength"] == "LOW"
     assert filters["MISCONDUCT"]["InputStrength"] == "LOW"
     assert all(f["InputAction"] == "BLOCK" for f in filters.values())

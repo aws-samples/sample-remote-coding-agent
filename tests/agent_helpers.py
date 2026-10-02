@@ -43,7 +43,7 @@ AGENT_ENV_VARS = (
     "GITHUB_TOKEN",
     # `CONFIG_ID` is what `store.github_token` keys the GitHub credential on, and
     # `CONFIG_TABLE` -- cleared above with the other table names -- is the switch that stops it
-    # building a client at all. `SECRET_ARN` was here and went with the secret.
+    # building a client at all.
     "CONFIG_ID",
 )
 

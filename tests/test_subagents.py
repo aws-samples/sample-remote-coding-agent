@@ -436,8 +436,8 @@ def test_only_the_coding_role_can_fan_out(tmp_path: Path) -> None:
         assert options.agents is None, role
         assert options.max_budget_usd is None, role
         assert options.task_budget is None, role
-        # `CLAUDE_CODE_ENABLE_TELEMETRY: "0"` is a literal now rather than a probe's answer:
-        # the collector it used to depend on is gone, so nothing about the image can change it.
+        # `CLAUDE_CODE_ENABLE_TELEMETRY: "0"` is a literal: no collector is configured,
+        # so the value is fixed rather than derived from image contents.
         assert options.env == {
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
             "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
@@ -487,12 +487,8 @@ def test_the_auto_memory_switch_survives_the_fanout_env_merge(tmp_path: Path) ->
 def test_no_role_gets_an_otlp_exporter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The session environment turns the CLI's OTLP exporter off and configures none.
 
-    This replaces a test that asserted the opposite direction. There used to be an
-    in-container ADOT collector that SigV4-signed the CLI's metrics to CloudWatch for Coding
-    Agent Insights, and `build_options` splatted a `telemetry.exporter_env` group in here
-    carrying `OTEL_EXPORTER_OTLP_ENDPOINT` and four siblings. That feature is gone --
-    `CLAUDE.md` records why -- and what remains is the one variable that turns OTLP on,
-    pinned off.
+    The one variable that turns OTLP on is pinned off, and no `OTEL_*` variable is set
+    (invariant 32b).
 
     Asserted over every role, and as an absence rather than a value:
     `CLAUDE_CODE_ENABLE_TELEMETRY=1` with no receiver makes every session retry against a
@@ -511,7 +507,7 @@ def test_no_role_gets_an_otlp_exporter(monkeypatch: pytest.MonkeyPatch, tmp_path
         assert exporter == [], (
             f"{role} carries {exporter}, which configures an OTLP exporter. Reintroducing one "
             f"means choosing an endpoint, a receiver and an egress destination first -- see "
-            f"`CLAUDE.md` on why Coding Agent Insights was removed rather than left wired up"
+            f"invariant 32b in `CLAUDE.md`"
         )
     # `code` is the fan-out role, and the implementer inherits its parent's environment rather
     # than getting one of its own, so a fan-out session cannot export what its parent may not.
@@ -755,13 +751,11 @@ async def test_a_session_that_produced_nothing_is_a_failed_session(
 ) -> None:
     """Emptiness alone is the gate, for every role, and `is_error` is `False` on purpose.
 
-    This is the measured shape of a CLI command that aborts before any model call:
+    This is the shape of a CLI command that aborts before any model call:
     `subtype: "success"`, `is_error: false`, `num_turns: 0`, `total_cost_usd: 0` and
-    `result: ""`. The old `is_error and not final_text` condition let it through, so the
-    session returned normally and a downstream guard invented a different explanation --
-    `CodeError: the coding role changed nothing outside .agent/`, which points a reader at
-    the model. `num_turns` cannot be the signal either (`/code-review` returned 0 turns
-    while producing 1234 characters of real findings and costing $0.157); a non-empty
+    `result: ""`. Gating on `is_error` would let it through, and a downstream guard would
+    report a misleading `CodeError` that points at the model. `num_turns` cannot be the
+    signal either, because a pass with real findings can report 0 turns; a non-empty
     `result` is the only reliable one, so the check lives in `run_role` and every role
     inherits it.
     """

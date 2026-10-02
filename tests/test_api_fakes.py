@@ -319,14 +319,11 @@ class FakeAgentCore:
         if operation == "GetResourceOauth2Token":
             user_id = str(kwargs["workloadIdentityToken"]).removeprefix("wat.")
             if self.authorized is not None and user_id not in self.authorized:
-                # Two different answers for "not authorised", and the fake has to model both
-                # because the callers do. Measured against the live service: with a
-                # `resourceOauth2ReturnUrl` it answers an `authorizationUrl` and no
-                # `accessToken`; **without** one it refuses outright, because the absence of a
-                # return URL means "do not start a flow" and there is no token to hand back.
-                # The fake used to model only the first, which is why a 500 on the most
-                # ordinary state a new repository is in reached a live deployment with the
-                # suite green.
+                # Two different answers for "not authorised", and the fake must model both
+                # because the callers do. With a `resourceOauth2ReturnUrl` the service
+                # answers an `authorizationUrl` and no `accessToken`; without one it refuses
+                # outright, because the absence of a return URL means "do not start a flow"
+                # and there is no token to hand back.
                 if not kwargs.get("resourceOauth2ReturnUrl"):
                     raise client_error(
                         "ValidationException",
@@ -354,8 +351,8 @@ class FakeAgentCore:
                     f":token-vault/default/oauth2credentialprovider/{name}"
                 ),
                 # The per-provider callback, which is the value the whole connect flow is
-                # ordered around: assigned here and never changed by an update, exactly as
-                # measured against the real service.
+                # ordered around: assigned here and never changed by an update, which
+                # matches the service's own behaviour.
                 "callbackUrl": (
                     "https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/"
                     "callback/00000000-0000-4000-8000-000000000000"

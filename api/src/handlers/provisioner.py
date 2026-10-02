@@ -28,10 +28,7 @@ whole functions:
   message out of `CreateAgentRuntime` gets exactly one retry -- the allowlist's floor -- and
   is then terminal with the vendor's own words in `statusReason`; everything else is
   terminal on its first attempt. The floor is there because a shape nobody had enumerated
-  yet must cost one slow success, never the ability to provision at all. The
-  allowlist replaced keyword matching on the vendor's prose, whose default was retry and
-  which therefore reported three separate permanent failures as an execution role that was
-  never the problem.
+  yet must cost one slow success, never the ability to provision at all.
 """
 
 from __future__ import annotations
@@ -56,8 +53,9 @@ PHASES = ("CREATE", "CHECK", "DELETE", "UPDATE")
 # server-side `ValidationException`. `observability.is_valid_mount_path` is the guard.
 MOUNT_PATH = "/mnt/workspace"
 
-# 8 hours. The service default is 2, and a real task ran 3h34m before that default
-# killed it mid-review; the failure looks like the container crashing.
+# 8 hours. The service default is 2, which is insufficient for tasks that include a
+# verification step: a run that reaches the review node after a long verify would be
+# killed mid-session with no signal from the container.
 MAX_LIFETIME_SECONDS = 28800
 
 # Under the mount, not beside it: the work root has to survive a resume, and only the
@@ -73,9 +71,9 @@ SERVER_PROTOCOL = "HTTP"
 # *started*, so supporting both would mean the 120-second health requirement below holds on
 # one path and not the other, and every failure report would have to say which.
 #
-# V2 starts the agent from a snapshot instead of initialising on each cold start. AWS
-# measured P75 1.9-2.0s against 5.4-30s on V1 for images from 200 MB to 2 GB, and this
-# image is ~1.3 GB, so cold start -- paid on every dispatched task -- is most of what this
+# V2 starts the agent from a snapshot instead of initialising on each cold start. The
+# snapshot path has substantially lower cold-start latency than V1 for images of this
+# size (~1.3 GB), so cold start -- paid on every dispatched task -- is most of what this
 # buys.
 #
 # Sent on **every** create and update, never conditionally, because the service's omission
@@ -85,15 +83,11 @@ SERVER_PROTOCOL = "HTTP"
 # (invariant 24) -- see `_matches_intent`, which is where absence is read as V1 so that the
 # convergence happens exactly once per runtime rather than never.
 #
-# Three consequences, none optional, and the first two are why this needed measuring rather
-# than assuming:
+# Three consequences, none optional:
 #
 # * The container must answer `/ping` healthy within **120 seconds**, because the snapshot
-#   is taken on the first healthy ping. **Measured**: the real agent image, in VPC mode with
-#   the fleet's own environment, reached `READY` in 508s of snapshot preparation with no
-#   failure -- so the ping lands well inside the window. A dummy image that never pings
-#   fails at ~102s instead, which is what the earlier probes did.
-# * Create and update take *minutes*, not seconds. `_check` polls, so that is already the
+#   is taken on the first healthy ping. Provisioning then takes several minutes for the
+#   snapshot to complete; `_check` polls, so that is already the
 #   shape this code expects.
 # * An update or delete issued before a runtime reaches a terminal state raises
 #   `ConflictException`. `_update` lets it raise, so the SQS redelivery is the retry --
@@ -139,11 +133,9 @@ CHECK_DELAY_SECONDS = 30
 # you). An entry here is the only thing that takes a variable off a runtime that already has
 # it.
 #
-# These five configured the OTLP exporter for CloudWatch Coding Agent Insights, removed with
-# the collector they pointed at (invariant 32b). `CLAUDE_CODE_ENABLE_TELEMETRY` is **not**
-# here: it is still fleet policy, pinned `"0"`, so it converges by being sent rather than by
-# being deleted -- which is also why it was the one telemetry variable that *did* update while
-# these five did not.
+# These five configure an OTLP exporter, which the container does not run (invariant 32b). `CLAUDE_CODE_ENABLE_TELEMETRY` is **not**
+# here: it is still fleet policy, pinned `"0"`, so it converges by being sent rather than
+# by being deleted.
 #
 # An entry is safe to delete from this list only once no live runtime can still carry the key,
 # which in practice means never: a runtime created before the retirement outlives the deploy
@@ -340,12 +332,10 @@ def _account_and_region(_config: Mapping[str, Any] | None = None) -> tuple[str, 
     value the deploy already knows at synth time. Same reasoning keeps `_ensure_role` off
     `iam:GetRole`.
 
-    `AWS_ACCOUNT_ID` is forwarded by `_provisioner_environment` rather than derived. This
-    used to be parsed off the configuration's own `secretArn`, which worked only because
-    every configuration carried one; with the GitHub credential in AgentCore Identity's
-    token vault there is no per-configuration ARN left to read an account off, and the
-    alternatives -- the runtime ARN, the role ARN -- do not exist yet at the point `_create`
-    needs this. `*` and `AWS_REGION` stay as the fallbacks, so a local run with no
+    `AWS_ACCOUNT_ID` is forwarded by `_provisioner_environment` rather than derived:
+    the runtime ARN and role ARN do not exist yet at the point `_create` needs this, and
+    `sts:GetCallerIdentity` would widen the Lambda's grant surface for a value the deploy
+    already carries. `*` and `AWS_REGION` stay as the fallbacks, so a local run with no
     environment still produces a policy IAM will accept.
 
     The parameter is kept, unused, so that every call site reads the same and a future value
@@ -411,12 +401,8 @@ def _execution_role_policy(config: Mapping[str, Any]) -> dict[str, Any]:
     `bedrock-agentcore:*` or `s3:*`, and every statement is scoped to one resource or to
     this configuration's own partition key.
 
-    What it grants is the `Sid` list in the `Statement` block below, and that list is the
-    authority -- not this docstring. The previous version of this paragraph enumerated the
-    permissions and closed by claiming that was the whole list, while the ECR image pull was
-    missing from both the prose and the policy, and the confident enumeration is what made
-    the omission read as a decision. So: read the `Sid`s. A summary here can only ever lag
-    them, and a reader who trusts the summary is the failure this note replaces.
+    What it grants is the `Sid` list in the `Statement` block below. That list is the
+    authority -- a prose summary here would lag it, so: read the `Sid`s.
 
     The `AuthenticateToEcr`/`PullAgentImage` pair is not the container's own call -- the
     **runtime** pulls `AGENT_IMAGE_URI` using this role, before any container code runs, and
@@ -502,13 +488,9 @@ def _execution_role_policy(config: Mapping[str, Any]) -> dict[str, Any]:
         else []
     )
     # **Refreshing the GitHub token reads the app's client secret as this role.** AgentCore
-    # Identity does that Secrets Manager read with the caller's permissions, so a container
-    # without it can use a token for its first eight hours and then cannot: measured against a
-    # role holding only `UseGitHubCredential`, an 11-hour-old authorisation answered
-    # `AccessDenied ... secretsmanager:GetSecretValue on ...bedrock-agentcore-identity!
-    # default/oauth2/rca_github-...`. Until this statement existed, the API Lambda's
-    # pre-dispatch check was refreshing tokens on the container's behalf, which hid the gap for
-    # new runs and left watchdog resumes and long runs to fail at `submit`.
+    # Identity performs that Secrets Manager read with the caller's permissions, so a container
+    # without this grant can use a token for its initial lifetime but cannot renew it. Without
+    # it, watchdog resumes and runs that outlast an 8-hour token would fail at `submit`.
     #
     # One literal ARN, `github_app.provider_secret_arn()`, and never the
     # `bedrock-agentcore-identity!*` prefix the boundary allows: the prefix covers every
@@ -589,20 +571,16 @@ def _execution_role_policy(config: Mapping[str, Any]) -> dict[str, Any]:
                     "bedrock-agentcore:GetResourceOauth2Token",
                 ],
                 # **Both resources are as narrow as the service permits, and neither is a
-                # fence.** Measured against a throwaway role: `GetWorkloadAccessTokenForUserId`
-                # is denied on an individual `workload-identity/<name>` ARN and on
-                # `workload-identity-directory/default*`, and allowed only on
-                # `workload-identity-directory/*`; `GetResourceOauth2Token` is denied on the
-                # provider's own ARN, on `token-vault/default/*` and on `token-vault/*`, and
-                # allowed only on `*`. There is also no condition key for the user id. So
-                # unlike `UseOwnMemory` beside it, this statement cannot name one
-                # repository's credential.
+                # fence.** `GetWorkloadAccessTokenForUserId` authorises only on
+                # `workload-identity-directory/*`; `GetResourceOauth2Token` authorises only on
+                # `*`. There is no condition key for the user id. So unlike `UseOwnMemory`
+                # beside it, this statement cannot name one repository's credential.
                 #
-                # What bounds it instead is stated rather than implied, in `CLAUDE.md`'s
-                # "What remains exposed": a container knows exactly one `configId` -- its own,
-                # because invariant 31 lets it read exactly one configuration item -- and the
-                # GitHub App's installation list is what bounds the token's reach on GitHub.
-                # Do not reword this into a claim of least privilege it does not have.
+                # What bounds it instead is stated in `docs/security.md`: a container knows
+                # exactly one `configId` -- its own, because invariant 31 lets it read exactly
+                # one configuration item -- and the GitHub App's installation list is what
+                # bounds the token's reach on GitHub. Do not reword this into a claim of
+                # least privilege it does not have.
                 "Resource": [
                     f"arn:aws:bedrock-agentcore:{region}:{account}:workload-identity-directory/*",
                     "*",
@@ -913,13 +891,9 @@ def _fleet_environment() -> dict[str, str]:
         # port nothing is listening on, and any endpoint it *did* reach would be an egress
         # destination invariant 33 has not sanctioned.
         #
-        # This is what remains of an in-container ADOT collector that SigV4-signed the
-        # CLI's metrics to CloudWatch for Coding Agent Insights. It was removed: the
-        # dashboards read a Prometheus-compatible store queried by PromQL, AWS documents
-        # only a bearer-token path (which invariant 32b refused, a bearer token being a
-        # long-term IAM-user credential) and a vendor gateway path, and metrics signed this
-        # third way never appeared in any namespace. Restoring an exporter means choosing an
-        # endpoint first; do not reintroduce it as a default.
+        # This deployment ships no OTLP receiver. Adding an exporter requires choosing an
+        # endpoint first and granting it in the VPC; do not reintroduce it as a default
+        # (invariant 32b).
         #
         # Fleet policy rather than a Dockerfile `ENV` (invariant 26): an `ENV` cannot be
         # *unset* by a runtime's `environmentVariables`, only overridden. Set here for the
@@ -938,8 +912,7 @@ def _configuration_environment(config: Mapping[str, Any]) -> dict[str, str]:
     has been using."""
     # `CONFIG_ID` alone, and it is now load-bearing twice over: it keys the container's
     # DynamoDB reads *and* it is the 3LO `userId` the GitHub credential is stored under, so
-    # `store.github_token` needs no second variable. `SECRET_ARN` used to be here and is
-    # gone with the secret.
+    # `store.github_token` needs no second variable.
     return {"CONFIG_ID": str(config.get("configId", ""))}
 
 
@@ -992,11 +965,9 @@ def _desired_runtime(live: Mapping[str, Any] | None, config: Mapping[str, Any]) 
     # from `_fleet_environment` does not remove it from a live runtime**. It stops being
     # converged, so the live value is carried forward for the rest of the runtime's life.
     #
-    # Measured, not theorised: removing the five `OTEL_*` exporter variables (invariant 32b)
-    # landed a deploy, a `runtime-update` converged `CLAUDE_CODE_ENABLE_TELEMETRY` from `1` to
-    # `0`, and all five `OTEL_*` names were still on the runtime afterwards -- so the
-    # invariant's own claim that no `OTEL_*` variable is set anywhere was false for every
-    # existing runtime, with nothing failing.
+    # A key dropped from `_fleet_environment` stops being converged and the live value is
+    # carried forward indefinitely. `RETIRED_FLEET_KEYS` is the tombstone list that actively
+    # removes such keys from any runtime that still carries them.
     for name in RETIRED_FLEET_KEYS:
         environment.pop(name, None)
     desired: dict[str, Any] = {
@@ -1050,18 +1021,14 @@ _INTENT_KEYS = (
 
 # Members `GetAgentRuntime` returns that this code can never send, so they must not count
 # as a difference. Keyed by the enclosing member, and enumerated rather than handled by a
-# general "ignore keys `desired` omits" rule: that rule also stops seeing a stale member
+# general "ignore keys `desired` omits" rule: that rule would also suppress a stale member
 # this code wants *removed*, which is real drift and a test already pins it.
 #
-# `requireServiceS3Endpoint` is the one that forced this. AWS added it inside
-# `networkModeConfig` in May 2026 and returns it on every VPC-mode runtime, including ones
-# created today -- but it is a `ValidationException` on `CreateAgentRuntime`, and on
-# `UpdateAgentRuntime` for any runtime created after that rollout. So `_fleet_network`
-# cannot send it, whole-object equality on `networkConfiguration` could never match again,
-# and `_matches_intent` answered `False` on every single call. On V1 that cost one wasted
-# `UpdateAgentRuntime` per reconcile; on V2 each one prepares a fresh snapshot, runs for
-# minutes, and leaves the superseded snapshot pending deletion for up to the 8-hour session
-# maximum, with a `ConflictException` for anything that lands meanwhile.
+# `requireServiceS3Endpoint` is present here because `GetAgentRuntime` returns it on every
+# VPC-mode runtime but `CreateAgentRuntime` and `UpdateAgentRuntime` reject it as a
+# `ValidationException`. Without this entry, `_matches_intent` always returns `False` for
+# VPC-mode runtimes, triggering a needless update on every reconcile -- and on V2 an update
+# is a snapshot rebuild of several minutes.
 #
 # The next member the vendor adds will fail the same way. That is deliberate: it surfaces as
 # a test going red and one line added here, rather than as a guard that quietly stopped
@@ -1162,55 +1129,31 @@ def _now_epoch() -> int:
 # first -- the floor in `_create`, which bounds what a gap in this enumeration costs without
 # turning the default back into retry.
 #
-# Keyword matching on the vendor's prose was the defect this replaces. That predicate's
-# default was RETRY -- anything containing "assume" and none of four permanent-cause
-# phrases -- so every permanent cause nobody had met yet was retryable by omission. Three
-# of them each looped ten times over 26 minutes and were then reported as an unassumable
-# execution role that was healthy the whole time: a missing
-# `bedrock-agentcore:CreateAgentRuntimeEndpoint`, a missing `iam:CreateServiceLinkedRole`,
-# and an `AccessDenied` whose CloudTrail `errorMessage` was null. Adding a fifth exclusion
-# phrase would have been a fourth incident waiting on a fifth vendor sentence.
-#
-# An allowlist inverts the default, and the asymmetry is the argument: with the floor below
-# it, an unrecognised message costs one retry step and then AWS's own words, where a wrong
-# retry costs 26 minutes AND a report naming a cause that is false. (Re-issuing
-# `POST /configurations` is NOT the operator's way out, which is what the outage taught:
-# `_new_config_id` is random, so a re-issue mints a new role and races the same window.)
+# An allowlist is the right shape because the default must be terminal. With a floor, an
+# unrecognised message costs one retry step and then AWS's own words, where a wrong retry
+# costs the full wall-clock budget AND a report naming a cause the code never established.
 #
 # Each entry is `(codes, message shapes, the cause it establishes)`. An empty shape tuple
 # means the code and the operation are the whole test. The label is why the report on
-# exhaustion may name a cause at all: it is the condition the allowlist PROVED, not one the
-# wrapper assumed, which is the distinction the old terminal message could not draw.
+# exhaustion may name a cause at all: it is the condition the allowlist proved, not one the
+# wrapper assumed.
 _TRANSIENT_CREATE_FAILURES: tuple[tuple[frozenset[str], tuple[str, ...], str], ...] = (
     (
         # IAM propagation: the one condition here that heals with time.
         # `CreateAgentRuntime` runs moments after `CreateRole`, and AgentCore reports a
         # role it cannot assume yet by failing to assume it. Matched on the service's
         # phrasing of that failed attempt and on nothing else -- notably NOT on a bare
-        # `sts:AssumeRole` inside an authorization failure, which is word for word what an
+        # `sts:AssumeRole` inside an authorisation failure, which is word for word what an
         # SCP or boundary denial of the same action looks like. These shapes also exclude
-        # the image pull for free ("could not be pulled" is not "could not assume"), which
-        # is why this file no longer carries an `ecr`/`image`/`container` exclusion list to
-        # forget to extend. No count is written here on purpose -- the last one went stale.
+        # the image pull for free ("could not be pulled" is not "could not assume").
         #
-        # The last shape is the message AgentCore actually returns, and its absence broke
-        # provisioning outright: `Role validation failed for '<arn>'. Please verify that the
-        # role exists and its trust policy allows assumption by this service`. The service
-        # says **"assumption"**, a noun, so every shape above it -- all built around
-        # "assume"/"assumed" -- missed, the failure was unrecognised, and no configuration
-        # could be created at all. `_new_config_id` is random, so an operator re-issuing
-        # `POST /configurations` minted a fresh role and raced the same window again; the
-        # internal retry was the only mechanism that could clear it.
-        #
-        # Anchored on the TAIL of that sentence rather than on "role validation failed",
-        # because the tail cannot be confused with an SCP or permissions-boundary denial of
-        # `sts:AssumeRole` -- those say "not authorized to perform" or "explicit deny" --
-        # while the head is a prefix the service also uses for things that are not
-        # propagation. A genuinely wrong trust policy produces this same sentence, and that
-        # is ACCEPTABLE: the wall-clock budget bounds the time wasted, and "the execution
-        # role was still not assumable" is then the *true* report rather than a lie. That is
-        # the distinction that matters here, because the incident this file documents was
-        # about reports claiming causes the code never established, not about slow ones.
+        # The last shape uses "assumption" (a noun) rather than "assume" (a verb), and is
+        # anchored on the TAIL of the AgentCore message rather than the head, because the
+        # tail cannot be confused with an SCP or permissions-boundary denial -- those say
+        # "not authorized to perform" or "explicit deny" -- while the head is a prefix the
+        # service also uses for unrelated failures. A genuinely wrong trust policy produces
+        # this same message; the wall-clock budget bounds the time wasted in that case, and
+        # "the execution role was still not assumable" is then the accurate report.
         frozenset({"ValidationException", "AccessDeniedException"}),
         (
             "cannot be assumed",
@@ -1279,19 +1222,15 @@ def _vendor_detail(err: ClientError) -> str:
     produced it, and the message verbatim.
 
     Never a paraphrase and never a conclusion. Every caller puts this in a `statusReason`,
-    and the whole point of this change is that the report cannot claim a cause the code did
-    not establish.
+    so the report names what the code established rather than what it assumed.
     """
     error = err.response.get("Error", {}) or {}
     code = str(error.get("Code") or "an error with no code")
     operation = str(getattr(err, "operation_name", "") or "an unnamed operation")
     message = str(error.get("Message") or "").strip()
     if not message:
-        # The live `AccessDenied` whose CloudTrail `errorMessage` was null. The absence is
-        # the only fact there is, so it is reported as an absence: this arm used to fall
-        # through to `raise`, which DLQ'd the message and left the item `PENDING` with no
-        # `statusReason` at all, and guessing at a cause to fill the gap is the lie the
-        # rest of this change exists to end.
+        # AWS returns no message for some `AccessDenied` errors. Reporting the absence
+        # explicitly directs the operator to CloudTrail, which has the full detail.
         return (
             f"{operation} failed with {code} and AWS returned no message at all; the "
             f"CloudTrail event for this call is the only remaining detail"
@@ -1394,19 +1333,11 @@ def _create(config_id: str, attempt: int, deadline: Any = None) -> None:
             detail = _vendor_detail(err)
             operation = str(getattr(err, "operation_name", "") or "")
             if attempt == 0 and operation == _TRANSIENT_OPERATION:
-                # The floor on the allowlist, and the answer to "what does the NEXT
-                # unenumerated phrasing cost?". Before this, the answer was an immediate
-                # permanent failure: the live "allows assumption by this service" message
-                # was not on the list, so every `POST /configurations` failed on its first
-                # attempt, and `_new_config_id` being random meant an operator re-issuing it
-                # just minted another role and raced the same window again. The answer is
-                # now "one slow success" -- never "immediate permanent failure".
-                #
-                # It claims nothing. One retry, inside the same wall-clock deadline, with a
-                # label that names no cause; if the failure recurs at `attempt >= 1` the arm
-                # below reports AWS's own words exactly as it does today, one attempt later.
-                # That is the whole asymmetry: one retry costs seconds, a missing shape cost
-                # the ability to provision at all.
+                # The floor on the allowlist. An unrecognised message from
+                # `CreateAgentRuntime` gets exactly one retry so that a new vendor phrasing
+                # costs one slow success rather than an immediate permanent failure. The retry
+                # claims nothing: if the failure recurs at `attempt >= 1` the arm below
+                # reports AWS's own words exactly, one attempt later.
                 #
                 # Gated on the operation because `_ensure_role` raises into this same
                 # `except`: an IAM `CreateRole`/`PutRolePolicy` denial is permanent and must
@@ -1505,26 +1436,16 @@ def _runtime_exists(runtime_id: str) -> bool:
     after.
 
     **`DeleteAgentRuntime` on a runtime that no longer exists answers
-    `AccessDeniedException`, not `ResourceNotFoundException`** -- measured against the live
-    service, and with an administrator's credentials, so it is the service's answer for a
-    missing resource rather than anything about the caller's permissions. The message is the
-    bare "is not authorized to perform: bedrock-agentcore:DeleteAgentRuntime", with no
-    resource clause and no "because no identity-based policy allows".
-
-    That breaks the replay this teardown depends on. `_delete` deletes the item **last** so a
-    crash mid-teardown is finishable by the next `DELETE` message; but once the runtime is
-    gone, every replay raises `AccessDenied`, the item is never deleted, and the
-    configuration stays `DELETING` forever. Nothing recovers it -- `watchdog`'s
-    configuration sweep re-drives the same `DELETE`, which fails the same way.
+    `AccessDeniedException`, not `ResourceNotFoundException`.** This breaks the replay
+    `_delete` depends on: the item is deleted last so a crash mid-teardown is finishable,
+    but once the runtime is gone every replay raises `AccessDenied`, the item is never
+    deleted, and the configuration stays `DELETING` indefinitely.
 
     `_is_gone` is deliberately **not** widened to accept `AccessDeniedException`: a real
     permission failure presents identically, so that would turn a missing grant into a
-    silent, successful-looking teardown that leaves a live runtime billing. Asking
-    `GetAgentRuntime` first costs one call and needs no message matching --
-    `GetAgentRuntime` answers a missing runtime with a clean `ResourceNotFoundException`
-    (also measured). An error that is neither "not found" nor a success is left to raise,
-    because a control plane that cannot be read is not a control plane that should be
-    written.
+    silent teardown that leaves a live runtime billing. `GetAgentRuntime` answers a missing
+    runtime with a clean `ResourceNotFoundException`, so checking existence first costs one
+    extra call and avoids any message matching.
     """
     try:
         _common.agentcore_control().get_agent_runtime(agentRuntimeId=runtime_id)
@@ -1620,16 +1541,15 @@ def _update(config_id: str) -> None:
     # `_matches_intent` returns early on a converged runtime -- which is exactly what a
     # policy-only change looks like, since the policy is not part of the runtime at all. So a
     # role write placed after that check would never run on the one fleet that needs it.
-    # `_ensure_role` has always promised that "the inline policy is rewritten every time so a
-    # fleet-wide policy change lands on a re-provision"; until this call existed, `_update`
-    # was the provision path that did not keep that promise.
+    # `_ensure_role` rewrites the inline policy every time, so a fleet-wide policy change
+    # lands on a re-provision. `_update` must call it before the `_matches_intent` check:
+    # a policy-only change looks like a converged runtime because the policy is not part of
+    # the runtime at all, and `_matches_intent` would return early before the role write.
     #
-    # What omitting it costs is the expensive silent shape invariant 41 exists to prevent,
-    # and the asymmetry is why no earlier check catches it: a grant the policy is missing is
-    # a fact about the **container**, while `runs.queue_run` can only ask whether the **API**
-    # can reach what it needs. So the run dispatches, clones, plans, codes and verifies, and
-    # the missing permission surfaces as an empty credential at `submit` -- a whole task
-    # spent before anything says why.
+    # What omitting it costs is the expensive silent shape invariant 41 exists to prevent:
+    # a missing grant is a fact about the container, while `runs.queue_run` can only check
+    # what the API can reach -- so the run dispatches, clones, plans, codes and verifies,
+    # and the missing permission surfaces only at `submit`.
     #
     # Unconditional rather than compared: `put_role_policy` is idempotent, and one IAM write
     # per update is cheaper than a read to decide whether to write.
