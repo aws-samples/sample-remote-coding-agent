@@ -21,7 +21,7 @@ HANDLERS = REPO_ROOT / "api/src/handlers"
 
 # The modules that answer HTTP, and the ones the queue and the schedule drive. Adding
 # a module means adding it to one of these two lists, which is the point.
-HTTP_MODULES = ("configurations", "cards", "tasks")
+HTTP_MODULES = ("configurations", "cards", "tasks", "github_app")
 EVENT_MODULES = ("provisioner", "dispatcher", "watchdog")
 SUPPORT_MODULES = ("_common", "observability", "runs", "github_probe")
 
@@ -114,7 +114,7 @@ def test_no_two_modules_claim_the_same_method_and_path() -> None:
     # The nine routes `CLAUDE.md`'s control-plane description names plus the tenth
     # configurations route -- the memory read -- and the five task routes and the six card
     # routes.
-    assert len(seen) == 19, f"expected the 19 declared routes, got {sorted(seen)}"
+    assert len(seen) == 25, f"expected the 25 declared routes, got {sorted(seen)}"
 
 
 def test_the_declared_route_table_is_the_one_plan_md_names() -> None:
@@ -128,8 +128,25 @@ def test_the_declared_route_table_is_the_one_plan_md_names() -> None:
         ("PATCH", "/configurations/{configId}"),
         ("DELETE", "/configurations/{configId}"),
         ("POST", "/configurations/{configId}/runtime-update"),
-        ("PUT", "/configurations/{configId}/github-token"),
+        # The two per-repository credential routes that replaced
+        # `PUT /configurations/{configId}/github-token`. There is no token to rotate: one
+        # GitHub App serves the deployment and AgentCore Identity holds its credentials, so
+        # what a repository needs is an authorisation it can start and a verdict it can read.
+        ("POST", "/configurations/{configId}/github-authorize"),
+        # The return leg. A separate route rather than a flag on the one above, because the
+        # two carry different bodies and only one of them is reached by a browser coming back
+        # from GitHub -- and without it the vault stores nothing while every signal says the
+        # authorisation worked.
+        ("POST", "/configurations/{configId}/github-authorize/complete"),
+        ("GET", "/configurations/{configId}/github-status"),
         ("GET", "/configurations/{configId}/memory"),
+        # The deployment-wide GitHub App, in `github_app.py`. Four routes rather than one
+        # because connecting is a two-leg flow -- mint the provider, then exchange the code
+        # GitHub redirects back with -- and disconnecting has to be reachable on its own.
+        ("GET", "/github-app"),
+        ("POST", "/github-app"),
+        ("POST", "/github-app/conversions"),
+        ("DELETE", "/github-app"),
         ("POST", "/cards"),
         ("GET", "/cards"),
         ("GET", "/cards/{cardId}"),

@@ -80,18 +80,17 @@ def list_repositories(client: ApiClient, arguments: Mapping[str, Any]) -> str:
 
 def register_repository(client: ApiClient, arguments: Mapping[str, Any]) -> str:
     url = _required(arguments, "repositoryUrl")
-    # Validated here, before the request is signed: the body carries the operator's
-    # token, and a typo'd URL should fail on this machine rather than reach the wire.
+    # Validated here, before the request is signed: a typo'd URL should fail on this machine
+    # rather than reach the wire for a route that would answer 400 with the same sentence.
     repository = fmt.repository_from_url(url)
-    body: dict[str, Any] = {
-        "repositoryUrl": url,
-        "githubToken": _required(arguments, "githubToken"),
-    }
+    # No credential of any kind. This tool used to require a `githubToken`, and the whole
+    # hazard class went with it: there is nothing in these arguments a model could echo into
+    # a chat window, read out of a file, or guess.
+    body: dict[str, Any] = {"repositoryUrl": url}
     for optional in ("verifyCommand", "setupCommand", "defaultBranch"):
         value = arguments.get(optional)
         if isinstance(value, str) and value.strip():
             body[optional] = value.strip()
-    # The slug, never the arguments: this is the one call whose arguments carry a secret.
     LOG.info("registering %s", repository)
     return fmt.registered(client.post("/configurations", body))
 
@@ -155,15 +154,13 @@ TOOLS: tuple[ToolSpec, ...] = (
         description=(
             "Register a GitHub repository so tasks can be run against it. Only ever call "
             "this when the operator has explicitly asked for it: it provisions real AWS "
-            "resources (an AgentCore runtime, an execution role and a Secrets Manager "
-            "secret) and it needs a credential. githubToken must be a fine-grained "
-            "personal access token scoped to that one repository with contents write and "
-            "pull requests write -- the control plane rejects classic personal access "
-            "tokens, because a classic token cannot be scoped to a single repository. "
-            "Never echo the token back to the operator, never put it in a message, and "
-            "never read it out of a file into a chat. The token is stored write-only and "
-            "no tool here can read it back. The new configuration starts at PENDING. "
-            + _PROVISIONING_NOTE
+            "resources (an AgentCore runtime, an execution role and an AgentCore memory). "
+            "It takes NO credential -- the deployment authenticates through one GitHub App "
+            "held in AgentCore Identity, so never ask the operator for a token and never "
+            "accept one. Registering is only half the setup: the operator then has to "
+            "authorise the repository in the console, which is a browser step no tool here "
+            "can take for them, and a task started before that is refused with 409 "
+            "GitHubNotAuthorized. The new configuration starts at PENDING. " + _PROVISIONING_NOTE
         ),
         input_schema={
             "type": "object",
@@ -172,14 +169,6 @@ TOOLS: tuple[ToolSpec, ...] = (
                     "type": "string",
                     "description": (
                         "https://github.com/owner/repo(.git) or git@github.com:owner/repo.git"
-                    ),
-                },
-                "githubToken": {
-                    "type": "string",
-                    "description": (
-                        "A fine-grained personal access token (github_pat_...) for that "
-                        "repository alone. Ask the operator for it; never guess, and never "
-                        "repeat it back."
                     ),
                 },
                 "verifyCommand": {
@@ -198,7 +187,7 @@ TOOLS: tuple[ToolSpec, ...] = (
                     "description": "The branch to base pull requests on. Omit for the repository default.",
                 },
             },
-            "required": ["repositoryUrl", "githubToken"],
+            "required": ["repositoryUrl"],
             "additionalProperties": False,
         },
         run=register_repository,

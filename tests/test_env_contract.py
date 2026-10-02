@@ -65,8 +65,15 @@ CONTAINER_DEFAULTS: dict[str, str] = {
     "perfectly reconstructible bytes OFF the 1 GB session-storage mount. A forwarded "
     "value is one edit away from filling the session and killing the task.",
     "GITHUB_TOKEN": "the developer-machine path in `local_run.py` and `nodes/submit.py`. "
-    "In the container the token is read from Secrets Manager at submit time and must "
-    "never enter the environment (invariant 4).",
+    "In the container the token is fetched from AgentCore Identity's token vault at submit "
+    "time and must never enter the environment (invariant 4).",
+    "IDENTITY_PROVIDER_NAME": "deliberately NOT forwarded: it is derived from `APP_NAME`, "
+    "which is `rca` in every deployment and is explicitly not part of `STACK_PREFIX` (two "
+    "fleets in one account share the `/rca/` IAM path), so the default in `store.py` always "
+    "matches `github_app.PROVIDER_NAME`. The override exists for a deployment that renames "
+    "the provider by hand, which nothing here does.",
+    "IDENTITY_WORKLOAD_NAME": "as IDENTITY_PROVIDER_NAME -- the matching workload identity, "
+    "`github_app.WORKLOAD_NAME`.",
     "PATH": "process environment the OS provides; `commands._ALLOWED_ENV` is a filter, "
     "not a configuration knob (invariant 32).",
     "HOME": "as PATH.",
@@ -432,7 +439,10 @@ def test_the_two_fleet_policy_knobs_are_classified_as_fleet() -> None:
         )
     # And the two that genuinely vary per repository, asserted the other way round so the
     # classification cannot be satisfied by putting everything in one group.
-    for name in ("CONFIG_ID", "SECRET_ARN"):
+    # `CONFIG_ID` alone now. `SECRET_ARN` was the other per-configuration variable and went
+    # with the secret; `CONFIG_ID` is load-bearing twice over, since it keys both the
+    # container's DynamoDB reads and the GitHub credential in the token vault.
+    for name in ("CONFIG_ID",):
         assert name in per_configuration and name not in fleet, (
             f"{name} names one configuration's own runtime, so it is a create-time default that "
             f"loses to the live value, not fleet policy"

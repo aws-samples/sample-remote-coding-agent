@@ -285,7 +285,7 @@ _IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 
 # Every backticked span. Narrowed to path claims by `_is_repo_path`.
 _PATH_RE = re.compile(r"`([^`\n]+)`")
-# `api/src/handlers/configurations.py::_require_supported_token`.
+# `api/src/handlers/configurations.py::_push_verdict`.
 _COLON_RE = re.compile(rf"`([^`\n]+?)::({_IDENT})`")
 # `nodes/code.py`'s `GOAL_CONDITION`.
 _POSSESSIVE_RE = re.compile(rf"`([^`\n]+?)`'s\s+`({_IDENT})`")
@@ -502,6 +502,66 @@ def _claims(text: str) -> list[tuple[str, int, str, str, str | None]]:
         found.append(("symbol", line_of(match), match.group(0), _BY_STEM[module][0], symbol))
 
     return found
+
+
+# Every file that states how long provisioning takes, and the spelling each uses. Two
+# spellings because one is an en dash in prose and the rest are hyphens in code strings;
+# the *number* is what has to agree.
+#
+# This exists because prose did not hold it. CLAUDE.md named five places, the plugin's two
+# skills and the un-namespaced command were not among them, and they went on saying "2-5
+# minutes" for a whole wave after the V2 upgrade made that wrong -- which is the expensive
+# direction to be wrong in, since an operator who believes an understated wait concludes the
+# registration is stuck at exactly the point where waiting is correct.
+_PROVISIONING_MINUTES = "8-12"
+_PROVISIONING_CLAIMS: tuple[tuple[str, str], ...] = (
+    # The en dash is README.md's own spelling; the assertion has to match the file.
+    ("README.md", "8–12 min"),  # noqa: RUF001 -- en dash is the README's spelling
+    ("mcp/src/rca_mcp/format.py", "8-12 minutes"),
+    ("mcp/src/rca_mcp/server.py", "8-12 minutes"),
+    ("web/js/views/register.js", "8-12 minutes"),
+    ("web/js/views/sidebar.js", "8-12 minutes"),
+    ("plugins/sample-rca/skills/remote/SKILL.md", "8-12 minutes"),
+    ("plugins/sample-rca/skills/scaffold/SKILL.md", "8-12 minutes"),
+    (".claude/commands/remote.md", "8-12 minutes"),
+)
+
+
+@pytest.mark.parametrize(("path", "spelling"), _PROVISIONING_CLAIMS, ids=lambda v: str(v)[:44])
+def test_every_file_states_the_same_provisioning_time(path: str, spelling: str) -> None:
+    """One measured number, eight files, and nothing but this test holding them together."""
+    text = (REPO_ROOT / path).read_text(encoding="utf-8")
+    assert spelling in text, (
+        f"{path} does not state provisioning as {spelling!r}. The figure is measured -- a V2 "
+        f"runtime reached READY in 508s and a live registration polled at 585s -- and it is "
+        f"spelled in {len(_PROVISIONING_CLAIMS)} files that have to move together."
+    )
+
+
+def test_no_file_states_a_different_provisioning_time() -> None:
+    """The other direction, which is the one that actually drifted.
+
+    A file can carry the right number *and* a stale one, and the stale sentence is the one an
+    operator reads first. So every duration claimed next to the word "provision" has to be the
+    measured one, across the whole operator-facing surface rather than a declared list.
+    """
+    # Both dash forms: prose spells the range with an en dash and code strings with a
+    # hyphen, and a pattern that matched only one would miss half the surface.
+    pattern = re.compile(
+        r"provision\w*[^.\n]{0,80}?(\d+)\s*[-–]\s*(\d+)\s*min",  # noqa: RUF001 -- see above
+        re.IGNORECASE,
+    )
+    offenders: list[str] = []
+    for path, _ in _PROVISIONING_CLAIMS:
+        for line_number, line in enumerate((REPO_ROOT / path).read_text().splitlines(), 1):
+            for low, high in pattern.findall(line):
+                if f"{low}-{high}" != _PROVISIONING_MINUTES:
+                    offenders.append(f"{path}:{line_number} says {low}-{high} min")
+    assert not offenders, (
+        f"these state a provisioning time other than {_PROVISIONING_MINUTES} minutes: "
+        f"{offenders}. The plugin's skills said 2-5 for a whole wave after the measurement "
+        f"moved, because nothing compared them."
+    )
 
 
 def test_the_readme_stays_short() -> None:

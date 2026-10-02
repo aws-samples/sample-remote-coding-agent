@@ -46,7 +46,7 @@ from typing import Any
 from boto3.dynamodb.conditions import Attr
 from botocore.exceptions import ClientError
 
-from . import _common, observability
+from . import _common, github_app, observability
 from ._common import LOG
 
 PHASES = ("CREATE", "CHECK", "DELETE", "UPDATE")
@@ -268,7 +268,7 @@ def _set_config(config_id: str, **fields: Any) -> None:
 
     The condition is invariant 23: `update_item` *creates* an absent item, so a late
     `CHECK` landing after a successful teardown would resurrect a configuration whose
-    runtime, role and secret are all gone -- and would even flip it to `READY`. A lost
+    runtime, role and memory are all gone -- and would even flip it to `READY`. A lost
     condition is therefore expected, not an error.
     """
     fields["updatedAt"] = _common.now_iso()
@@ -294,7 +294,7 @@ def _live_config(config_id: str, phase: str) -> dict[str, Any] | None:
 
     The other half of invariant 23: a message for a configuration that is gone, or on
     its way out, is finished work. Without it a late `CHECK` landing after a successful
-    teardown resurrects a configuration whose runtime, role and secret are all gone --
+    teardown resurrects a configuration whose runtime, role and memory are all gone --
     and flips it to `READY`.
     """
     config = _get_config(config_id)
@@ -331,27 +331,35 @@ def _role_name(config_id: str) -> str:
     return f"rca-{config_id}"
 
 
-def _account_and_region(config: Mapping[str, Any]) -> tuple[str, str]:
-    """The account and region for the trust policy's `aws:SourceAccount` and the table
-    ARNs in `_execution_role_policy`, read off the configuration's own `secretArn`
-    (`arn:aws:secretsmanager:<region>:<account>:secret:...`).
+def _account_and_region(_config: Mapping[str, Any] | None = None) -> tuple[str, str]:
+    """The account and region for the trust policy's `aws:SourceAccount` and the ARNs in
+    `_execution_role_policy`, read from this Lambda's own environment.
 
     Deliberately **not** `sts:GetCallerIdentity`: this Lambda's grant surface is exactly
-    the table `infra/stacks/api_stack.py` declares, and an STS client would widen it for
-    a value every provisioned configuration already carries. Same reasoning keeps
-    `_ensure_role` off `iam:GetRole`. `AWS_REGION` and a `*` account are the fallbacks,
-    so a half-written configuration still produces a policy IAM will accept.
+    the table `infra/stacks/api_stack.py` declares, and an STS client would widen it for a
+    value the deploy already knows at synth time. Same reasoning keeps `_ensure_role` off
+    `iam:GetRole`.
+
+    `AWS_ACCOUNT_ID` is forwarded by `_provisioner_environment` rather than derived. This
+    used to be parsed off the configuration's own `secretArn`, which worked only because
+    every configuration carried one; with the GitHub credential in AgentCore Identity's
+    token vault there is no per-configuration ARN left to read an account off, and the
+    alternatives -- the runtime ARN, the role ARN -- do not exist yet at the point `_create`
+    needs this. `*` and `AWS_REGION` stay as the fallbacks, so a local run with no
+    environment still produces a policy IAM will accept.
+
+    The parameter is kept, unused, so that every call site reads the same and a future value
+    that genuinely is per configuration has somewhere to come from.
     """
-    parts = str(config.get("secretArn") or "").split(":")
-    region, account = (parts[3], parts[4]) if len(parts) > 5 else ("", "")
-    return account or "*", region or os.environ.get("AWS_REGION", "") or "*"
+    account = os.environ.get("AWS_ACCOUNT_ID", "").strip()
+    return account or "*", os.environ.get("AWS_REGION", "") or "*"
 
 
 def _asset_repository_arn(image_uri: str) -> str:
     """The ECR repository ARN the agent image lives in, read off `AGENT_IMAGE_URI`
     (`<account>.dkr.ecr.<region>.amazonaws.com/<repository>[:<tag>|@<digest>]`) in the
-    same spirit as `_account_and_region` reading the account off `secretArn`: the value
-    is derivable from something every deploy already carries, so it needs no second
+    same spirit as `_account_and_region` reading its account out of the environment: the
+    value is derivable from something every deploy already carries, so it needs no second
     environment variable and no `ecr:DescribeRepositories` grant.
 
     `""` for an empty URI, and for anything that is not an ECR URI -- a Docker Hub image
@@ -540,13 +548,36 @@ def _execution_role_policy(config: Mapping[str, Any]) -> dict[str, Any]:
                 "Condition": own_partition,
             },
             {
-                "Sid": "ReadOwnSecret",
+                "Sid": "UseGitHubCredential",
                 "Effect": "Allow",
-                "Action": ["secretsmanager:GetSecretValue"],
-                # The **literal** ARN, which is why rotation writes a new *version* of
-                # this secret and never a second secret: a second one would not be
-                # readable by this role at all.
-                "Resource": str(config.get("secretArn") or ""),
+                # The two calls `agent/src/coding_agent/store.github_token` makes, and the
+                # whole of this container's credential path: mint a workload access token
+                # for this configuration's id as the 3LO `userId`, then exchange it for the
+                # GitHub token AgentCore Identity holds in its vault. No
+                # `secretsmanager:GetSecretValue` anywhere, because there is no secret.
+                "Action": [
+                    "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+                    "bedrock-agentcore:GetResourceOauth2Token",
+                ],
+                # **Both resources are as narrow as the service permits, and neither is a
+                # fence.** Measured against a throwaway role: `GetWorkloadAccessTokenForUserId`
+                # is denied on an individual `workload-identity/<name>` ARN and on
+                # `workload-identity-directory/default*`, and allowed only on
+                # `workload-identity-directory/*`; `GetResourceOauth2Token` is denied on the
+                # provider's own ARN, on `token-vault/default/*` and on `token-vault/*`, and
+                # allowed only on `*`. There is also no condition key for the user id. So
+                # unlike `UseOwnMemory` beside it, this statement cannot name one
+                # repository's credential.
+                #
+                # What bounds it instead is stated rather than implied, in `CLAUDE.md`'s
+                # "What remains exposed": a container knows exactly one `configId` -- its own,
+                # because invariant 31 lets it read exactly one configuration item -- and the
+                # GitHub App's installation list is what bounds the token's reach on GitHub.
+                # Do not reword this into a claim of least privilege it does not have.
+                "Resource": [
+                    f"arn:aws:bedrock-agentcore:{region}:{account}:workload-identity-directory/*",
+                    "*",
+                ],
             },
             {
                 "Sid": "WriteRuntimeLogs",
@@ -736,6 +767,34 @@ def _fleet_network(live: Mapping[str, Any] | None) -> dict[str, Any]:
     return {"networkMode": "PUBLIC"}
 
 
+def _git_identity() -> tuple[str, str]:
+    """The commit identity every pull request carries, as `(name, email)`.
+
+    Three sources, in order, and the order is the point:
+
+    1. **The deploy-time context pair** (`-c gitAuthorName=` / `-c gitAuthorEmail=`). An
+       explicit choice outranks a derived one, so a deployment that wants its own bot account
+       keeps it. Either value present selects this source for both, because a name from one
+       source and an address from another is an identity nobody chose.
+    2. **The connected GitHub App's own bot account**, which needs no operator input and is
+       why the demo path configures nothing. `github_app.commit_identity` reads it off the
+       settings item; the address is `<botUserId>+<slug>[bot]@users.noreply.github.com`, and
+       the id is the **bot user's** rather than the app's -- see that function for the
+       measurement, because the app-id form resolves to no account.
+    3. **Nothing**, which leaves `git_ops` to its default `agent@localhost` -- and that
+       resolves to no GitHub author, so anything gating on commit attribution refuses the
+       pull request (invariant 4b).
+
+    Fleet policy, so an existing runtime converges on the next update rather than keeping
+    whatever it was born with (invariant 24). That matters more here than for the other knobs:
+    the app is connected *after* the deploy, so every runtime provisioned before the connect
+    was necessarily born without an identity.
+    """
+    if AGENT_GIT_AUTHOR_NAME or AGENT_GIT_AUTHOR_EMAIL:
+        return AGENT_GIT_AUTHOR_NAME, AGENT_GIT_AUTHOR_EMAIL
+    return github_app.commit_identity()
+
+
 def _fleet_environment() -> dict[str, str]:
     """The environment keys this deployment owns, and therefore converges. Anything not
     named here is carried forward from the live runtime. Takes no configuration on
@@ -750,6 +809,12 @@ def _fleet_environment() -> dict[str, str]:
     its expected values are pinned in `tests/test_env_contract.CLI_SUPPRESSIONS`, because
     deleting one is invisible at run time.
     """
+    # Resolved once, and assigned to names rather than splatted in: the two keys below are
+    # read out of this function's AST by
+    # `tests/test_env_contract.py::test_every_container_environment_read_is_forwarded_or_a_declared_default`,
+    # and a `**dict(...)` makes them invisible to it -- which is how a forwarded knob stops
+    # being checked while still appearing to work.
+    author_name, author_email = _git_identity()
     return {
         "WORK_ROOT": WORK_ROOT,
         "CLAUDE_CODE_USE_BEDROCK": "1",
@@ -774,8 +839,8 @@ def _fleet_environment() -> dict[str, str]:
         # leave a runtime that was born with a real identity carrying it forever, since
         # anything not named in this group is carried forward. Sending "" is what makes
         # clearing the context key actually clear the identity.
-        "AGENT_GIT_AUTHOR_NAME": AGENT_GIT_AUTHOR_NAME,
-        "AGENT_GIT_AUTHOR_EMAIL": AGENT_GIT_AUTHOR_EMAIL,
+        "AGENT_GIT_AUTHOR_NAME": author_name,
+        "AGENT_GIT_AUTHOR_EMAIL": author_email,
         # The CLI's suppression group, whose names and values are pinned in
         # `tests/test_env_contract.CLI_SUPPRESSIONS` -- that test is the count, not this
         # sentence. The reason it is fleet policy rather than a per-configuration default:
@@ -836,10 +901,11 @@ def _configuration_environment(config: Mapping[str, Any]) -> dict[str, str]:
     """Create-time defaults for the per-configuration keys. On an update these lose to
     whatever the live runtime carries, because the live value is the one the container
     has been using."""
-    return {
-        "CONFIG_ID": str(config.get("configId", "")),
-        "SECRET_ARN": str(config.get("secretArn") or ""),
-    }
+    # `CONFIG_ID` alone, and it is now load-bearing twice over: it keys the container's
+    # DynamoDB reads *and* it is the 3LO `userId` the GitHub credential is stored under, so
+    # `store.github_token` needs no second variable. `SECRET_ARN` used to be here and is
+    # gone with the secret.
+    return {"CONFIG_ID": str(config.get("configId", ""))}
 
 
 def _container_uri(spec: Mapping[str, Any]) -> str | None:
@@ -1496,15 +1562,10 @@ def _delete(config_id: str) -> None:
             raise
         LOG.info("role %s was already gone", role_name)
 
-    secret_arn = str(config.get("secretArn") or "")
-    if secret_arn:
-        try:
-            _common.secrets.delete_secret(SecretId=secret_arn, ForceDeleteWithoutRecovery=True)
-        except ClientError as err:
-            if not _is_gone(err):
-                raise
-            LOG.info("secret for config %s was already gone", config_id)
-
+    # No secret to delete, and no stored GitHub authorisation to revoke either: the token
+    # vault keys this repository's credential on `configId`, which is random and never
+    # reissued, so removing the item below is what makes it unreachable. `DELETE /github-app`
+    # is the wholesale revoke.
     _common.config_table.delete_item(Key={"configId": config_id})
     LOG.info("config %s torn down", config_id)
 
@@ -1518,7 +1579,28 @@ def _update(config_id: str) -> None:
         LOG.warning("UPDATE for config %s: it has no runtime yet", config_id)
         return
 
-    # Read the live runtime back first. `UpdateAgentRuntime` is a full replace, so this
+    # The execution role's inline policy is rewritten **before** the intent check below, and
+    # that ordering is the whole point. `UPDATE` is the only path that can carry a change in
+    # `_execution_role_policy` to a configuration that is already live, and
+    # `_matches_intent` returns early on a converged runtime -- which is exactly what a
+    # policy-only change looks like, since the policy is not part of the runtime at all. So a
+    # role write placed after that check would never run on the one fleet that needs it.
+    # `_ensure_role` has always promised that "the inline policy is rewritten every time so a
+    # fleet-wide policy change lands on a re-provision"; until this call existed, `_update`
+    # was the provision path that did not keep that promise.
+    #
+    # What omitting it costs is the expensive silent shape invariant 41 exists to prevent,
+    # and the asymmetry is why no earlier check catches it: a grant the policy is missing is
+    # a fact about the **container**, while `runs.queue_run` can only ask whether the **API**
+    # can reach what it needs. So the run dispatches, clones, plans, codes and verifies, and
+    # the missing permission surfaces as an empty credential at `submit` -- a whole task
+    # spent before anything says why.
+    #
+    # Unconditional rather than compared: `put_role_policy` is idempotent, and one IAM write
+    # per update is cheaper than a read to decide whether to write.
+    _ensure_role(config_id, config)
+
+    # Read the live runtime back. `UpdateAgentRuntime` is a full replace, so this
     # is the only source for the members that are carried forward.
     live = _common.agentcore_control().get_agent_runtime(agentRuntimeId=runtime_id)
     desired = _desired_runtime(live, config)

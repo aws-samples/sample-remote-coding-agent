@@ -57,7 +57,7 @@ _SEG = re.compile(r"\$\{seg\(\s*(?P<name>[A-Za-z_$][\w$]*)\s*\)\}")
 
 # Anti-vacuity guards. Both scans read source text, so a reformat that stopped matching
 # would make every other assertion in this file pass over an empty set.
-_CONSOLE_CALL_COUNT = 17
+_CONSOLE_CALL_COUNT = 23
 _MCP_CALL_COUNT = 6
 
 # Two entries today: the console is the operator's whole surface on this API and calls 17 of
@@ -82,6 +82,50 @@ CONSOLE_NOT_CALLED: dict[tuple[str, str], str] = {
 # The GET/POST routes the MCP server does not call. Each entry is a reason, not an
 # allowlist: the reason is what the next reader needs.
 MCP_NOT_CALLED: dict[tuple[str, str], str] = {
+    # The five GitHub-credential routes. They are one decision, not five: a credential is
+    # granted by a human in a browser, and every one of these either starts that flow or
+    # reconfigures what it grants. A chat window cannot complete an OAuth leg -- the operator
+    # has to approve on github.com -- so a tool here could only ever hand a model a URL and a
+    # reason to nag. Worse, `POST /github-app` and `DELETE /github-app` are deployment-wide:
+    # one would mint a *new* credential provider the whole fleet depends on, the other would
+    # revoke every repository's authorisation at once. Neither belongs behind a prompt.
+    ("GET", "/github-app"): (
+        "Whether a GitHub App is connected is a setup question an operator answers on the "
+        "console's own Connect GitHub page, with the Install and Authorise actions in front of "
+        "them. A tool that reported `connected: false` could not do anything about it."
+    ),
+    ("POST", "/github-app"): (
+        "Creating the deployment's one OAuth2 credential provider, and handing back a GitHub "
+        "App manifest for a **browser** to POST with the operator's own github.com session. "
+        "There is no step here a chat window can take, and the provider is fleet-wide: a "
+        "second one has a second callbackUrl and would silently orphan the app already "
+        "pointing at the first."
+    ),
+    ("POST", "/github-app/conversions"): (
+        "The return leg of that browser flow -- it spends a single-use code GitHub appended to "
+        "a redirect the console received. Nothing outside that redirect ever holds the code."
+    ),
+    # `DELETE /github-app` needs no entry: it is a DELETE, and
+    # `test_the_mcp_server_can_only_reach_allowed_methods` already makes it unreachable from
+    # this package -- `ApiClient.ALLOWED_METHODS` is `{"GET", "POST"}`. That is the stronger
+    # statement, and it is the same one that keeps deregistering a repository console-only.
+    ("POST", "/configurations/{configId}/github-authorize"): (
+        "Starts the 3LO leg for one repository and returns a URL a human has to open and "
+        "approve. A model cannot approve it, and the URL is single-use and expires in ten "
+        "minutes -- so a tool would mostly hand back expired URLs."
+    ),
+    ("POST", "/configurations/{configId}/github-authorize/complete"): (
+        "The return leg of that flow, and it is reachable only from the browser AgentCore "
+        "redirected: its `sessionUri` arrives as a query parameter on the console's own "
+        "landing page and exists nowhere a chat window can see. A tool would have nothing to "
+        "pass it."
+    ),
+    ("GET", "/configurations/{configId}/github-status"): (
+        "It reaches a verdict by **writing** a throwaway ref to the repository, which is the "
+        "only check that proves a GitHub App can push. That is the right cost for an operator "
+        "pressing a button and the wrong one for a tool a model may call in a loop; "
+        "`get_repository` already reports whether a repository is usable."
+    ),
     ("GET", "/configurations/{configId}/memory"): (
         "An operator's read of the memory data plane, not a model's. The container already "
         "has `memory_tools` over its own repository's memory inside a run, so a seventh tool "
@@ -274,12 +318,13 @@ def test_the_mcp_server_can_only_reach_allowed_methods() -> None:
     """Why this file does not assert an equality on the MCP side.
 
     Five wired routes are unreachable from this package by construction today: `PATCH` and
-    `DELETE /configurations/{configId}`, `PUT /configurations/{configId}/github-token`, and
-    `PATCH` and `DELETE /cards/{cardId}`. Asserting equality would force a bogus
-    `MCP_NOT_CALLED` entry for each and bury the actual reason, which is
-    `ApiClient.ALLOWED_METHODS`: teardown takes the runtime, the execution role and the
-    GitHub secret with it (invariant 22), so it is a human at a terminal and no prompt
-    injection can start it from a chat window. So the rule is what gets asserted.
+    `DELETE /configurations/{configId}`, `DELETE /github-app`, and `PATCH` and
+    `DELETE /cards/{cardId}`. Asserting equality would force a bogus `MCP_NOT_CALLED` entry
+    for each and bury the actual reason, which is `ApiClient.ALLOWED_METHODS`: deregistering
+    takes the runtime, the memory and the execution role with it (invariant 22) and
+    `DELETE /github-app` revokes every repository's GitHub authorisation at once, so both are
+    a human at a terminal and no prompt injection can start one from a chat window. So the
+    rule is what gets asserted.
     """
     assert set(ApiClient.ALLOWED_METHODS) == {"GET", "POST"}, (
         "ApiClient.ALLOWED_METHODS is the whole safety story of this package. Widening it "

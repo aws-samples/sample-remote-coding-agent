@@ -163,10 +163,6 @@ def _payload(task: Mapping[str, Any], config: Mapping[str, Any], resume: bool) -
         "repository": config.get("repository", ""),
         "repositoryUrl": config.get("repositoryUrl", ""),
         "defaultBranch": config.get("defaultBranch", ""),
-        # Read by `nodes/checkout.py` and `nodes/submit.py` through `store.github_token`,
-        # and sent by nothing at all until the contract test asked who consumed it: a
-        # container without it clones no private repository and opens no pull request.
-        "secretArn": config.get("secretArn", ""),
         "verifyCommand": config.get("verifyCommand", ""),
         "setupCommand": config.get("setupCommand", ""),
         "resume": resume,

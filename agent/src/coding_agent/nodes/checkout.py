@@ -174,7 +174,13 @@ async def checkout(state: TaskState) -> dict[str, Any]:
     if not (repo_dir / ".git").exists():
         # A resume finds the clone already there and must not re-clone over it.
         source = state.get("cloneSource") or f"https://github.com/{state['repository']}.git"
-        token = store.github_token(state["secretArn"]) if state.get("secretArn") else None
+        # Keyed on `configId`, which is also the 3LO `userId` the operator's authorisation
+        # is stored under -- so the clone needs no credential on the state and there is no
+        # secret ARN to carry. `""` means "this repository is not authorised yet", which
+        # `git_ops.clone` turns into an unauthenticated clone: that is correct for a public
+        # repository and fails with GitHub's own 404 for a private one, which is a better
+        # message than anything this node could invent.
+        token = store.github_token(state.get("configId", "")) or None
         log.info("cloning %s", state.get("repository") or source)
         git_ops.clone(source, repo_dir, token=token)
     else:

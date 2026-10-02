@@ -40,6 +40,11 @@ export function mount(root) {
     ui.el("div", { class: "sidebar-head" }, [
       ui.el("h1", { class: "brand" }, "Remote coding agent"),
       ui.el("a", { class: "btn btn-primary btn-block", href: "#/register" }, "+ Add repository"),
+      // Always reachable, not just on the empty state: the GitHub App is one object shared
+      // by every repository, so an operator has reason to come back to it long after the
+      // first setup -- to install it on a repository they have just created, or to see which
+      // app this deployment is actually using.
+      ui.el("a", { class: "btn btn-quiet btn-block btn-small", href: "#/connect" }, "GitHub App"),
     ]),
     ui.el("nav", { class: "sidebar-nav", "aria-label": "Repositories" }, list),
     account,
@@ -112,7 +117,7 @@ export function mount(root) {
       list.append(ui.el("li", { class: "repo-empty tone-bad" }, error.message));
     });
 
-  // A repository provisions in about ten minutes and its status is what this list is
+  // A repository provisions in 8-12 minutes and its status is what this list is
   // for while it does, so the rail carries the one poll that is not a view's. It backs
   // off to 30 s like every other, and skips itself while the tab is hidden.
   const poll = activity.createPoll({

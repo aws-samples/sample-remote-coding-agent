@@ -45,7 +45,6 @@ _IMAGE = f"{_ACCOUNT}.dkr.ecr.{_REGION}.amazonaws.com/rca:latest"
 _OLD_IMAGE = f"{_ACCOUNT}.dkr.ecr.{_REGION}.amazonaws.com/rca:2f9c1aa"
 # An f-string rather than one literal: this names a secret, it is not one, and the name is what
 # a scanner reads.
-_SECRET_ARN = f"arn:aws:secretsmanager:{_REGION}:{_ACCOUNT}:secret:rca/github/cfg_abc123-AbCdEf"
 _PLAN_MODEL = "global.anthropic.claude-opus-4-5-20251101-v1:0"
 _CODE_MODEL = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
 _HAIKU_MODEL = "apac.anthropic.claude-haiku-4-5-20251001-v1:0"
@@ -84,7 +83,6 @@ def _seed(common: Any, **overrides: Any) -> dict[str, Any]:
         "repositoryUrl": "https://github.com/owner/repo",
         "status": "PENDING",
         "statusReason": "",
-        "secretArn": _SECRET_ARN,
         "createdAt": "2026-01-01T00:00:00.000Z",
         "updatedAt": "2026-01-01T00:00:00.000Z",
     }
@@ -204,7 +202,10 @@ def test_create_sends_the_mount_the_lifetime_and_the_work_root(
     assert call["networkConfiguration"] == {"networkMode": "PUBLIC"}
     # The container reads its own configuration and its own secret; it is told which.
     assert call["environmentVariables"]["CONFIG_ID"] == _CONFIG_ID
-    assert call["environmentVariables"]["SECRET_ARN"] == _SECRET_ARN
+    # `CONFIG_ID` and no credential variable: it is the only per-configuration value the
+    # container needs, because it is also the 3LO `userId` its GitHub credential is stored
+    # under. `SECRET_ARN` used to be here and went with the secret.
+    assert "SECRET_ARN" not in call["environmentVariables"]
     assert call["environmentVariables"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == _CODE_MODEL
     assert call["environmentVariables"]["CLAUDE_CODE_USE_BEDROCK"] == "1"
 
@@ -982,20 +983,24 @@ def test_the_role_is_created_under_one_path_behind_a_boundary(
 def test_the_trust_policy_fences_the_source_account_when_it_is_known(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The account comes off the configuration's own `secretArn` -- deliberately not from
-    `sts:GetCallerIdentity`, which would widen this Lambda's grant surface for a value
-    every provisioned configuration already carries."""
+    """The account comes from this Lambda's own environment -- deliberately not from
+    `sts:GetCallerIdentity`, which would widen its grant surface for a value the deploy
+    already knows at synth time.
+
+    It used to be parsed off the configuration's own `secretArn`, which worked only because
+    every configuration carried one. With the GitHub credential in AgentCore Identity's token
+    vault there is no per-configuration ARN left to read an account off, and the alternatives
+    -- the runtime ARN, the role ARN -- do not exist yet at the point `_create` needs it.
+    """
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    assert provisioner._account_and_region({"secretArn": _SECRET_ARN}) == (
-        "123456789012",
-        "ap-southeast-1",
-    )
+    assert provisioner._account_and_region({}) == ("123456789012", "ap-southeast-1")
     condition = provisioner._trust_policy("123456789012")["Statement"][0]["Condition"]
     assert condition == {"StringEquals": {"aws:SourceAccount": "123456789012"}}
 
-    # A half-written configuration still has to produce a policy IAM will accept, and a
+    # A local run with no environment still has to produce a policy IAM will accept, and a
     # literal `*` in `StringEquals` would deny every assume rather than allowing any.
+    monkeypatch.delenv("AWS_ACCOUNT_ID")
     account, region = provisioner._account_and_region({})
     assert (account, region) == ("*", "ap-southeast-1")
     assert "Condition" not in provisioner._trust_policy("*")["Statement"][0]
@@ -1009,7 +1014,7 @@ def test_the_execution_role_policy_is_fenced_to_one_configuration(
     `verifyCommand` is remote code execution in that container."""
     _fleet(monkeypatch)
     common, provisioner = _load("provisioner")
-    policy = provisioner._execution_role_policy({"configId": _CONFIG_ID, "secretArn": _SECRET_ARN})
+    policy = provisioner._execution_role_policy({"configId": _CONFIG_ID})
     statements = {statement["Sid"]: statement for statement in policy["Statement"]}
 
     for sid in ("ReadOwnConfiguration", "OwnTasks"):
@@ -1025,8 +1030,14 @@ def test_the_execution_role_policy_is_fenced_to_one_configuration(
         "dynamodb:UpdateItem",
         "dynamodb:Query",
     }
-    # The literal secret ARN, which is why rotation writes a new *version*.
-    assert statements["ReadOwnSecret"]["Resource"] == _SECRET_ARN
+    # The GitHub credential, and neither resource is a fence -- see
+    # `tests/test_api_grant_contract.py::test_the_github_credential_statement_is_as_narrow_as_the_service_permits`
+    # for the measurement that says why it cannot be one. No `secretsmanager:` at all.
+    assert statements["UseGitHubCredential"]["Action"] == [
+        "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+        "bedrock-agentcore:GetResourceOauth2Token",
+    ]
+    assert "secretsmanager:" not in json.dumps(policy)
     assert statements["WriteRuntimeLogs"]["Resource"].startswith(
         "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes"
     )
@@ -1039,24 +1050,24 @@ def test_the_execution_role_policy_is_fenced_to_one_configuration(
     )
 
     granted = json.dumps(policy)
-    # The configuration this policy was built from carries no `memoryId`, which is why the
-    # `"bedrock-agentcore:` clause below holds -- stated rather than left as a check that
-    # passes for a reason nobody wrote down.
+    # The configuration this policy was built from carries no `memoryId`, so there is no
+    # `UseOwnMemory` statement -- stated rather than left as a check that passes for a reason
+    # nobody wrote down. `"bedrock-agentcore:` is deliberately **not** in the forbidden list
+    # below any more: `UseGitHubCredential` names two of its actions and is this container's
+    # whole credential path.
     assert "UseOwnMemory" not in statements
-    for forbidden in ('"iam:', '"s3:', '"bedrock-agentcore:'):
-        assert forbidden not in granted, (
-            f"{forbidden} is not on the container's list. The `bedrock-agentcore:` clause "
-            f"holds because this configuration has no memory: the six data-plane actions a "
-            f"configuration *with* a `memoryId` carries are asserted in "
-            f"tests/test_api_grant_contract.py, which builds from a fixture that has one."
-        )
-    # `AuthenticateToEcr` is the *only* statement allowed a wildcard resource, because
-    # `ecr:GetAuthorizationToken` supports no resource types and a scoped ARN there matches
-    # no authorization at all. Every other statement names what it may touch, so the next
-    # wildcard to land here fails this test rather than passing unnoticed.
+    assert "bedrock-agentcore:CreateEvent" not in granted
+    for forbidden in ('"iam:', '"s3:', '"secretsmanager:'):
+        assert forbidden not in granted, f"{forbidden} is not on the container's list"
+    # Two statements may carry a wildcard resource, and both because the *service* leaves no
+    # alternative: `ecr:GetAuthorizationToken` supports no resource types at all, and
+    # `GetResourceOauth2Token` is denied on every narrower ARN that was measured against it
+    # (see `tests/test_api_grant_contract.py`). Every other statement names what it may touch,
+    # so the next wildcard to land here fails this test rather than passing unnoticed.
     assert statements["AuthenticateToEcr"]["Resource"] == "*"
+    assert "*" in statements["UseGitHubCredential"]["Resource"]
     for sid, statement in statements.items():
-        if sid != "AuthenticateToEcr":
+        if sid not in ("AuthenticateToEcr", "UseGitHubCredential"):
             assert statement["Resource"] != "*", f"{sid} may not carry a wildcard resource"
     assert all(statement["Effect"] == "Allow" for statement in policy["Statement"])
 
@@ -1068,7 +1079,7 @@ def test_the_bedrock_grant_is_not_region_scoped(aws: Any, monkeypatch: pytest.Mo
     the CLI inside the container, nowhere near this policy."""
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    policy = provisioner._execution_role_policy({"configId": _CONFIG_ID, "secretArn": _SECRET_ARN})
+    policy = provisioner._execution_role_policy({"configId": _CONFIG_ID})
     (invoke,) = [s for s in policy["Statement"] if s["Sid"] == "InvokeClaude"]
     assert "arn:aws:bedrock:*::foundation-model/anthropic.*" in invoke["Resource"]
     assert any(resource.endswith("inference-profile/*") for resource in invoke["Resource"])
@@ -1095,7 +1106,7 @@ def test_the_role_and_its_policy_are_rewritten_on_a_second_create(
     document = json.loads(document) if isinstance(document, str) else document
     assert {statement["Sid"] for statement in document["Statement"]} >= {
         "InvokeClaude",
-        "ReadOwnSecret",
+        "UseGitHubCredential",
         "OwnTasks",
     }
 
@@ -1336,7 +1347,7 @@ def test_a_configured_vpc_is_fleet_policy_not_carry_forward(
             "securityGroups": ["sg-0ccc"],
         },
     }
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN}
+    config = {"configId": _CONFIG_ID}
     live = runtime(agentRuntimeId=_RUNTIME_ID, networkConfiguration={"networkMode": "PUBLIC"})
     desired = provisioner._desired_runtime(live, config)
     assert desired["networkConfiguration"]["networkMode"] == "VPC"
@@ -1371,7 +1382,7 @@ def test_an_unset_subnet_list_never_moves_a_live_runtime_back_to_public_egress(
     This test is the only thing between that and a deploy nobody would look twice at."""
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN}
+    config = {"configId": _CONFIG_ID}
     vpc = {
         "networkMode": "VPC",
         "networkModeConfig": {
@@ -1467,7 +1478,7 @@ def test_each_converged_field_on_its_own_is_enough_to_issue_an_update(
     absent from this list on purpose -- they are carried forward, so they cannot drift."""
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    config = {"configId": _CONFIG_ID, "repository": "owner/repo"}
 
     converged = runtime(agentRuntimeId=_RUNTIME_ID)
     converged["environmentVariables"] = provisioner._desired_runtime(converged, config)[
@@ -1528,6 +1539,75 @@ def test_a_redelivery_of_a_converged_update_issues_no_call(
     assert stored["status"] == provisioner.READY, "a converged fleet does not sit in UPDATING"
 
 
+def test_update_rewrites_the_execution_role_even_when_the_runtime_is_converged(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A change to `_execution_role_policy` has to reach a configuration that is already
+    live, and `UPDATE` is the only path that can carry one.
+
+    The ordering is the test. The inline policy is not part of the runtime, so a policy-only
+    change leaves the runtime converged and `_matches_intent` returns early -- meaning a role
+    write placed after that check would never run on the one fleet that needs it. This test
+    therefore asserts both halves: the policy was rewritten **and** no `UpdateAgentRuntime`
+    was issued at all.
+
+    What getting it wrong costs is the expensive silent shape invariant 41 exists to prevent,
+    and it is asymmetric, which is why nothing earlier catches it: a grant the policy is
+    missing is a fact about the *container*, while `runs.queue_run` can only ask whether the
+    *API* can reach what it needs. So dispatch succeeds, the run clones, plans, codes and
+    verifies, and the missing permission surfaces as an empty credential at `submit`.
+
+    The stale policy seeded below is the real worked example -- `ReadOwnSecret`, from before
+    the GitHub credential moved into AgentCore Identity -- because a statement that no longer
+    exists anywhere in the tree cannot be rewritten by accident.
+    """
+    _fleet(monkeypatch)
+    common, provisioner = _load("provisioner")
+    _seed(common)
+    control = FakeAgentCore("bedrock-agentcore-control")
+    install(monkeypatch, common, control=control)
+
+    _run(provisioner, "CREATE")
+    runtime_id = _status(common)["agentRuntimeId"]
+    control.runtimes[runtime_id]["status"] = "READY"
+    _run(provisioner, "CHECK")
+    role_name = provisioner._role_name(_CONFIG_ID)
+
+    # Stand in for a role minted by an older deployment: a policy this code would never write
+    # now, naming a secret that no longer exists anywhere in the system.
+    common.iam.put_role_policy(
+        RoleName=role_name,
+        PolicyName=provisioner._POLICY_NAME,
+        PolicyDocument=json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Sid": "ReadOwnSecret",
+                        "Effect": "Allow",
+                        "Action": ["secretsmanager:GetSecretValue"],
+                        "Resource": "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:x",
+                    }
+                ],
+            }
+        ),
+    )
+
+    _run(provisioner, "UPDATE")
+
+    # The runtime really was converged, so this is the arm that would have skipped the write.
+    assert control.calls_to("UpdateAgentRuntime") == [], "the runtime matched intent"
+    written = common.iam.get_role_policy(RoleName=role_name, PolicyName=provisioner._POLICY_NAME)
+    document = written["PolicyDocument"]
+    document = json.loads(document) if isinstance(document, str) else document
+    sids = {statement["Sid"] for statement in document["Statement"]}
+    assert "UseGitHubCredential" in sids, (
+        "the update has to converge the inline policy, or a repository registered before a "
+        "policy change can never reach the credential it now needs"
+    )
+    assert "ReadOwnSecret" not in sids, "and the statement it replaced has to be gone"
+
+
 def test_update_of_a_configuration_with_no_runtime_yet_is_a_no_op(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1555,7 +1635,7 @@ def test_an_invalid_mount_path_is_refused_before_the_call(
     _common, provisioner = _load("provisioner")
     monkeypatch.setattr(provisioner, "MOUNT_PATH", "/mnt/workspace/nested")
     with pytest.raises(ValueError, match="mount path"):
-        provisioner._desired_runtime(None, {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN})
+        provisioner._desired_runtime(None, {"configId": _CONFIG_ID})
 
 
 # -- DELETE -----------------------------------------------------------------------
@@ -1565,13 +1645,15 @@ def test_delete_tears_down_in_dependency_order_and_removes_the_item_last(
     aws: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Invariant 22: this is the teardown path, not `cdk destroy` -- the tables are
-    `RETAIN`, so nothing else removes a configuration's runtime, role or secret."""
+    `RETAIN`, so nothing else removes a configuration's runtime, memory or role.
+
+    There is no secret in that list any more and nothing replaced it: the repository's GitHub
+    authorisation is keyed in the token vault on a `configId` that will never be issued again,
+    so removing the item is what makes it unreachable.
+    """
     _fleet(monkeypatch)
     common, provisioner = _load("provisioner")
-    secret = common.secrets.create_secret(
-        Name=f"rca/github/{_CONFIG_ID}", SecretString="github_pat_x"
-    )
-    _seed(common, secretArn=secret["ARN"])
+    _seed(common)
     control = FakeAgentCore("bedrock-agentcore-control")
     install(monkeypatch, common, control=control)
     _spy_sqs(monkeypatch, common)
@@ -1801,7 +1883,7 @@ def test_this_deployment_is_v2_only_and_says_so_without_an_environment_variable(
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
     assert provisioner.PLATFORM_VERSION == "V2"
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    config = {"configId": _CONFIG_ID, "repository": "owner/repo"}
     assert provisioner._desired_runtime(None, config)["platformVersion"] == "V2"
 
     # And it cannot be talked out of it from the environment.
@@ -1823,7 +1905,7 @@ def test_the_platform_version_is_fleet_policy_and_is_sent_on_create_and_update(
     """
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    config = {"configId": _CONFIG_ID, "repository": "owner/repo"}
 
     assert provisioner._desired_runtime(None, config)["platformVersion"] == "V2"
 
@@ -1850,7 +1932,7 @@ def test_a_runtime_that_reports_no_platform_version_is_drift_and_converges_once(
     """
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    config = {"configId": _CONFIG_ID, "repository": "owner/repo"}
 
     pre_v2 = runtime(agentRuntimeId=_RUNTIME_ID)
     pre_v2.pop("platformVersion")
@@ -1885,7 +1967,7 @@ def test_a_vendor_only_network_member_is_not_drift(
     subnets = "subnet-0aaa,subnet-0bbb"
     _fleet(monkeypatch, AGENT_SUBNET_IDS=subnets, AGENT_SECURITY_GROUP_IDS="sg-0ccc")
     _common, provisioner = _load("provisioner")
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    config = {"configId": _CONFIG_ID, "repository": "owner/repo"}
 
     live = runtime(agentRuntimeId=_RUNTIME_ID)
     live["networkConfiguration"] = {
@@ -1918,7 +2000,7 @@ def test_a_stale_member_this_code_wants_removed_is_still_drift(
     """
     _fleet(monkeypatch)
     _common, provisioner = _load("provisioner")
-    config = {"configId": _CONFIG_ID, "secretArn": _SECRET_ARN, "repository": "owner/repo"}
+    config = {"configId": _CONFIG_ID, "repository": "owner/repo"}
 
     live = runtime(agentRuntimeId=_RUNTIME_ID)
     live["networkConfiguration"] = {

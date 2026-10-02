@@ -98,7 +98,21 @@ _GRANTS: dict[tuple[str, str], set[str]] = {
         "sqs.send_message",
     },
     ("configurations", "runtime_update"): {"config_table.get_item", "sqs.send_message"},
-    ("configurations", "rotate_token"): {"config_table.get_item", "secrets.put_secret_value"},
+    # The two credential routes. Both read the configuration and then reach the token vault,
+    # and neither writes the item: the vault is the only authority on whether a repository is
+    # authorised, so a stored flag would be a second and staler answer. `github_status`
+    # additionally reaches GitHub through `github_probe`, which is not a boto3 client and so
+    # is not in this vocabulary.
+    ("configurations", "github_authorize"): {
+        "config_table.get_item",
+        "agentcore_data.get_workload_access_token_for_user_id",
+        "agentcore_data.get_resource_oauth2_token",
+    },
+    ("configurations", "github_status"): {
+        "config_table.get_item",
+        "agentcore_data.get_workload_access_token_for_user_id",
+        "agentcore_data.get_resource_oauth2_token",
+    },
     ("configurations", "memory"): {
         "config_table.get_item",
         # The two read-only data-plane operations, granted by `memory:read` in
@@ -369,7 +383,6 @@ def test_observability_imports_no_boto3() -> None:
 _CONFIG = {
     "configId": "cfg_0123456789ab",
     "repository": "owner/repo",
-    "secretArn": "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:rca/github/cfg_0123456789ab-AbCdEf",
     # The one AgentCore Memory this repository owns, spelled the way the service does:
     # `<name>-<10 service-generated characters>`, which is botocore's own `memoryId` pattern.
     # This fixture is what closes the boundary's second set difference -- without a
@@ -472,15 +485,26 @@ def test_the_execution_role_can_neither_mint_a_role_nor_dispatch_a_runtime(
         if action.startswith("bedrock-agentcore:")
     }
     assert agentcore == {
+        # The six `UseOwnMemory` data-plane actions, on this repository's own memory's literal
+        # ARN.
         "bedrock-agentcore:CreateEvent",
         "bedrock-agentcore:ListEvents",
         "bedrock-agentcore:GetEvent",
         "bedrock-agentcore:RetrieveMemoryRecords",
         "bedrock-agentcore:ListMemoryRecords",
         "bedrock-agentcore:GetMemoryRecord",
+        # Plus the two `UseGitHubCredential` actions, which are the container's whole
+        # credential path and cannot be resource-fenced -- see
+        # `test_the_github_credential_statement_is_as_narrow_as_the_service_permits`. Neither
+        # reaches the Identity *control* plane: creating, updating or deleting a credential
+        # provider or a workload identity is absent here and denied by name in the boundary's
+        # `MayNotEscalate`, because a container that could reconfigure the provider every
+        # repository shares could point it at an OAuth app of its own choosing.
+        "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+        "bedrock-agentcore:GetResourceOauth2Token",
     }, (
-        f"the only AgentCore actions this role may carry are the six `UseOwnMemory` data-plane "
-        f"actions, on its own memory's literal ARN, got {sorted(agentcore)}"
+        f"this role may carry the six `UseOwnMemory` data-plane actions and the two "
+        f"`UseGitHubCredential` ones, and nothing else on AgentCore; got {sorted(agentcore)}"
     )
     for action in agentcore:
         for reachable in ("AgentRuntime", "Invoke", "Session"):
@@ -563,13 +587,44 @@ def test_configurations_access_is_get_item_only(policy: dict[str, Any]) -> None:
     )
 
 
-def test_the_secret_statement_names_the_literal_arn(policy: dict[str, Any]) -> None:
-    """Which is why `PUT /configurations/{id}/github-token` writes a new *version* of
-    that secret and never a second secret: a second one would be unreadable here."""
-    (statement,) = _statements(policy, "ReadOwnSecret")
-    assert _actions(statement) == ["secretsmanager:GetSecretValue"]
+def test_no_statement_reaches_secrets_manager_at_all(policy: dict[str, Any]) -> None:
+    """There is no secret, so there is no `secretsmanager:` anywhere in a container's role.
+
+    This replaced a `ReadOwnSecret` statement naming one literal secret ARN, and the swap is
+    not a tightening -- see `test_the_github_credential_statement_is_as_narrow_as_the_service_permits`
+    below, which states what was given up. What is asserted here is only the half that did
+    improve: the container can no longer reach Secrets Manager under any name.
+    """
+    assert "secretsmanager:" not in json.dumps(policy)
+
+
+def test_the_github_credential_statement_is_as_narrow_as_the_service_permits(
+    policy: dict[str, Any],
+) -> None:
+    """Two actions, and **neither resource is a fence** -- which is the point of the test.
+
+    Measured against a throwaway role rather than assumed:
+    `GetWorkloadAccessTokenForUserId` is denied on an individual `workload-identity/<name>`
+    ARN and on `workload-identity-directory/default*`, and allowed only on
+    `workload-identity-directory/*`; `GetResourceOauth2Token` is denied on the credential
+    provider's own ARN, on `token-vault/default/*` and on `token-vault/*`, and allowed only on
+    `*`. There is no condition key for the 3LO user id.
+
+    So this statement cannot name one repository's credential the way `UseOwnMemory` names one
+    memory, and the test asserts the `*` deliberately: a future edit that *narrows* it will
+    fail here and send the reader to this docstring rather than shipping a role that cannot
+    fetch a token. What bounds the exposure instead is that a container can read exactly one
+    configuration item (invariant 31) and therefore knows exactly one random `configId`, plus
+    the GitHub App's own installation list -- stated in CLAUDE.md's "What remains exposed".
+    """
+    (statement,) = _statements(policy, "UseGitHubCredential")
+    assert _actions(statement) == [
+        "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+        "bedrock-agentcore:GetResourceOauth2Token",
+    ]
     assert _resources(statement) == [
-        "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:rca/github/cfg_0123456789ab-AbCdEf"
+        "arn:aws:bedrock-agentcore:ap-southeast-1:123456789012:workload-identity-directory/*",
+        "*",
     ]
 
 
@@ -668,8 +723,8 @@ def test_a_policy_for_a_configuration_with_no_memory_omits_the_memory_statement(
             "a configuration with no memory gets no memory statement -- not an Allow with an "
             "empty resource, and not one with an empty action list"
         )
-        assert "bedrock-agentcore:" not in json.dumps(document), (
-            "with no `memoryId` the per-configuration execution role must carry no AgentCore "
+        assert "bedrock-agentcore:CreateEvent" not in json.dumps(document), (
+            "with no `memoryId` the per-configuration execution role must carry no memory "
             "permission at all: an ARN ending at `memory/` matches nothing an operator "
             "intended, and this is the state a swallowed `CreateMemory` failure produces"
         )

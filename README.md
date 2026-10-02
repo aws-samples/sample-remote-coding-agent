@@ -34,49 +34,55 @@ it does not make untrusted code safe. A runtime or publishing failure may produc
 
 ### Prerequisites
 
-- Clone the repository
 - A dedicated AWS account, with credentials for your intended profile and region.
 - Docker running, Python ≥ 3.11 (tested with 3.12), `uv`, Node ≥ 20, and the AWS CLI.
 - A trusted, disposable GitHub repository with **a default branch that already builds and passes its tests**. The agent never guesses how to build a repository. It reads a root `Makefile` with a `setup:` (or `bootstrap:`) target and a `test:` target, or a root `package.json` with `scripts.setup` and `scripts.test`. **An empty repository does not work.** With no default branch, the run fails at the very end when it opens the pull request (`422 Validation Failed`, `"field": "base"`). With no test entry point, every PR comes back as an unverified draft. If your repository is empty, set it up with one of the options below **before you register it**.
-- A **GitHub fine-grained personal access token (PAT)**  with `contents: write` and `pull requests: write` permissions scoped to the repository you'd like to work on.
+- A GitHub account you can create an app under. No token to paste — step 3 creates a **GitHub App**; see [GitHub access](#github-access-read-this).
 
 Preflight checks AgentCore/model availability and prints any required CDK bootstrap command. The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI works without it.
 
 #### Setting up an empty repository
 
-##### WebUI instructions
-
-Follow these instructions if you do not intend to use Claude Code with this project. You need `git`, `make`, `python3`, and git credentials that can push to the repository (for example `gh auth login`). The script pushes with those credentials, not with the PAT.
-
-1. With this repository as your working directory run `scripts/scaffold.sh <owner>/<repo>`. A GitHub URL or the path to a local clone also works.
-2. The script clones the repository into a temporary directory, writes a minimal Python project (a `Makefile` with `setup` and `test` targets, one function in `src/`, and its pytest tests), and runs `make setup` and `make test`. When both pass, it asks before it pushes the project as `main`.
-
-##### Claude Code instructions
-
-Follow these instructions if you intend to use Claude Code with this project.
-
-1. Install the plugin ([Option B](#option-b-claude-code), step 4) and clone the repository locally.
-2. Run `/sample-rca:scaffold` in Claude Code from the clone. It writes a Python project, or TypeScript if you ask for it by name.
-3. The skill runs the project's setup and tests, pushes it as `main` after you confirm, and offers to register the repository.
+- **Web UI:** from this checkout, run `scripts/scaffold.sh <owner>/<repo>` (a GitHub URL or a local clone's path also works). It needs `git`, `make`, `python3` and git credentials that can push, for example `gh auth login`, and pushes with those rather than through the GitHub App. It clones into a temporary directory, writes a minimal Python project (a `Makefile` with `setup` and `test` targets, one function in `src/`, and its pytest tests), runs `make setup` and `make test`, and when both pass asks before pushing it as `main`.
+- **Claude Code:** install the plugin ([Option B](#option-b-claude-code), step 4), clone the repository, and run `/sample-rca:scaffold` from the clone. It writes a Python project, or TypeScript if you ask for it by name, runs its setup and tests, pushes it as `main` after you confirm, and offers to register the repository.
 
 ### Deploy it
 
-1. **Deploy the fleet.** Run these commands with this repository as the working directory. 
+1. **Deploy the fleet.**
 
    ```bash
+   git clone https://github.com/aws-samples/sample-remote-coding-agent
    cd sample-remote-coding-agent
    make setup
    make preflight
    make deploy EMAIL=you@example.com
    ```
 
-   **Read the account and region from `make preflight` before deploying.** Preflight is read-only;
-   deploy starts spending without confirmation. Allow **15–25 min**, mostly the local image build.
+   **Read the account and region from `make preflight` before deploying.** Preflight is read-only; deploy starts spending without confirmation. Allow **15–25 min**, mostly the local image build.
    On completion it prints the console URL, API URL, and region. Check known issues if it stalls.
 
 2. **Sign in at the console URL.** Cognito emails a temporary password to `EMAIL`; check spam and change it on first sign-in.
 
-3. **Register a disposable repository** with **+ Add repository**. Enter the repository URL first, then use the token you created earlier.  Wait **8–12 min** for `READY`; starting sooner returns `409 ConfigurationNotReady`.
+3. **Connect GitHub.** With nothing registered the console opens on **Connect GitHub**.
+   Press **Create the GitHub App on GitHub** — the app arrives pre-described, you confirm it
+   there, and nothing is copied or pasted. Then **Install on GitHub** and choose **Only
+   select repositories**: that list bounds which repositories the agent can reach.
+
+4. **Register a disposable repository** with **+ Add repository**: the URL, Advanced folded,
+   no credential field. The authorisation starts on its own — it takes you to GitHub and brings
+   you back, and GitHub asks for consent only the first time. The **GitHub access** panel
+   confirms it by writing a throwaway branch and deleting it. If that panel says the app cannot
+   write here, the app is **not installed** on this repository: installing and authorising are
+   separate grants, both required, and the panel links the fix. **Authorise GitHub** is there
+   to retry or to use a different GitHub account.
+
+   Provisioning runs in parallel and takes **8–12 min** to reach `READY`. A task started
+   sooner returns `409 ConfigurationNotReady`; one started before authorising returns
+   `409 GitHubNotAuthorized`.
+
+   The agent pushes branches and opens PRs. Start with a small repository whose tests already
+   pass. Declare setup/test entry points so verification can run:
+   [command detection details](CLAUDE.md#why-the-makefile-targets-are-named-that-way).
 
 ### Choose how to submit tasks
 
@@ -147,7 +153,7 @@ It writes status/activity to DynamoDB; the console polls through the API. AgentC
 is created at registration and deleted at deregistration. Tasks can retrieve earlier lessons;
 a repository without memory runs without it.
 
-VPC endpoints connect runtime traffic to **Bedrock, AgentCore, Secrets Manager,
+VPC endpoints connect runtime traffic to **Bedrock, AgentCore,
 DynamoDB, ECR API/Docker, S3, and CloudWatch Logs**. Lambda runs outside the agent VPC.
 GitHub receives source code through clone/push/PR traffic. Package installation reaches
 PyPI/npm, and the documentation tool reaches AWS documentation. These are intended destinations,
@@ -165,9 +171,10 @@ cap, and does not cover every service. Monitor your actual account charges.
 [Budget configuration](infra/stacks/account_stack.py)
 
 Deregister every repository in the console **first** — settings → **Deregister**, 1-3 min each —
-and only then destroy the stacks. The other order orphans the runtime, the IAM role and the
-secret, which no stack owns and which keep costing money. Follow the
-[exact five-stack teardown commands](CLAUDE.md#tearing-a-fleet-down) for your prefix and region.
+then **Disconnect** on the GitHub App page, and only then destroy the stacks. The other order
+orphans the runtime, the IAM role, the memory and the credential provider, which no stack owns
+and which keep costing money. The GitHub App belongs to your GitHub account; delete it there.
+Follow the [exact five-stack teardown](CLAUDE.md#tearing-a-fleet-down) for your prefix and region.
 Stack deletion retains tables, the Cognito pool, access logs, bootstrap ECR images, and runtime
 log groups. Review the [retained-resource cleanup table](CLAUDE.md#what-deliberately-survives-a-destroy)
 before deleting them; some are the only history of your runs.
@@ -190,21 +197,44 @@ Run `make setup`, `make test`, and `make lint`. Local tests use fake AWS service
 See [contribution guidelines](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md),
 and [maintainer reference](CLAUDE.md). Keep diagrams and previews in sync with UI changes.
 
+## GitHub access: read this
+
+**Nothing here stores a GitHub token.** One GitHub App serves the deployment, AgentCore
+Identity's token vault holds its client secret, and each container fetches a short-lived
+token when it needs one. There is no secret to rotate and no credential field on any page.
+
+Two steps are separate and both are required:
+
+| | what it does | where |
+|---|---|---|
+| **Install** | grants the app access to repositories | GitHub, per repository |
+| **Authorise** | gives the agent a credential to act with | console, per repository |
+
+**The installation list is the blast radius.** A token issued to one repository's container
+can write to *every* repository the app is installed on. That is how a GitHub App works and it
+is the one thing this design gives up against a per-repository fine-grained token, so install
+it only where you intend to run the agent. This system runs an arbitrary repository's own setup
+and test commands with a model pointed at them and does not prevent prompt injection, so treat
+every token the app can issue as reachable by that code. **Use a GitHub account that owns
+nothing you mind losing** — the same bound this sample asks for on the AWS side.
+
+Disconnecting on the **GitHub App** page revokes every repository's authorisation at once. The
+app belongs to your GitHub account; delete it there when you are finished.
+
 ## Limitations
 
-- **The token is minted by hand.** GitHub has no API to create a PAT, so this cannot be
-  automated. The alternative is a GitHub App, which needs an App registered and installed
-  before the first repository can be added — more setup than it saves for one repository.
-- **A classic token's blast radius is its owner's whole account**, because GitHub cannot limit one to a single repository. That is why the prerequisites ask for a fine-grained token.
-- **Commit attribution** defaults to an address that matches no GitHub account, so checks
-  that gate on it will refuse the agent's pull requests. Pass `-c gitAuthorName=` and
-  `-c gitAuthorEmail=` at deploy time to fix it.
+- **Installing the app is a manual step**, once per repository. GitHub requires a human to
+  grant an app access to a repository, and authorising requires a human to approve it — there
+  is no machine-to-machine path, because GitHub implements no `client_credentials` grant.
+- **One app covers every registered repository**, so its installation list is the blast
+  radius, as above.
 - **AgentCore Runtime V2 only**, so deployment is limited to `us-east-1`, `us-east-2`,
   `us-west-2`, `eu-west-1` and `ap-northeast-1`.
 
 ## Security
 
-Protect the default branch of the repository you register. Use a fine-grained token scoped to that one repository, as described in [Prerequisites](#prerequisites).
+Protect the default branch of the repository you register. Read
+[GitHub access](#github-access-read-this) before installing the app anywhere.
 The account boundary does not stop repository code from making outbound HTTPS requests.
 [Remaining exposure](CLAUDE.md#what-remains-exposed)
 

@@ -49,7 +49,7 @@ CONFIG_EXAMPLE = WEB / "config.example.js"
 # so an empty directory (or a module deleted in a refactor) fails here instead of turning
 # every parametrised test in this file into a vacuous pass.
 MODULES = ("activity", "api", "app", "auth", "configs", "status", "transitions", "ui")
-VIEWS = ("board", "card", "register", "sidebar", "task")
+VIEWS = ("board", "card", "connect", "register", "sidebar", "task")
 
 # `from "./x.js"` and `import("./views/x.js")`: `app.js` loads the four routed views
 # dynamically, so a `from`-only reader would see none of them.
@@ -243,7 +243,14 @@ def test_there_is_one_http_boundary_and_one_credential_module() -> None:
         f"one exception and is scoped deliberately -- a PKCE code exchange with Cognito is "
         f"not an API call and must not pass through the API's own bearer plumbing."
     )
-    offenders = _files_containing("Authorization")
+    # The **header**, not the word. A bare substring search matched
+    # `completeGitHubAuthorization` and would match any future OAuth-flavoured identifier --
+    # the console's vocabulary now genuinely contains "authorization" because the 3LO flow
+    # does. The lookarounds pin the header's own spelling (`{ Authorization: ... }`), which is
+    # what the claim below is actually about, so the test keeps its teeth without going off on
+    # a function name.
+    header = re.compile(r"(?<![A-Za-z])Authorization(?![A-Za-z])")
+    offenders = {name for name, text in _sources().items() if header.search(text)}
     assert offenders == {"js/api.js"}, (
         f"the bearer header is spelled in {sorted(offenders)}. One place attaches a "
         f"credential to a request, so there is one place to audit when the token type "
@@ -369,11 +376,15 @@ def test_the_router_is_hash_only_so_cloudfront_never_sees_a_deep_link() -> None:
         f"text/html -- in the same change that adds the route."
     )
     offenders = _files_containing("replaceState")
-    assert offenders == {"js/auth.js"}, (
-        f"`replaceState` appears in {sorted(offenders)}. The one permitted use is auth.js "
-        f"stripping the OAuth `?code=` out of the address bar, which rewrites the query and "
-        f"leaves `location.pathname` exactly as it was. Anywhere else it is a path-based "
-        f"route wearing a quieter name, and it costs the same thing: `web_stack.py` has no "
+    assert offenders == {"js/auth.js", "js/views/connect.js", "js/views/register.js"}, (
+        f"`replaceState` appears in {sorted(offenders)}. The three permitted uses are the "
+        f"same shape -- a single-use query parameter that must not survive a reload, removed "
+        f"without touching the path: Cognito's OAuth `?code=` in `auth.js`, GitHub's "
+        f"app-manifest `?code=` in `views/connect.js`, and AgentCore's `?session_id=` in "
+        f"`views/register.js`, which completes an authorisation and would report a failure "
+        f"for a successful one if it were spent twice. Each rewrites the **query** and leaves "
+        f"`location.pathname` exactly as it was. Anywhere else it is a path-based route "
+        f"wearing a quieter name, and it costs the same thing: `web_stack.py` has no "
         f"`error_responses` to catch the path, so the deep link is S3's "
         f"<Error><Code>AccessDenied</Code></Error> XML."
     )
@@ -504,45 +515,247 @@ def test_the_example_configuration_names_no_real_deployment() -> None:
     )
 
 
-def test_the_register_view_prefills_the_token_scope_and_warns_about_it() -> None:
-    """The register view links at a token page with the scope already ticked, and says what
-    that scope costs.
+def test_the_register_view_asks_for_no_credential_and_says_why() -> None:
+    """Registration takes a repository URL and nothing else, and the view has to *say* so.
 
-    The link points at the **classic** page, and that is the whole reason it can prefill:
-    `/settings/tokens/new` honours `scopes` and `description`, while GitHub documents no query
-    parameters for `/settings/personal-access-tokens/new` and ignores them. Getting a classic
-    token is ~3 decisions against ~9 in a list of about fifty permissions, which is the churn
-    this removes.
+    This replaced a pair of links to GitHub's token pages. There is no token to paste -- one
+    GitHub App serves the deployment and AgentCore Identity holds its credentials -- and the
+    absence needs explaining at the point an operator looks for the field, or they conclude the
+    form is broken. So two things are asserted: that no password input and no token page URL
+    survive anywhere in this view, and that it points at the two steps that replaced them.
 
-    What it must not do is remove the churn quietly. A classic token cannot be limited to one
-    repository, so the view has to say so where the operator is choosing, and the fine-grained
-    page has to stay offered as the tighter option. Asserted as text over the module, like
-    every other contract here: there is no DOM in this suite.
+    Asserted as text over the module, like every other contract here: there is no DOM in this
+    suite.
     """
     source = (WEB / "js" / "views" / "register.js").read_text(encoding="utf-8")
 
-    assert "https://github.com/settings/tokens/new" in source, (
-        "the primary link must be the classic token page -- it is the only one that honours "
-        "`?scopes=`, which is what makes a prefilled link possible at all."
-    )
-    assert "scopes: scope" in source or "scopes=" in source, (
-        "the link must pass the scope as a query parameter, or nothing is prefilled and the "
-        "operator is back to picking from a list."
-    )
-    assert "https://github.com/settings/personal-access-tokens/new" in source, (
-        "the fine-grained page must stay offered: it is the only shape that limits a leaked "
-        "token to one repository."
-    )
-    assert "not" in source and "limited to one repository" in source, (
-        "a classic token reaches every repository its owner can. The view must say so at the "
-        "point of choice, not only in the README."
-    )
-    for scope in ("repo", "public_repo"):
-        assert scope in source, (
-            f"the view must name the {scope!r} scope: `repo` is what the link pre-ticks, and "
-            "`public_repo` is the tighter answer for a public repository, which a URL cannot "
-            "know."
+    for forbidden in (
+        "github.com/settings/tokens/new",
+        "github.com/settings/personal-access-tokens/new",
+        "github_pat_",
+        'type: "password"',
+    ):
+        assert forbidden not in source, (
+            f"{forbidden!r} is still in the register view. There is no credential field any "
+            f"more, and a token input that survived a refactor would be storing something the "
+            f"rest of the system has nowhere to put."
         )
+    assert "No token to paste." in source, (
+        "an operator who expects to paste a token looks for the field; its absence has to be "
+        "explained where they look, not discovered as a 400 later."
+    )
+    assert "#/connect" in source, (
+        "the view has to link the GitHub App page, which is where installing happens and the "
+        "one step this form cannot do for them."
+    )
+    assert "Authorise GitHub" in source, (
+        "the settings half owns the per-repository authorisation, and it must be named: "
+        "installing and authorising are separate steps and both are needed."
+    )
+    assert "installUrl" in source, (
+        "the authorised-but-cannot-write state is the most likely mistake in the whole setup, "
+        "and its fix is on GitHub -- so the panel has to carry the install link."
+    )
+
+
+def test_the_manifest_return_marker_is_the_handlers_spelling() -> None:
+    """`?code=` is not the console's alone, and the marker that tells the two apart is spelled
+    in three files.
+
+    Cognito's PKCE sign-in returns to the console origin with a `code`, and so does GitHub's
+    app-manifest flow. `auth.complete()` runs first at boot, and without a way to tell whose
+    code it is, it claimed GitHub's, stripped the query before `views/connect.js` could read
+    it, and reported "that sign-in did not start in this tab" -- so the app was created on
+    GitHub and the conversion could never run. Measured on the live deployment.
+
+    The API owns the spelling because it owns the `redirect_url` it hands GitHub. This asserts
+    the two browser files agree with it, because a mismatch is **silent in the direction that
+    matters**: sign-in keeps working, and only the app conversion stops happening.
+    """
+    from handlers import github_app
+
+    param = github_app.MANIFEST_RETURN_PARAM
+    value = github_app.MANIFEST_RETURN_VALUE
+
+    auth_js = (JS / "auth.js").read_text(encoding="utf-8")
+    assert f'FOREIGN_FLOW_PARAM = "{param}"' in auth_js, (
+        f"auth.js does not define the marker parameter as {param!r}, so it will claim and "
+        f"spend GitHub's manifest code"
+    )
+    assert f'FOREIGN_FLOW_VALUE = "{value}"' in auth_js
+
+    # The guard has to come **before** the query is stripped, or the marker changes nothing.
+    # Asserted as presence first, so removing the guard fails with this sentence rather than
+    # with a `ValueError` from `str.index` that says nothing about what broke.
+    needle = "FOREIGN_FLOW_PARAM) === FOREIGN_FLOW_VALUE"
+    assert needle in auth_js, (
+        "auth.js has no marker guard in complete(), so it will claim GitHub's manifest code, "
+        "strip the query, and the app conversion can never run"
+    )
+    guard = auth_js.index(needle)
+    strip = auth_js.index("window.history.replaceState")
+    assert guard < strip, (
+        "auth.js strips the query before checking the marker, so GitHub's code is destroyed "
+        "before views/connect.js can read it -- the exact failure this marker exists to stop"
+    )
+
+    app_js = (JS / "app.js").read_text(encoding="utf-8")
+    assert "auth.FOREIGN_FLOW_PARAM" in app_js, (
+        "app.js must route a marked return to #/connect, and must key on the marker rather "
+        "than on `code`: auth.complete() has already stripped a Cognito code by then, so a "
+        "check on `code` alone is dead"
+    )
+    connect_js = (JS / "views" / "connect.js").read_text(encoding="utf-8")
+    assert "auth.FOREIGN_FLOW_PARAM" in connect_js, (
+        "connect.js must clear the marker with the spent code, or auth.complete() stands "
+        "aside forever in this tab and a real sign-in return is never claimed"
+    )
+
+
+def test_the_authorisation_panel_comes_before_everything_it_blocks() -> None:
+    """Authorising is the last required step and the easiest to miss, so it leads the page.
+
+    Reported from a live walkthrough: the panel sat below Settings, read as one more optional
+    section, and was skipped -- which is expensive, because nothing else on that page is
+    actionable until it is done and a task is refused with `409 GitHubNotAuthorized`.
+
+    Two things are asserted, and the second is the one prose cannot hold: the panel is above
+    the repository's own facts, and within the unauthorised state the **button precedes the
+    paragraph**. An operator reading top to bottom should meet the action before the
+    explanation of it.
+    """
+    source = (JS / "views" / "register.js").read_text(encoding="utf-8")
+
+    access = source.index('ui.panel("GitHub access"')
+    repository = source.index('ui.panel("Repository", [facts])')
+    settings = source.index('ui.panel("Settings"')
+    assert access < repository < settings, (
+        "the GitHub access panel must be the first on the settings page: it is the only "
+        "remaining required step, and below the others it reads as optional"
+    )
+
+    unauthorised = source.index("This repository is not authorised yet")
+    button = source.index("[authorize]", unauthorised)
+    paragraph = source.index("Authorising starts on its own", unauthorised)
+    assert button < paragraph, (
+        "in the unauthorised state the button has to come before the description of it, or "
+        "the operator reads an explanation and then has to hunt for the control"
+    )
+
+
+def test_the_authorisation_starts_itself_and_cannot_loop() -> None:
+    """The console starts the authorisation rather than waiting to be asked -- and the guards
+    are the test, because the failure mode is worse than the problem it solves.
+
+    Authorising needs the operator's browser but not their decision: GitHub asks for consent
+    once per user per app, and every authorisation after that is a silent redirect. So the
+    happy path has no console button in it. An automatic redirect fired whenever the status
+    reads unauthorised, though, bounces the browser to GitHub and back **forever** when
+    completion keeps failing -- which is the exact state a missing
+    `secretsmanager:GetSecretValue` grant produced, where an error panel was the only useful
+    outcome.
+
+    Three guards, asserted individually because any one of them missing restores the loop:
+    never on a load that is finishing an authorisation, never twice for one configuration in
+    one tab, and never when the status could not be read.
+    """
+    source = (JS / "views" / "register.js").read_text(encoding="utf-8")
+    start = source.index("async function autoStartAuthorizeIfNeeded")
+    body = source[start : source.index("\n  }", start)]
+
+    assert "returnedFromAuthorization" in body, (
+        "a load that came back from GitHub must not start another authorisation, or a "
+        "completion that fails redirects forever instead of reporting itself"
+    )
+    assert "auth.tryOnce(" in body, (
+        "the attempt has to be one-shot per configuration per tab; without it a status that "
+        "stays unauthorised re-triggers on every read"
+    )
+    assert "authFailure" in body, (
+        "a status that could not be read is not evidence that the repository is "
+        "unauthorised, so it must not start a redirect"
+    )
+
+    # The return leg sets the flag before it can fail, or the guard does not hold.
+    complete = source.index("async function completeAuthorizationIfReturning")
+    flag = source.index("returnedFromAuthorization = true", complete)
+    first_await = source.index("await api.completeGitHubAuthorization", complete)
+    assert flag < first_await, (
+        "`returnedFromAuthorization` must be set before the completion call, so a completion "
+        "that throws still cannot be followed by a fresh redirect"
+    )
+
+    # And the periodic refresh must never redirect: only the first read may.
+    assert "refreshAuth({ mayAutoStart: true })" in source
+    assert source.count("mayAutoStart: true") == 1, (
+        "exactly one call site may start an authorisation -- the first read on mount. A "
+        "visibilitychange or poll refresh that could redirect would hijack a tab the operator "
+        "has just come back to."
+    )
+
+
+def test_the_authorise_button_stays_busy_until_the_page_is_replaced() -> None:
+    """A button whose work ends in a navigation must not go back to looking idle.
+
+    Reported from a live walkthrough: clicking Authorise appeared to do nothing, so it was
+    clicked again -- the server log shows two authorisation sessions a minute apart. The cause
+    was in the view, not the API: `window.location.assign` does not block, so the `finally`
+    that cleared the control ran while the browser was still leaving, and `setRefusal` alone
+    only dims and sets a tooltip, which someone mid-click never sees.
+
+    Two things are asserted. The label changes, because that is the feedback visible without
+    hovering. And the navigation path **returns** rather than falling through to the cleanup,
+    so nothing clears the label or issues another request behind a page that is going away.
+    """
+    source = (JS / "views" / "register.js").read_text(encoding="utf-8")
+    start = source.index("async function startAuthorize")
+    end = source.index("async function refreshAuth", start)
+    body = source[start:end]
+
+    assert "ui.setBusy(" in body, (
+        "the authorise button has to change its label while it works: `setRefusal` dims it and "
+        "writes a tooltip, which is no feedback to someone who has just clicked"
+    )
+    assign = body.index("window.location.assign")
+    assert "return;" in body[assign : assign + 120], (
+        "the navigation path must return immediately after `assign`. Anything after it runs "
+        "while the browser is leaving, and clearing the busy state there puts the button back "
+        "to looking idle with the navigation still pending -- which is what caused the "
+        "double-click."
+    )
+    assert "ui.setBusy(button, null)" not in body[:assign], (
+        "nothing may clear the busy state before the navigation starts"
+    )
+
+
+def test_the_connect_view_is_the_only_place_a_github_app_is_created() -> None:
+    """One click, and the three things that make it one.
+
+    The manifest has to be POSTed as a **form** rather than fetched: the request carries the
+    operator's github.com session and ends in GitHub rendering its own confirmation, which is a
+    navigation and not a response this code may read. `request_oauth_on_install` has to be
+    false -- true bounces the operator into the OAuth leg before the provider holds any
+    credentials, and AgentCore's callback answers a bare validation error naming `cookie` and
+    `state`, which was a real dead end. And the callback URL in the manifest has to be
+    AgentCore's, never the console's, or the authorisation code never reaches the vault.
+    """
+    source = (WEB / "js" / "views" / "connect.js").read_text(encoding="utf-8")
+
+    assert 'method: "POST"' in source and "form.submit()" in source, (
+        "the manifest is submitted as a form in this tab; a fetch cannot carry the operator's "
+        "github.com session or end in GitHub's own confirmation page."
+    )
+    assert (
+        "manifestFormUrl" in source and "callbackUrl" not in source.split("renderConnected")[0]
+    ), (
+        "both the form target and the callback come from the API: this view builds no "
+        "github.com URL of its own, so there is one place the callback can be wrong."
+    )
     assert "noopener" in source, (
-        "the token links open pages where a credential is created, so they must carry rel=noopener."
+        "the links open GitHub, where an app is created and an authorisation granted."
+    )
+    assert "location.search" in source, (
+        "GitHub appends `?code=` to the bare origin, so the code is in the query and never in "
+        "the hash -- a query goes before a fragment, so a `#/connect` redirect_url would put "
+        "the code inside the fragment where URLSearchParams never sees it."
     )

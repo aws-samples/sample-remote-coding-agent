@@ -42,6 +42,7 @@ _REGION = "ap-southeast-1"
 _HANDLER_MODULES = (
     "_common",
     "observability",
+    "github_app",
     "runs",
     "provisioner",
     "configurations",
@@ -65,6 +66,16 @@ def load_handlers(*names: str) -> tuple[ModuleType, ...]:
     common = importlib.reload(importlib.import_module("handlers._common"))
     common.agentcore_control.cache_clear()
     common.agentcore_data.cache_clear()
+    # A default AgentCore **data-plane** fake, set on the freshly reloaded module rather than
+    # monkeypatched: moto answers `GetWorkloadAccessTokenForUserId` with "Not yet implemented",
+    # and `runs.queue_run` now calls it on every dispatch to refuse a repository with no
+    # GitHub authorisation. Without this every card-move and task-create test in the suite
+    # would have to opt in to a fake for a credential it is not about. A test that cares
+    # passes its own through `install`, which replaces this one.
+    #
+    # It defaults to **authorised**, because the alternative default -- every repository
+    # unauthorised -- would make the ordinary path the one nobody tests.
+    common.agentcore_data = lambda: FakeAgentCore("bedrock-agentcore")  # type: ignore[assignment]
     stale = [
         name for name in _HANDLER_MODULES[1:] if name in names or f"handlers.{name}" in sys.modules
     ]
@@ -145,6 +156,15 @@ class FakeAgentCore:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.runtimes: dict[str, dict[str, Any]] = dict(runtimes or {})
         self.memories: dict[str, dict[str, Any]] = {}
+        # The AgentCore Identity half. `authorized` is the set of 3LO `userId`s -- which this
+        # system keys on `configId` -- that the token vault holds a credential for, and
+        # `None` means "every one of them", which is the default on purpose: almost every
+        # test in the suite is about something else and a repository with no GitHub
+        # authorisation cannot queue a run at all (`runs.queue_run`). A test about the
+        # unauthorised path sets this to an explicit set.
+        self.authorized: set[str] | None = None
+        self.providers: dict[str, dict[str, Any]] = {}
+        self.workload_identities: dict[str, dict[str, Any]] = {}
         self.responses: dict[str, Any] = dict(responses or {})
         self.errors: dict[str, list[BaseException]] = {
             k: list(v) for k, v in (errors or {}).items()
@@ -185,6 +205,10 @@ class FakeAgentCore:
         return call
 
     def _default(self, operation: str, kwargs: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0911 -- one arm per AgentCore operation; a dict dispatch would need ten closures to say what ten `if`s say plainly
+        """The runtime and memory arms. Identity lives in `_identity_default`, split out
+        purely for the complexity bound -- one flat `if` chain over every AgentCore operation
+        this repository calls is past it, and nesting the two halves differently would make
+        the fake's shape stop resembling the service's."""
         if operation == "CreateAgentRuntime":
             runtime_id = f"{kwargs['agentRuntimeName']}-ABC123"
             item = runtime(
@@ -273,6 +297,121 @@ class FakeAgentCore:
         if operation == "DeleteMemory":
             self.memories.pop(kwargs["memoryId"], None)
             return {"memoryId": kwargs["memoryId"], "status": "DELETING"}
+        return self._identity_default(operation, kwargs)
+
+    def _identity_default(self, operation: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """The AgentCore Identity arms: the two-call token exchange, the one OAuth2 credential
+        provider and the one workload identity."""
+        if operation == "GetWorkloadAccessTokenForUserId":
+            # The `userId` is echoed into the opaque token so the exchange below can tell
+            # which identity it was minted for -- the real service carries it inside a signed
+            # blob, and a fake that dropped it could not model per-user isolation at all,
+            # which is the one property worth testing here.
+            return {"workloadAccessToken": f"wat.{kwargs['userId']}"}
+        if operation == "GetResourceOauth2Token":
+            user_id = str(kwargs["workloadIdentityToken"]).removeprefix("wat.")
+            if self.authorized is not None and user_id not in self.authorized:
+                # Two different answers for "not authorised", and the fake has to model both
+                # because the callers do. Measured against the live service: with a
+                # `resourceOauth2ReturnUrl` it answers an `authorizationUrl` and no
+                # `accessToken`; **without** one it refuses outright, because the absence of a
+                # return URL means "do not start a flow" and there is no token to hand back.
+                # The fake used to model only the first, which is why a 500 on the most
+                # ordinary state a new repository is in reached a live deployment with the
+                # suite green.
+                if not kwargs.get("resourceOauth2ReturnUrl"):
+                    raise client_error(
+                        "ValidationException",
+                        "You must provide a ResourceOauth2ReturnUrl to proceed with this flow",
+                        operation=operation,
+                    )
+                return {
+                    "authorizationUrl": f"https://github.com/login/oauth/authorize?state={user_id}"
+                }
+            return {"accessToken": f"ghu_{user_id}"}
+        return self._provider_default(operation, kwargs)
+
+    def _provider_default(self, operation: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """The credential provider and workload identity CRUD `github_app.py` drives."""
+        if operation == "CreateOauth2CredentialProvider":
+            name = kwargs["name"]
+            if name in self.providers:
+                raise client_error(
+                    "ConflictException", "provider exists", status=409, operation=operation
+                )
+            item = {
+                "name": name,
+                "credentialProviderArn": (
+                    f"arn:aws:bedrock-agentcore:{_REGION}:123456789012"
+                    f":token-vault/default/oauth2credentialprovider/{name}"
+                ),
+                # The per-provider callback, which is the value the whole connect flow is
+                # ordered around: assigned here and never changed by an update, exactly as
+                # measured against the real service.
+                "callbackUrl": (
+                    "https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/"
+                    "callback/00000000-0000-4000-8000-000000000000"
+                ),
+            }
+            self.providers[name] = item
+            return dict(item)
+        if operation == "GetOauth2CredentialProvider":
+            found = self.providers.get(kwargs["name"])
+            if found is None:
+                raise client_error(
+                    "ResourceNotFoundException", "no provider", status=404, operation=operation
+                )
+            return dict(found)
+        if operation == "UpdateOauth2CredentialProvider":
+            found = dict(self.providers.get(kwargs["name"]) or {"name": kwargs["name"]})
+            # Deliberately does NOT touch `callbackUrl`: `github_app.convert` relies on it
+            # surviving, and a fake that regenerated it would hide that dependency.
+            self.providers[kwargs["name"]] = found
+            return dict(found)
+        if operation == "DeleteOauth2CredentialProvider":
+            if kwargs["name"] not in self.providers:
+                raise client_error(
+                    "ResourceNotFoundException", "no provider", status=404, operation=operation
+                )
+            self.providers.pop(kwargs["name"], None)
+            return {}
+        return self._workload_identity_default(operation, kwargs)
+
+    def _workload_identity_default(self, operation: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """The one workload identity, whose `allowedResourceOauth2ReturnUrls` is what stops an
+        authorisation being redirected anywhere the console is not."""
+        if operation == "CreateWorkloadIdentity":
+            name = kwargs["name"]
+            if name in self.workload_identities:
+                raise client_error(
+                    "ConflictException", "identity exists", status=409, operation=operation
+                )
+            item = {
+                "name": name,
+                "workloadIdentityArn": (
+                    f"arn:aws:bedrock-agentcore:{_REGION}:123456789012"
+                    f":workload-identity-directory/default/workload-identity/{name}"
+                ),
+                "allowedResourceOauth2ReturnUrls": list(
+                    kwargs.get("allowedResourceOauth2ReturnUrls") or []
+                ),
+            }
+            self.workload_identities[name] = item
+            return dict(item)
+        if operation == "GetWorkloadIdentity":
+            found = self.workload_identities.get(kwargs["name"])
+            if found is None:
+                raise client_error(
+                    "ResourceNotFoundException", "no identity", status=404, operation=operation
+                )
+            return dict(found)
+        if operation == "UpdateWorkloadIdentity":
+            item = dict(self.workload_identities.get(kwargs["name"]) or {"name": kwargs["name"]})
+            item["allowedResourceOauth2ReturnUrls"] = list(
+                kwargs.get("allowedResourceOauth2ReturnUrls") or []
+            )
+            self.workload_identities[kwargs["name"]] = item
+            return dict(item)
         return {}
 
 

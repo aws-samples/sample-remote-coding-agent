@@ -19,6 +19,7 @@
  * therefore works while the other views are still being built.
  */
 
+import * as api from "./api.js";
 import * as auth from "./auth.js";
 import * as configs from "./configs.js";
 import * as ui from "./ui.js";
@@ -29,6 +30,7 @@ const VIEWS = {
   cards: () => import("./views/card.js"),
   tasks: () => import("./views/task.js"),
   register: () => import("./views/register.js"),
+  connect: () => import("./views/connect.js"),
 };
 
 let currentView = null;
@@ -56,6 +58,7 @@ function parse(hash) {
     return { name: "tasks", params: { configId: rest[0], taskId: rest[1] } };
   }
   if (name === "register") return { name: "register", params: { configId: rest[0] || null } };
+  if (name === "connect") return { name: "connect", params: {} };
   return { name: "unknown", params: { hash } };
 }
 
@@ -127,11 +130,26 @@ async function navigate() {
   }
 
   if (target.name === null) {
-    // `#/` is not a view, it is a question: which repository? The first `READY` one, or
-    // registration when there are none.
+    // `#/` is not a view, it is a question: which repository? The first `READY` one, or --
+    // with none registered -- the first step of the setup the operator has not done yet.
+    //
+    // The GitHub connection is checked before registration is offered, because registering
+    // against a deployment with no GitHub App is refused by the API anyway: landing on
+    // `#/register` first would be a form that cannot succeed. The check is skipped the moment
+    // any configuration exists, so the ordinary case costs no extra request.
     await configs.load().catch(() => []);
     const configId = configs.defaultConfigId();
-    window.location.hash = configId ? boardHash(configId) : "#/register";
+    if (configId) {
+      window.location.hash = boardHash(configId);
+      return;
+    }
+    const connected = await api
+      .getGitHubApp()
+      .then((status) => status.connected)
+      // A failed read must not strand an operator: `#/connect` renders the failure and says
+      // what could not be read, where `#/register` would silently be the wrong page.
+      .catch(() => false);
+    window.location.hash = connected ? "#/register" : "#/connect";
     return;
   }
 
@@ -177,6 +195,26 @@ async function boot() {
 
   shell = sidebar.mount(rail);
   window.addEventListener("hashchange", navigate);
+  // A return from GitHub's app-manifest flow arrives on the bare origin carrying the marker
+  // and a `code`. It has to reach `#/connect` regardless of whatever hash the operator left
+  // on, because that is the only view that knows how to spend the code -- and the code is
+  // single-use and expires in an hour, so a boot that routed somewhere else loses the whole
+  // setup step.
+  //
+  // Keyed on the **marker** and not on `code` alone: Cognito's own sign-in returns a `code`
+  // to this same origin, `auth.complete()` above has already claimed and stripped that one,
+  // and a check on `code` here would be reading a query that no longer exists.
+  const returned = new URLSearchParams(window.location.search);
+  if (returned.get(auth.FOREIGN_FLOW_PARAM) === auth.FOREIGN_FLOW_VALUE) {
+    window.location.hash = "#/connect";
+  } else {
+    // The return leg of the per-repository GitHub authorisation. AgentCore can only send the
+    // browser to the bare origin, so the page it should land on was remembered before leaving
+    // -- see `auth.rememberDestination`. Consumed either way, so a stale value cannot hijack
+    // a later boot in this tab.
+    const destination = auth.takeDestination();
+    if (destination) window.location.hash = destination;
+  }
   await navigate();
 }
 

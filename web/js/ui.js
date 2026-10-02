@@ -266,6 +266,36 @@ export function setRefusal(node, reason) {
   return node;
 }
 
+/**
+ * Mark a control as working, or stop.
+ *
+ * `setRefusal` alone is not enough feedback for a slow action, and that is measured rather
+ * than assumed: it dims the control through `[aria-disabled="true"]` and says why in a
+ * tooltip, which an operator mid-click never sees. On a button whose work ends in a page
+ * navigation the dimming also lasted only as long as the fetch, so the control went back to
+ * looking idle while the browser was still leaving -- and the operator clicked again.
+ *
+ * So this rewrites the **label** as well, which is the part that is visible without hovering,
+ * and keeps `aria-busy` for anything reading the page aloud. Passing `null` restores the
+ * original label, so a caller does not have to remember it.
+ */
+export function setBusy(node, label) {
+  if (label) {
+    if (!node.dataset.idleLabel) node.dataset.idleLabel = node.textContent || "";
+    node.textContent = label;
+    node.setAttribute("aria-busy", "true");
+    setRefusal(node, label);
+    return node;
+  }
+  if (node.dataset.idleLabel) {
+    node.textContent = node.dataset.idleLabel;
+    delete node.dataset.idleLabel;
+  }
+  node.removeAttribute("aria-busy");
+  setRefusal(node, null);
+  return node;
+}
+
 // -- destructive confirmation --------------------------------------------------------
 
 /**

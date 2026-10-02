@@ -49,7 +49,6 @@ CONFIG = {
     "defaultBranch": "main",
     "verifyCommand": "make test",
     "executionRoleArn": "arn:aws:iam::123456789012:role/rca/rca-cfg-0123456789ab",
-    "secretArn": "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:rca/github/cfg_0123456789ab-AbCdEf",
 }
 
 

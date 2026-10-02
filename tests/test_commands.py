@@ -40,7 +40,12 @@ _LEAKY_ENV = (
     "AWS_SESSION_TOKEN",
     "AWS_REGION",
     "GITHUB_TOKEN",
-    "SECRET_ARN",
+    # The configuration id, which is what `store.github_token` exchanges for a GitHub token in
+    # the vault. It is not itself a credential, but a repository command has no business
+    # knowing it: with it and the container's execution-role credentials, the two-call exchange
+    # is reachable from inside an untrusted `make test`. `SECRET_ARN` was here and went with
+    # the secret.
+    "CONFIG_ID",
 )
 
 # `shell=True` means there is a `/bin/sh` between the runner and the command, and a shell

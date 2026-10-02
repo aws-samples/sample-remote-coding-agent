@@ -30,6 +30,32 @@ const KEY_EXPIRES = "rca.expiresAt";
 const KEY_VERIFIER = "rca.pkceVerifier";
 const KEY_STATE = "rca.oauthState";
 
+// `github_app.MANIFEST_RETURN_PARAM` / `MANIFEST_RETURN_VALUE`, which the API puts on the
+// GitHub App manifest's `redirect_url`. Held together by
+// `tests/test_web_console.py::test_the_manifest_return_marker_is_the_handlers_spelling` --
+// a mismatch is silent, because sign-in keeps working and only the app conversion stops.
+export const FOREIGN_FLOW_PARAM = "rca";
+export const FOREIGN_FLOW_VALUE = "github-app";
+
+// `github_app.AUTH_RETURN_PARAM`: what AgentCore puts on the console's own URL when it returns
+// the operator from the per-repository GitHub authorisation. Like the marker above it is a
+// `?`-parameter on this origin that is **not** a Cognito code, so `complete()` has to stand
+// aside for it or it strips the one value the return leg needs.
+export const AUTH_RETURN_PARAM = "session_id";
+
+// Where to come back to after a redirect that leaves the console. This module owns it for the
+// same reason it owns the PKCE verifier: both are small things that have to survive a
+// top-level navigation and die with the tab, and the token store is named in exactly one
+// place on purpose (`tests/test_web_console.py::test_the_token_store_is_session_scoped_and_named_once`).
+const KEY_DESTINATION = "rca.destination";
+
+// One-shot marks, per tab, so an automatic action cannot repeat. The GitHub authorisation is
+// started for the operator rather than waited for (`views/register.js`), and without a mark
+// an authorisation that keeps failing to complete would bounce the browser to GitHub and back
+// forever -- which is exactly the state a missing IAM grant produced once, where an error
+// panel was the only useful outcome.
+const KEY_TRIED_PREFIX = "rca.tried.";
+
 // Refresh two minutes before expiry rather than on the 401: a board holds several
 // requests in flight at once, and letting them all fail first turns one silent refresh
 // into five visible errors.
@@ -134,6 +160,21 @@ export async function signIn() {
  */
 export async function complete() {
   const query = new URLSearchParams(window.location.search);
+  // `?code=` is **not ours alone**. `views/connect.js` brings the operator back from
+  // GitHub's app-manifest flow on this same origin, also with a `code`, and this function
+  // runs first at boot -- so without this guard it claimed GitHub's single-use code, stripped
+  // the query before the connect view could read it, and then threw "that sign-in did not
+  // start in this tab" because the sign-in state was consumed by the real sign-in long ago.
+  // The app was created on GitHub and the conversion could never happen.
+  //
+  // The marker is on the `redirect_url` this deployment hands GitHub
+  // (`github_app.MANIFEST_RETURN_PARAM`/`_VALUE`), so it is a positive statement of whose
+  // code this is rather than a guess from which keys the token store happens to hold.
+  // Returning before the strip below is the point: the query has to survive for `connect.js`.
+  if (query.get(FOREIGN_FLOW_PARAM) === FOREIGN_FLOW_VALUE) return isSignedIn();
+  // The same reasoning for the authorisation return: its `session_id` is what completes the
+  // 3LO leg, and stripping the query below would throw it away before the settings view runs.
+  if (query.get(AUTH_RETURN_PARAM)) return isSignedIn();
   const code = query.get("code");
   const failure = query.get("error");
   if (!code && !failure) return isSignedIn();
@@ -204,6 +245,37 @@ export function refresh() {
       inFlight = null;
     });
   return inFlight;
+}
+
+/** Remember a hash route to return to after a redirect away from the console.
+ *
+ * The GitHub authorisation leg leaves the console and AgentCore returns the browser to the
+ * bare origin -- it cannot return to a per-repository route, because every permitted return
+ * URL has to be registered on the workload identity and a configuration id is not knowable
+ * when that list is written. So the destination is held here across the trip instead.
+ */
+export function rememberDestination(hash) {
+  tokenStore.setItem(KEY_DESTINATION, String(hash || ""));
+}
+
+/** The remembered route, consumed. `""` when there is none. */
+export function takeDestination() {
+  const hash = tokenStore.getItem(KEY_DESTINATION) || "";
+  tokenStore.removeItem(KEY_DESTINATION);
+  return hash;
+}
+
+/** Has this tab already taken `action` for `subject`? Marks it if not.
+ *
+ * `false` the first time and `true` afterwards, so a caller can guard a redirect it starts on
+ * the operator's behalf. Per tab rather than per browser, because the thing it guards against
+ * is a loop inside one visit: a fresh tab should be willing to try again.
+ */
+export function tryOnce(action, subject) {
+  const key = `${KEY_TRIED_PREFIX}${action}.${subject}`;
+  if (tokenStore.getItem(key)) return false;
+  tokenStore.setItem(key, "1");
+  return true;
 }
 
 /** Forget the session here, then end it at the pool. Both halves matter: clearing only

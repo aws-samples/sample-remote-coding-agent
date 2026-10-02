@@ -1,4 +1,4 @@
-"""The container's only AWS surface: the two DynamoDB tables and one secret.
+"""The container's only AWS surface: the two DynamoDB tables and the GitHub credential.
 
 Two rules shape every function here, and both exist to keep the rest of the package
 testable and runnable off AWS entirely:
@@ -33,6 +33,21 @@ from botocore.exceptions import BotoCoreError, ClientError
 from .state import TaskState, TaskStatus, VerifyResult
 
 log = logging.getLogger(__name__)
+
+# The deployment-wide AgentCore Identity names `github_token` exchanges against, defaulted
+# so a container provisioned before these existed still resolves them, and overridable by
+# environment so a renamed fleet (`STACK_PREFIX`) can point at its own. They mirror
+# `api/src/handlers/github_app.py`'s `WORKLOAD_NAME` and `PROVIDER_NAME`, and
+# `tests/test_env_contract.py` holds the two spellings together -- a mismatch does not raise,
+# it just means no container can ever get a token.
+_DEFAULT_PROVIDER_NAME = "rca_github"
+_DEFAULT_WORKLOAD_NAME = "rca_github_wl"
+
+# The same three values `github_app.py` sends, for the same reason: `GetResourceOauth2Token`
+# matches a stored authorisation on the flow and the scope set as well as the user id, so a
+# container asking with a different scope list looks unauthorised.
+_OAUTH_SCOPES = ("repo",)
+_OAUTH_FLOW = "USER_FEDERATION"
 
 # The activity feed is a bounded tail, not a log: the console renders it in one
 # request and an item has a 400 KB ceiling. 400 rows is the cap; a long task loses
@@ -122,23 +137,66 @@ def get_configuration(config_id: str) -> dict[str, Any] | None:
     return dict(item) if item else None
 
 
-def github_token(secret_arn: str) -> str:
-    """Fetch the repository's PAT from Secrets Manager.
+def github_token(config_id: str) -> str:
+    """This repository's GitHub token, out of AgentCore Identity's token vault.
+
+    Two calls and no secret. `GetWorkloadAccessTokenForUserId` mints a workload access
+    token for `config_id` as the 3LO **`userId`** -- the keying rule, and the direct
+    analogue of AgentCore Memory's D6 -- and `GetResourceOauth2Token` exchanges it for the
+    user-to-server token the operator authorised for this repository. The token is
+    short-lived and the vault refreshes it, so nothing here caches it: a second node that
+    needs one calls again.
 
     The return value is *passed as an argument* -- to `git_ops.push`, to
-    `github.create_pull_request` -- and is never written to `os.environ` and never
-    put on a command line (invariant 4). Every coding subagent has `Bash` and
-    inherits this process's environment, so a token in the environment is a token the
-    model can print. `git_ops` reaches git through a `GIT_ASKPASS` script for the
-    same reason.
+    `github.create_pull_request` -- and is never written to `os.environ` and never put on a
+    command line (invariant 4). Every coding subagent has `Bash` and inherits this process's
+    environment, so a token in the environment is a token the model can print. `git_ops`
+    reaches git through a `GIT_ASKPASS` script for the same reason.
 
-    `.strip()` because a PAT pasted into the console picks up a trailing newline and
-    an HTTP header carrying one fails as an unrelated-looking 400.
+    **`""` when the repository is not authorised, never an exception.** The vault answers an
+    unauthorised `userId` with an `authorizationUrl` and no `accessToken`, which is a
+    *state* -- the operator has not finished the setup -- and not a fault. The caller turns
+    an empty token into its own refusal with an instruction attached: a `ClientError`
+    raised from here would reach an operator as a stack trace about a service they have
+    never heard of. Same shape as `agentcore_memory`'s D11, and for the same reason.
+
+    **Returns `""` when `CONFIG_TABLE` is unset, and builds no client at all.** That is this
+    module's rule 2 applied to the credential: an unconfigured container is one that has no
+    vault to read either, and `python -m coding_agent.local_run` on a developer's machine must
+    reach AWS for nothing -- `tests/test_end_to_end.py::test_nothing_in_the_loop_builds_an_aws_client`
+    asserts exactly that, and a client built here would fail it. `CONFIG_TABLE` rather than a
+    variable of its own because it is already the one thing every provisioned container has
+    and no local run does.
+
+    `.strip()` because an HTTP header carrying a stray newline fails as an
+    unrelated-looking 400.
     """
-    if not secret_arn:
+    if not config_id or not os.environ.get("CONFIG_TABLE"):
         return ""
-    secrets = boto3.client("secretsmanager")
-    return (secrets.get_secret_value(SecretId=secret_arn).get("SecretString") or "").strip()
+    # Inside the function, like every other client here, so a container with no region or
+    # no credentials degrades rather than failing at import.
+    identity = boto3.client("bedrock-agentcore")
+    try:
+        workload_token = identity.get_workload_access_token_for_user_id(
+            workloadName=os.environ.get("IDENTITY_WORKLOAD_NAME", _DEFAULT_WORKLOAD_NAME),
+            userId=config_id,
+        )["workloadAccessToken"]
+        answer = identity.get_resource_oauth2_token(
+            workloadIdentityToken=workload_token,
+            resourceCredentialProviderName=os.environ.get(
+                "IDENTITY_PROVIDER_NAME", _DEFAULT_PROVIDER_NAME
+            ),
+            scopes=list(_OAUTH_SCOPES),
+            oauth2Flow=_OAUTH_FLOW,
+            # No `resourceOauth2ReturnUrl`: a container must not be able to start an
+            # authorisation, only to read one that already exists. Without it the vault
+            # answers an unauthorised id with a `ValidationException`, which is caught below
+            # and reported as "not authorised" -- the honest answer either way.
+        )
+    except (ClientError, BotoCoreError) as exc:
+        log.warning("no GitHub credential for configuration %s: %s", config_id, exc)
+        return ""
+    return str(answer.get("accessToken") or "").strip()
 
 
 def set_status(

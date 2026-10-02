@@ -28,7 +28,6 @@ REQUIRED: tuple[str, ...] = ("taskId", "configId", "prompt", "repository")
 OPTIONAL: tuple[str, ...] = (
     "repositoryUrl",
     "defaultBranch",
-    "secretArn",
     "verifyCommand",
     "setupCommand",
     "resume",
@@ -53,7 +52,6 @@ def payload(**overrides: Any) -> dict[str, Any]:
         "repository": "acme/widgets",
         "repositoryUrl": "https://github.com/acme/widgets",
         "defaultBranch": "main",
-        "secretArn": "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:rca/github/cfg_0123456789ab-AbCdEf",
         "verifyCommand": "make test",
         "setupCommand": "make setup",
         "resume": False,

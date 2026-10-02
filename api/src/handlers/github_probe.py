@@ -213,7 +213,7 @@ def _request(
     method: str,
     url: str,
     *,
-    token: str,
+    token: str = "",
     payload: dict[str, Any] | None = None,
 ) -> tuple[int, Any, _Headers]:
     """Perform one API call and return `(status, decoded body, response headers)`.
@@ -227,16 +227,24 @@ def _request(
     leaves both locked inside the `HTTPError`. Only a transport failure raises, since
     there is no status to hand back. `urllib`'s headers are already case-insensitive on
     both the response and the error, so nothing here normalises them.
+
+    `token` is optional because one GitHub endpoint this control plane needs is
+    *unauthenticated* by design: `POST /app-manifests/{code}/conversions` is authorised by
+    the single-use code in its path, and `github_app.convert` calls it before any
+    credential for the new app exists. An empty token omits the header entirely rather than
+    sending `Bearer `, which GitHub answers 401 to -- a failure that reads as a bad
+    credential when the truth is that none was wanted.
     """
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {
-        # The token lives here and only here. Not in the URL: a query string is logged
-        # verbatim by every proxy between this Lambda and the API.
-        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": _API_VERSION,
         "User-Agent": _USER_AGENT,
     }
+    if token:
+        # The token lives here and only here. Not in the URL: a query string is logged
+        # verbatim by every proxy between this Lambda and the API.
+        headers["Authorization"] = f"Bearer {token}"
     if data is not None:
         headers["Content-Type"] = "application/json"
     # Every caller builds `url` from `_API_ROOT`, so this can only fail on a future one that
@@ -332,3 +340,31 @@ def _scrub(text: str, token: str) -> str:
 
 def _probe_ref_name() -> str:
     return f"{_PROBE_REF_PREFIX}{secrets.token_hex(6)}"
+
+
+# -- the seam, published for one other handler ------------------------------------------
+#
+# `github_app.convert` needs this module's HTTP path -- the scheme-and-host guard, the
+# bounded decode, the version header -- for an endpoint that has nothing to do with probing
+# a token. Published as three thin wrappers rather than by renaming the privates, so that a
+# test monkeypatching `github_probe._request` still intercepts `github_app`'s call: an alias
+# bound at import time would not be re-pointed by that patch, which is the failure this
+# shape avoids.
+
+API_ROOT = _API_ROOT
+
+
+def request(
+    method: str,
+    url: str,
+    *,
+    token: str = "",
+    payload: dict[str, Any] | None = None,
+) -> tuple[int, Any, _Headers]:
+    """`_request`, resolved through the module so a patched `_request` is still honoured."""
+    return _request(method, url, token=token, payload=payload)
+
+
+def github_message(decoded: Any) -> str:
+    """`_github_message`: GitHub's own sentence about a response, bounded."""
+    return _github_message(decoded)

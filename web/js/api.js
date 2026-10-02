@@ -114,8 +114,31 @@ export const deleteConfiguration = (configId) =>
 export const runtimeUpdate = (configId) =>
   request("POST", `/configurations/${seg(configId)}/runtime-update`);
 // A new *version* of the one secret, which is why this is a PUT and not a POST.
-export const rotateToken = (configId, githubToken) =>
-  request("PUT", `/configurations/${seg(configId)}/github-token`, { body: { githubToken } });
+// -- the GitHub credential -----------------------------------------------------------
+//
+// Four deployment-wide calls plus two per repository. None of them carries a credential in
+// either direction: `connectGitHubApp` returns a *manifest* for the browser to POST to
+// GitHub, `convertGitHubApp` hands the API a single-use code, and the two per-repository
+// calls deal only in an authorisation URL and a verdict. There is deliberately no
+// `rotateToken` any more -- there is no stored token to rotate.
+
+export const getGitHubApp = () => request("GET", "/github-app");
+export const connectGitHubApp = (consoleOrigin) =>
+  request("POST", "/github-app", { body: { consoleOrigin } });
+export const convertGitHubApp = (code) =>
+  request("POST", "/github-app/conversions", { body: { code } });
+export const disconnectGitHubApp = () => request("DELETE", "/github-app");
+
+export const authorizeGitHub = (configId, { force = false } = {}) =>
+  request("POST", `/configurations/${seg(configId)}/github-authorize`, {
+    body: { consoleOrigin: window.location.origin, force },
+  });
+export const completeGitHubAuthorization = (configId, sessionUri) =>
+  request("POST", `/configurations/${seg(configId)}/github-authorize/complete`, {
+    body: { sessionUri },
+  });
+export const githubStatus = (configId) =>
+  request("GET", `/configurations/${seg(configId)}/github-status`);
 
 // -- cards ---------------------------------------------------------------------------
 

@@ -78,6 +78,13 @@ change behaviour a comment describes, update the comment.
 | `mcp/` | the stdio MCP server Claude Code loads: `pyproject.toml`, `src/rca_mcp/` |
 | `tests/` | `conftest.py` (moto fixtures, fake credentials) plus one file per area |
 
+AgentCore Identity is **not** in moto, which answers
+`GetWorkloadAccessTokenForUserId` with "Not yet implemented". `tests/test_api_fakes.py`'s
+`FakeAgentCore` models it the same way it models the runtime and memory planes — validating
+every call against the real botocore service model — and `load_handlers` installs a data-plane
+fake by default, authorised, because `runs.queue_run` now reaches the vault on every dispatch
+and no card or task test is about a credential.
+
 Each of these has exactly one owner, and each has a test behind it, because a second
 one is the failure mode:
 
@@ -92,6 +99,13 @@ one is the failure mode:
 - `observability.session_id` is the one owner of session ids -- a second session means
   two branches and two pull requests (invariant 18).
 - `_common` is the only place a boto3 client is built.
+- `github_app` is the one owner of the GitHub credential: the deployment's OAuth2 credential
+  provider, its workload identity, the 3LO keying rule (`userId` is the `configId`) and every
+  `bedrock-agentcore` Identity call in the control plane. `configurations`' two authorisation
+  routes and `runs.queue_run`'s pre-dispatch check all go through `resolve_token`, so the
+  console's button, the status page and the refusal to dispatch read the same vault the same
+  way. `agent/src/coding_agent/store.py::github_token` is the container's half and the only
+  other place that exchange is spelled.
 - `git_ops` is every git invocation in the container.
 - `agentcore_memory` is the one owner of the keying rule (D6) and of every
   `bedrock-agentcore` data-plane call in the container -- `memory_tools`' two tools and
@@ -167,8 +181,9 @@ a populated origin; it then asserts `index.html` actually landed and stops with 
 looking at OAC or IAM. It also writes `~/.rca/endpoint.json`, which
 is where the MCP server already looks, so a running server needs no restart and
 nothing is pasted into a config field. Finally, when `origin` is a GitHub remote, it
-offers to register this repository, asking for the PAT — the one value that genuinely
-cannot be discovered. Both targets are idempotent, so a re-run is the health check.
+offers to register this repository. It asks for no credential: the deployment authenticates
+through a GitHub App the operator connects once from the console, so there is nothing at this
+point that cannot be discovered. Both targets are idempotent, so a re-run is the health check.
 
 An `RCA_API_URL` override outranks that endpoint document, and the `sample-rca` plugin's `api_url`
 `userConfig` field is one of these — see `plugins/sample-rca/.mcp.json`. The precedence is
@@ -176,7 +191,7 @@ deliberate, because someone running two deployments needs it, and it has a sharp
 stale `api_url` from an earlier deployment outranks a freshly written `~/.rca/endpoint.json`,
 so `register_repository` can answer `PROVISIONING` and then `READY` against an older
 deployment in another region while the new fleet's `GET /configurations` returns nothing —
-and the PAT goes to wherever the stale value points. What makes that visible is that every
+and the repository is registered against whatever the stale value points at. What makes that visible is that every
 tool's answer ends with an `endpoint used:` line naming the URL, the region and which of the
 four
 sources supplied it (the override, the endpoint document, discovery from the stack's
@@ -212,8 +227,11 @@ for `rca-console` — the second one fails at `CreateUserPoolDomain`. And the MC
 follows a renamed fleet through its existing optional `stack_name` user config, i.e.
 `RCA_STACK_NAME`: `mcp/src/rca_mcp/client.py::DEFAULT_STACK_NAME` is pinned to the
 *default* `SampleCodingAgentApi` and stays there. `APP_NAME = "rca"` is not part of the
-prefix, so two fleets in one account still share the `/rca/` IAM path and the
-`rca/github/*` secret namespace.
+prefix, so two fleets in one account still share the `/rca/` IAM path **and the one
+AgentCore Identity credential provider and workload identity** — `github_app.PROVIDER_NAME` is
+`rca_github` in both. That is worth knowing before running two fleets side by side: they share
+one GitHub App and one set of per-repository authorisations, so `DELETE /github-app` in either
+console revokes both fleets' access.
 
 ### What the walkthrough touches, and where it lives
 
@@ -241,12 +259,20 @@ Everything the walkthrough used to attribute inline lives here, in the order an 
   585s. It is the *deploy* that takes 15-25 minutes; this is the per-repository step after it.
   Everything said "2-5 minutes" until the V2 upgrade made that wrong, and an understated wait is
   not a cosmetic error — an operator who believes it concludes the registration is stuck at
-  exactly the point where waiting is the correct action. The number is spelled in **five** places
+  exactly the point where waiting is the correct action. The number is spelled in **eight** files
   and they have to move together: `README.md`'s registration step, `mcp/src/rca_mcp/format.py`'s
-  `_NOT_READY_NOTE`, `mcp/src/rca_mcp/server.py`'s `_PROVISIONING_NOTE`, and the two console
-  strings in `web/js/views/register.js` and `web/js/views/sidebar.js`. Nothing pins them to each
-  other, because there is no shared unit to pin them in: two are model-facing tool prose, two are
-  browser strings and one is an operator's README.
+  `_NOT_READY_NOTE`, `mcp/src/rca_mcp/server.py`'s `_PROVISIONING_NOTE`, the two console strings
+  in `web/js/views/register.js` and `web/js/views/sidebar.js`, both of the plugin's skills, and
+  the un-namespaced `.claude/commands/remote.md`.
+
+  **A test pins them, because prose did not.** This paragraph said "five places" and listed
+  five; the plugin's two skills and the command were not among them and went on saying "2-5
+  minutes" long after the V2 upgrade made that wrong -- the expensive direction, since an
+  operator who believes an understated wait concludes the registration is stuck at exactly the
+  point where waiting is correct. `tests/test_docs.py::test_every_file_states_the_same_provisioning_time`
+  asserts each spelling, and `::test_no_file_states_a_different_provisioning_time` catches a file
+  carrying the right number *and* a stale one -- the shape that actually drifted, because a
+  reader meets the stale sentence first.
 - **The slash command and the drag are one code path** — `tasks.create` and `cards.move` both call
   `runs.queue_run`. The board is live-polled by `web/js/activity.js`, and the task view links to
   that run's log group, `/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`.
@@ -264,8 +290,10 @@ Everything the walkthrough used to attribute inline lives here, in the order an 
 - **Deregistration is console-only.** `DELETE /configurations/{configId}` is reachable from neither
   the plugin (`ApiClient.ALLOWED_METHODS` is `{"GET", "POST"}`) nor the `aws` CLI, which cannot
   SigV4-sign an arbitrary `execute-api` URL. It returns `202` and stays `DELETING` while
-  `provisioner._delete` removes the runtime, the `/rca/` role and its policy, the secret, and the
-  item **last** — **1-3 min** each. A `cdk destroy` first orphans all three.
+  `provisioner._delete` removes the runtime, the memory, the `/rca/` role and its policy, and the
+  item **last** — **1-3 min** each. A `cdk destroy` first orphans all three. The repository's
+  GitHub authorisation needs no step of its own: it is keyed in the token vault on a `configId`
+  that is never reissued, so the item's removal is what makes it unreachable.
 - **The five names the teardown step spells out** are `infra/app.py::stack_names` at the default
   prefix. The account stack is one per consuming region, suffixed as `infra/app.py::region_suffix`
   spells it (`eu-west-1` → `…AccountEuWest1`); `STACK_PREFIX=Foo` renames all five, so a renamed
@@ -275,8 +303,9 @@ Everything the walkthrough used to attribute inline lives here, in the order an 
 
 The order is the whole instruction, and `README.md` carries only the order — the commands live
 here. **Destroying the stacks first orphans the AgentCore runtime, the per-configuration IAM
-role at `/rca/` and the Secrets Manager secret**: nothing in CloudFormation owns them, they are
-created per API call, and the runtime keeps costing money.
+role at `/rca/`, the AgentCore memory and the deployment's Identity credential provider**:
+nothing in CloudFormation owns them, they are created per API call, and the runtime keeps
+costing money.
 
 1. **Deregister every repository.** In the console: the repository's settings page →
    **Deregister** → two clicks, the second armed only after a moment
@@ -284,8 +313,13 @@ created per API call, and the runtime keeps costing money.
    /configurations/{configId}` is a method no plugin tool can send
    (`ApiClient.ALLOWED_METHODS` is `{"GET", "POST"}`) and the `aws` CLI cannot SigV4-sign an
    arbitrary `execute-api` URL. It returns `202`, then stays `DELETING` while
-   `provisioner._delete` removes the runtime, the role and its policy, the secret, and the item
+   `provisioner._delete` removes the runtime, the memory, the role and its policy, and the item
    **last**. **1–3 min** each.
+1b. **Disconnect GitHub**, on the console's **GitHub App** page. This deletes the OAuth2
+   credential provider, and with it every stored authorisation — nothing in CloudFormation owns
+   it, so a `cdk destroy` leaves it behind holding the app's client secret. The **GitHub App
+   itself survives**: it belongs to the operator's GitHub account and nothing here can delete
+   it, so remove it on github.com if you are finished with it.
 2. **Destroy the five stacks by name**, with the same pinned CLI `make deploy` uses:
 
    ```bash
@@ -359,9 +393,12 @@ the code it governs and a regression test.
    thread, return in ms. A blocked ping thread is reaped at 15 min, silently.
 2. **ARM64 everywhere** — Dockerfile, `Platform.LINUX_ARM64`, `Architecture.ARM_64`.
 3. **The Claude Code CLI must be on `PATH`** — keep the build-time `claude --version`.
-4. **The PAT never enters the container env, the `origin` URL, or a command
-   line** — all network git through `_run_authenticated` / `_askpass`;
-   `_base_env()` omits the token. Every coding subagent has `Bash`.
+4. **The GitHub token never enters the container env, the `origin` URL, or a
+   command line** — all network git through `_run_authenticated` / `_askpass`;
+   `_base_env()` omits the token. Every coding subagent has `Bash`. The token is
+   fetched from AgentCore Identity's token vault at the moment it is needed
+   (`store.github_token`), passed as an argument, and never cached — so there is
+   nothing on disk and nothing on the graph state to leak either.
 4b. **The commit identity is configurable, and the default is known to fail a
    real check** — `git_ops`' default is `agentcore-coding-agent
    <agent@localhost>`, and `agent@localhost` matches no GitHub account, so
@@ -383,6 +420,20 @@ the code it governs and a regression test.
    environment silently winning. A **dedicated bot account** is the right value
    rather than a human's address — the commits were not written by a person and
    the audit trail should not say they were.
+
+   **The demo path configures neither, because the connected GitHub App supplies
+   them.** `provisioner._git_identity` prefers the context pair and otherwise uses
+   the app's own bot account, which is the dedicated bot the paragraph above wants.
+   The address is `<botUserId>+<slug>[bot]@users.noreply.github.com`, and the id is
+   the **bot user's, not the app's**. That was measured, because the obvious reading
+   of GitHub's convention is wrong in a way nothing reports: against a live app,
+   `5146691+<slug>[bot]@…` (the app id) resolved to **no account**, while
+   `336429684+<slug>[bot]@…` (the bot user id) resolved to `<slug>[bot] (Bot)` —
+   with a control commit carrying a human's own noreply address resolving to that
+   user, so the negative was real rather than an artefact of how the probe wrote the
+   commit. `github_app._bot_commit_identity` fetches the id from
+   `GET /users/<slug>[bot]`, needs no credential, and degrades to `("", "")` rather
+   than failing a connect whose app already exists on GitHub.
 5. **Nothing under `.agent/` counts as work** — `has_changes()` is
    unconditionally true once the plan node writes a spec. Keep the two-way split
    in `code` (nothing outside `.agent/` raises; nothing beyond
@@ -583,7 +634,8 @@ the code it governs and a regression test.
 
     An exporter is not a default to switch on. Reaching CloudWatch from the CLI requires
     either a bearer token, which is a long-term IAM-user credential this container's
-    credential story refuses (one repository-scoped PAT, never in the environment), or a
+    credential story refuses (no long-lived credential anywhere, and nothing in the
+    environment), or a
     vendor gateway, which invariant 33's DNS Firewall blocks by name. Adding one means
     choosing a receiver and an egress destination first, plus the
     `cloudwatch:PutMetricData` grant and the matching permissions-boundary widening —
@@ -623,11 +675,15 @@ the code it governs and a regression test.
     is therefore stricter for setup: only a declared entry point
     (`Makefile` `setup:`/`bootstrap:`, `package.json` `scripts.setup`), never
     `install:`, and `""` otherwise.
-36. **A replacement registration retires the stale `FAILED` item *before* it mints the
-    new secret** — `configId` is random, so a replacement gets a new role name and a new
-    secret name; the other order orphans an IAM role at `/rca/` and a Secrets Manager
-    secret holding a live GitHub token when the retirement write fails. The stale secret
-    is never reused for a new token.
+36. **A replacement registration retires the stale `FAILED` item first, and inherits no
+    authorisation** — `configId` is random and it is also the 3LO `userId`, so a
+    replacement gets a new role name *and* a credential the operator has not granted
+    yet. Retiring first is what keeps an IAM role at `/rca/` from being orphaned when
+    the retirement write fails. What this invariant used to be about — never reusing a
+    stale secret for a new token — is now structural rather than enforced: there is no
+    secret, and a vault entry keyed on a retired `configId` is unreachable the moment
+    the item is gone. The half worth keeping is operator-facing: a replaced repository
+    needs authorising again, and `GET /configurations/{configId}/github-status` says so.
 37. **A VPC-mode runtime needs `iam:CreateServiceLinkedRole`, and a permanent
     authorization failure is terminal and reported as itself** — `CreateAgentRuntime` with
     `networkMode: VPC` (invariant 30) makes AgentCore create a service-linked role of its
@@ -699,6 +755,28 @@ the code it governs and a regression test.
     writes `MAX_CONFIG_NUDGES + 1`, which is what takes the item out of the filter. Written
     with `<`, the resolve branch was unreachable and the cap silently meant "stop looking" —
     caught by its own test, not by review.
+40. **No route takes a GitHub credential, and the one that could is a refusal** — there
+    is no secret, no `secretArn`, no rotation route and no `githubToken` field anywhere.
+    `configurations.create` refuses a body carrying one with `400 TokenNotAccepted`
+    rather than ignoring it, because silently dropping it leaves an operator believing a
+    credential was stored and then unable to explain the `409 GitHubNotAuthorized` on
+    their first task. The MCP tool's schema has **no credential-shaped property** —
+    asserted, the same way `tests/test_agent_memory.py` asserts no tool lets a model name
+    a memory — so a model has nothing to ask for.
+41. **The authorisation is checked before a run is queued, not at `submit`** — in
+    `runs.queue_run`, which is the one definition of "queue a run", so a card dragged
+    into Planning is refused for the same reason a slash command is. Without it a run
+    clones, plans, codes, verifies and *then* dies at `submit` having spent a full task's
+    tokens on a repository that was never going to accept a push. It costs one AgentCore
+    call on the dispatch path, and `GitHubNotAuthorized` names the console panel that
+    fixes it. The container keeps its own guard for the authorisation that goes away
+    mid-run, and that one is gated on `CONFIG_TABLE` so a local run is not refused.
+42. **Nothing is stored about whether a repository is authorised** — `github_status`
+    asks the vault every time. A `githubAuthorized` attribute on the item would be a
+    second and staler answer to a question the vault already answers, and the state it
+    would get wrong is the one that matters: an operator who revoked the app on GitHub
+    would keep seeing a green panel. The same rule is why `derived_view` projects a
+    card's column off the run's status (invariant 38) rather than storing it.
 
 ## AgentCore Memory — one per registered repository
 
@@ -1009,59 +1087,126 @@ declared setup and test commands. No prompt engineering changes that. Everything
 this heading exists to bound the blast radius to the one repository the agent is
 supposed to be working on — not to remove it.
 
-### The GitHub token must be a fine-grained PAT, scoped to one repository
+### The credential is a GitHub App, held by AgentCore Identity
 
-`contents: write` plus `pull requests: write`, nothing else, on exactly the repository
-being registered. That is what makes a stolen token survivable: it then grants precisely
-the access the agent already legitimately has, and a container that leaks its secret
-still cannot reach a second repository.
+**Nothing in this system stores a GitHub token.** One GitHub App is created per deployment,
+AgentCore Identity's OAuth2 credential provider holds that app's client secret inside
+AgentCore's own token vault, and each registered repository's container fetches a
+short-lived user-to-server token from that vault at the moment it needs one. There is no
+Secrets Manager secret, no `secretArn` on any item, no credential field on any route, and no
+rotation route — because there is nothing to rotate.
 
-`POST /configurations` refuses a classic PAT with a 400 `ClassicTokenRejected` and says
-why in the message — a classic PAT cannot be scoped to one repository at all, so
-accepting one would silently trade the whole control away. The check is
-`api/src/handlers/configurations.py::_require_supported_token`, and
-`PUT /configurations/{id}/github-token` runs it too, so a rotation cannot widen what
-registration narrowed.
+`api/src/handlers/github_app.py` owns the whole lifecycle and its docstring is the
+reference. Three operator actions, and each is one click:
 
-### Why the credential is a Secrets Manager secret and not AgentCore Identity
+1. **Connect** — `POST /github-app` mints the provider with a placeholder so its
+   `callbackUrl` exists, then returns a GitHub App *manifest* carrying that callback. The
+   console POSTs it to GitHub in the operator's own browser, GitHub creates the app and
+   redirects back with a single-use code, and `POST /github-app/conversions` exchanges that
+   code for the app's real credentials and writes them into the provider.
+2. **Install** the app on the repositories to be registered.
+3. **Authorise** each repository — `POST /configurations/{configId}/github-authorize`
+   returns a URL the operator approves on GitHub.
 
-Identity's API-key credential provider was implemented, deployed and measured end to end,
-then reverted. It works — a task cloned and pushed through it — and it costs privilege
-without buying confidentiality, so this is a record of the measurement rather than an
-invitation to try again.
+Four things about this were measured rather than assumed, and three of them shaped the design:
 
-Identity is a **broker, not a store**. `apiKeySecretSource` is `MANAGED` or `EXTERNAL` and
-both are Secrets Manager; the token vault has only `GetTokenVault` and `SetTokenVaultCMK`, so
-no API writes to it. The vault holds what Identity **obtains** (OAuth tokens it can re-fetch),
-never what you **hand** it. A PAT cannot be obtained — GitHub has no API that mints one — so
-it must be stored, and Secrets Manager is where Identity stores it.
+* **`callbackUrl` is assigned on `CreateOauth2CredentialProvider` and preserved across
+  `UpdateOauth2CredentialProvider`.** That is the whole reason the one-click manifest is
+  possible: the provider can be created empty to obtain the callback, and filled in
+  afterwards without invalidating the app pointing at it. Never send `callbackUrl` on an
+  update.
+* **`request_oauth_on_install` must be `false`.** With it `true` GitHub bounces the operator
+  into the OAuth leg the instant they install, before the provider holds any credentials, and
+  AgentCore's callback answers a bare validation error naming `cookie` and `state`. A dead
+  end an operator cannot act on, and it was a real one.
+* **`resourceOauth2ReturnUrl` is mandatory and must already be registered** on the workload
+  identity (`allowedResourceOauth2ReturnUrls`). That is the check that stops a caller
+  redirecting an authorisation somewhere it chose, which is why the console sends its own
+  origin and `github_app.require_https` validates it.
+* **The 3LO token is confined to the installation for writes.** `ghu_`-prefixed, 40
+  characters. A private repository the app is not installed on is invisible (404); a
+  **public** one is readable and **not writable** — `HTTP 403 Resource not accessible by
+  integration`. `GET /repos/{owner}/{repo}` reports `permissions.push: true` for that public
+  repository anyway, because that field describes the **user's** rights and not the token's,
+  so it cannot be used as a scope signal. `_push_verdict` creates a throwaway ref instead.
 
-The access that costs, measured against a live runtime one denial at a time:
+**M2M is impossible here.** `GetResourceOauth2Token`'s other flow is `M2M`, and GitHub
+implements no `client_credentials` grant, so there is no machine-to-machine path to a GitHub
+token. `USER_FEDERATION` is the only option, which is why a human has to authorise once per
+repository.
 
-| | Secrets Manager (shipped) | Identity |
+**D6's analogue: `userId` is the configuration id.** One authorisation per registered
+repository, created and revoked with the registration — so deregistering a repository ends
+its access without anything having to be revoked, because the id is random and never
+reissued. `store.github_token` is the container's half and `github_app.workload_token` the
+control plane's; both spell the same rule.
+
+### The blast radius is the app's installation list, and that is a real change
+
+Say it plainly, because the shape of the IAM policy implies a fence it does not have.
+
+**Neither of the container's two credential actions can be resource-fenced.** Measured
+against a throwaway role, one denial at a time:
+
+| Action | Narrowest resource that works | Denied on |
 |---|---|---|
-| Container actions | `secretsmanager:GetSecretValue` | `GetResourceApiKey` **and** `secretsmanager:GetSecretValue` |
-| Container resources | one literal secret ARN | **five** — the workload identity, `workload-identity-directory/default`, the credential provider, `token-vault/default`, and the secret |
-| `api/` actions | 4 | 7 |
-| Paths to the credential | 1 | 2 |
+| `GetWorkloadAccessTokenForUserId` | `workload-identity-directory/*` | the individual `workload-identity/<name>` ARN, `workload-identity-directory/default`, `workload-identity-directory/default/*` |
+| `GetResourceOauth2Token` | `*` | the credential provider's own ARN, `token-vault/default/oauth2credentialprovider/<name>`, `token-vault/default/*`, `token-vault/default`, `token-vault/*` |
 
-Three findings worth keeping, because each was invisible until it failed:
+There is no condition key for the user id either. So where the secret was fenced by **one
+literal ARN** per role, this is not fenced at all, and two consequences follow:
 
-* **Identity performs the Secrets Manager work with the *caller's* permissions.** The
-  container needs `secretsmanager:GetSecretValue` on a secret its code never names, so
-  Identity does not insulate it from the store — and because the container holds that grant,
-  it can bypass the broker and read the secret directly. Two paths where there was one.
-* **Two of the five resources are account-level singletons** (`workload-identity-directory/default`,
-  `token-vault/default`), so they cannot be fenced per configuration. Invariant 31's
-  one-literal-ARN fence does not survive.
-* **`runtimeUserId` changes the dispatcher's permission** from `InvokeAgentRuntime` to
-  `InvokeAgentRuntimeForUser`. Without it every task sits in `QUEUED` and nothing in the
-  container's log says why.
+* **A compromised container can request any OAuth token any operator has authorised in that
+  account.** What bounds it in practice is that a container can read exactly one
+  configuration item (invariant 31) and therefore knows exactly one random `configId` — an
+  unguessable identifier, not an authorization boundary. The dedicated account is what makes
+  "any provider in the account" mean "this fleet's".
+* **One app installed on several repositories means every container can write to all of
+  them.** A per-repository fine-grained PAT was confined by construction; a shared GitHub App
+  is confined by its installation list. So: **install the app only on the repositories you
+  register.** "Only select repositories" is the right answer on GitHub's install page, and
+  the console says so.
 
-The one design where Identity would earn its place is **OAuth**: there the per-repository
-credential is one Identity obtains and refreshes, it lives in the vault, and the container
-needs no Secrets Manager grant at all. The price is a GitHub OAuth App per deployment, which
-is more setup than this sample saves.
+What was bought for that: no credential stored by this repository, 8-hour tokens the vault
+refreshes instead of a PAT that lives until someone revokes it, and one operator action per
+repository instead of nine decisions in a list of fifty permissions.
+
+**It is not "no Secrets Manager anywhere", and the reason is a property of Identity rather
+than of this code: Identity does its Secrets Manager work with the *caller's* permissions.**
+It is a broker that borrows the caller's reach, not one that insulates the caller from the
+store. Two grants follow, both on AgentCore's own service-linked prefix
+`secret:bedrock-agentcore-identity!*` and never on a secret this repository creates:
+
+* `github:provider-admin` needs `CreateSecret`/`PutSecretValue`/`DeleteSecret`, because
+  `CreateOauth2CredentialProvider` stores the app's client secret there and authorizes that
+  write against the caller. Without it the first connect fails `AccessDenied`; without
+  `DeleteSecret`, the disconnect does.
+* `github:credential` needs `GetSecretValue`, because the code exchange inside
+  `CompleteResourceTokenAuth` **reads** that client secret as the calling role. Measured the
+  hard way: the operator approved on GitHub, the console answered
+  `AuthorizationNotCompleted`, and the message named the exact secret ARN and the exact
+  Lambda role. This is the same property that disqualified the API-key credential provider
+  earlier, met again on the OAuth path.
+
+**Whether the container needs that read too is unmeasured, and it is the one open question
+in this design.** Retrieving an *already stored* token needed zero Secrets Manager
+permissions -- measured against a throwaway role -- so the grant is deliberately **not** on
+the execution role. But a refresh has to call GitHub's token endpoint with the client secret,
+and no run here has lived past the 8-hour expiry to find out whether the vault does that with
+the caller's permissions as well. If it does, the symptom is a task failing at `submit` after
+about eight hours with an `AccessDenied` naming
+`bedrock-agentcore-identity!default/oauth2/rca_github`. Granting it pre-emptively is the
+wrong trade: it would let any container read every provider's client secret in the account,
+which is wider than anything else on that role. So the failure is left loud and this paragraph
+is the note that explains it.
+
+**What a container must never reach is denied by name.** `MayNotEscalate` in
+`infra/stacks/agent_stack.py` denies the fourteen Identity control-plane actions and
+`secretsmanager:*` outright: `GetResourceOauth2Token` has to be allowed on `*`, so a
+container is one careless widening away from repointing the provider every repository shares
+at an OAuth app of its own, or deleting it and taking the whole fleet's access with it. Still
+no wildcard in that group — `Get*` would shadow `GetResourceOauth2Token` and break every
+task, the same trap the memory actions document.
 
 ### Turn on branch protection on the default branch
 
@@ -1209,9 +1354,13 @@ Three destinations, and they are the honest answer to "never leaves your account
   domain that receives a **search query** and never repository content, and which has no
   path to the container's AWS credentials.
 
-All three are unavoidable given what the agent is for. The VPC endpoints for Bedrock,
-DynamoDB, Secrets Manager, ECR, S3 and CloudWatch Logs are in
-`infra/stacks/agent_stack.py`, so those calls do not traverse the internet at all. And the
+All three are unavoidable given what the agent is for. The seven VPC endpoints — Bedrock,
+AgentCore, DynamoDB, both halves of ECR, S3 and CloudWatch Logs — are in
+`infra/stacks/agent_stack.py`, so those calls do not traverse the internet at all. There is no
+Secrets Manager endpoint any more and that is not an omission: the container reaches no secret,
+and AgentCore Identity's own Secrets Manager write happens service-side from a control-plane
+Lambda outside this VPC, so an endpoint for it would be an ENI in every AZ with no client. The
+GitHub credential rides the AgentCore endpoint beside the memory calls. And the
 vendor destinations this design says it never contacts are **refused** there rather than
 merely unused: the same file carries a Route 53 Resolver **DNS Firewall** deny list —
 `BLOCKED_VENDOR_DOMAINS`, seven enumerated names (`api.anthropic.com`,
@@ -1243,7 +1392,7 @@ Nothing here should be read as covering it.
 ## What remains exposed
 
 Stated rather than implied, because a security section that claims completeness is worse
-than one that does not. Four things are still true after everything above.
+than one that does not. Five things are still true after everything above.
 
 - **A container's execution-role credentials are reachable from inside the container.**
   `commands._base_env()` builds the repository command's environment from nothing — no
@@ -1252,23 +1401,36 @@ than one that does not. Four things are still true after everything above.
   for both runners, the verify command and the setup command. It defeats the
   environment-variable credential path. It does **not** defeat an attacker who hardcodes
   the container credentials endpoint. Within the permissions boundary, stolen credentials
-  reach exactly **four** things: this one repository's secret, this one configuration's task
-  items, Bedrock, and a read-only pull of the agent image from one ECR repository — the
+  reach exactly **four** things: this one configuration's task items, this one repository's
+  memory, Bedrock, and a read-only pull of the agent image from one ECR repository — the
   runtime cannot be created at all without that last one, which is why it is granted. The
-  `dynamodb:LeadingKeys` fences on both table statements are what shrink that list to *this*
-  configuration, and the VPC with its 443-only security group is what stops the credentials
-  leaving. Four is the whole count, with no flag that makes it five: a
-  `cloudwatch:PutMetricData` grant on `*` was the fifth until Coding Agent Insights was
-  removed (invariant 32b), and
+  `dynamodb:LeadingKeys` fences on both table statements and the literal memory ARN are what
+  shrink that list to *this* configuration, and the VPC with its 443-only security group is
+  what stops the credentials leaving. Four is the whole count, with no flag that makes it
+  five: a `cloudwatch:PutMetricData` grant on `*` was the fifth until Coding Agent Insights
+  was removed (invariant 32b), and
   `tests/test_api_grant_contract.py::test_no_handler_names_a_cloudwatch_action_at_all` is what
   stops it coming back as one line.
+
+- **The GitHub credential is the one thing on that list that is not fenced to this
+  repository.** It used to be — one literal secret ARN — and it is now
+  `GetWorkloadAccessTokenForUserId` on `workload-identity-directory/*` plus
+  `GetResourceOauth2Token` on `*`, because the service accepts nothing narrower and offers no
+  condition key for the user id. So stolen container credentials can request any OAuth token
+  any operator has authorised in that account, and the GitHub App's installation list is what
+  bounds what those tokens can write. It is listed separately from the four above rather than
+  folded into them because it is the one exposure this design *added*; see "The blast radius
+  is the app's installation list" for the measurements and for what was bought in exchange.
 - **Prompt injection.** The controls are the `.agent/` quarantine — the clone's own
   `.agent/` is moved aside so repository content cannot pose as the roles' workspace —
   `setting_sources=[]` and `strict_mcp_config=True`, the `PreToolUse` hook that denies
   `git commit` on `Bash` for every role and every subagent, and `submit` being the sole
   publisher. None of them stop a malicious `npm test` or a `pip install` hook: that code
-  runs because running it is the point, which is why the account is dedicated and the token
-  is scoped to one repository.
+  runs because running it is the point, which is why the account is dedicated and the GitHub
+  App is installed only on the repositories being worked on. **Not** "the token is scoped to
+  one repository" -- that was true of a fine-grained PAT and is not true of this design: one
+  app's token reaches every repository it is installed on, which is why the installation list
+  is the thing to keep short.
 - **A resume unpickles a file the container could have written.**
   `agent/src/coding_agent/checkpoint.py` calls `pickle.load` on the path
   `checkpoint.checkpoint_path` returns, `<workDir>/checkpoint/graph.pkl`, and unpickling is
@@ -1282,13 +1444,20 @@ than one that does not. Four things are still true after everything above.
   task. JSON is not the fix: the payload is LangGraph's own nested `defaultdict` structures
   and would not round-trip, which is why `checkpoint._load` rebuilds key by key instead of
   assigning.
-- **There is no roadmap.** This list is the finished posture, not a staging post. A GitHub App
-  issuing one-hour installation tokens, phase-separated execution roles, an SCP backstop on
-  `iam:CreateRole`, Bedrock Guardrails and a TLS-inspecting egress allowlist were all
-  considered and are **not being built** — so the exposures above are permanent for this
-  system rather than pending. Read them as the terms of use: a dedicated account, a
-  repository-scoped token, and branch protection are what bound them, and nothing further is
-  coming to help.
+- **There is no roadmap.** This list is the finished posture, not a staging post.
+  Phase-separated execution roles, an SCP backstop on `iam:CreateRole`, Bedrock Guardrails and
+  a TLS-inspecting egress allowlist were all considered and are **not being built** — so the
+  exposures above are permanent for this system rather than pending. Read them as the terms of
+  use: a dedicated account, a GitHub App installed only where the agent is meant to work, and
+  branch protection are what bound them, and nothing further is coming to help.
+
+  A GitHub App was on that declined list, as "issuing one-hour **installation** tokens", and it
+  is now built — but not in the shape that was declined. What ships issues a **user-to-server**
+  token through AgentCore Identity, which is why the blast radius is the installation list
+  rather than one repository: an installation token can be scoped to a single repository, and a
+  user token cannot. That narrower variant needs the app's private key to mint a JWT, which
+  means storing a credential this design deliberately has nowhere to put, and it remains
+  declined for that reason.
 
 ### Static analysis suppressions
 
@@ -1304,14 +1473,18 @@ rather than because the finding is inconvenient:
 | Finding | Count | Why no fix exists |
 |---|---|---|
 | `B301`/`B403` on `pickle` | 6 | `agent/src/coding_agent/checkpoint.py`'s accepted exposure, argued in the bullet above and again at `checkpoint._load`; in `tests/test_checkpoint.py` it reads back a file the test just wrote |
-| `B602` and two Semgrep subprocess rules on `agent/src/coding_agent/commands.py` | 3 | `shell=True` in `commands._run` **is** the product: an untrusted repository's own declared `make test`, bounded by the dedicated account, the repository-scoped PAT and `_base_env` |
+| `B602` and two Semgrep subprocess rules on `agent/src/coding_agent/commands.py` | 3 | `shell=True` in `commands._run` **is** the product: an untrusted repository's own declared `make test`, bounded by the dedicated account, the GitHub App's installation list and `_base_env` |
 | Semgrep `dangerous-subprocess-use-audit` on `tests/test_git_ops.py` and `tests/test_repo_contracts.py` | 3 | list argv, no shell, every element a module constant or a path the test wrote |
 | `B310` on the two `urlopen` calls | 2 | pinned in code — see below — but bandit flags the call site either way |
 
 Two conventions keep the group honest. **Fake credentials live behind names in
-`tests/conftest.py`** (`FAKE_PAT`, `FAKE_FINE_GRAINED_PAT` and siblings) and are imported by
-the modules that need them, because `B105`/`B106` fire on a literal and not on a name — so
-the cheapest fix for that whole class is a shared constant rather than a suppression. And
+`tests/conftest.py`** (`FAKE_PAT`, `FAKE_FINE_GRAINED_PAT`, `FAKE_UNLOGGED_PAT`) and are
+imported by the modules that need them, because `B105`/`B106` fire on a literal and not on a
+name — so the cheapest fix for that whole class is a shared constant rather than a
+suppression. Six siblings of those three were **deleted** when registration stopped taking a
+credential: they were inputs to a shape allowlist that no longer exists, and a token-shaped
+literal with no reader is a finding the next scan raises that nobody can act on. Deleting the
+code is always the cheapest way this class shrinks. And
 **every suppression names its rule and carries a reason**, beside the marker or on the line
 above it: a bare `# nosec` blankets its whole line, including the next real finding to land
 there.

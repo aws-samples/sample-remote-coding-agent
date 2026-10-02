@@ -243,7 +243,11 @@ def test_a_replacement_registration_says_the_failed_one_is_being_cleaned_up() ->
         "a 201 is the start of provisioning, not the end of it -- the not-ready note "
         f"stays on both paths. Got:\n{first}"
     )
-    assert "not repeated back" in first
+    # The 201 has to tell the model the setup is not finished. A registration that reads as
+    # complete leaves the operator starting a task that is refused, with nothing having said
+    # why -- authorising is a browser step and no tool in this package can take it.
+    assert "authorise" in first.lower()
+    assert "409 GitHubNotAuthorized" in first
 
 
 _PROVENANCE_URL = "https://abc123.execute-api.eu-west-1.amazonaws.com"

@@ -174,13 +174,29 @@ async def submit(state: TaskState) -> dict[str, Any]:
     # every coding subagent has `Bash` and inherits this process's environment.
     #
     # The `GITHUB_TOKEN` arm is the developer-machine path that `local_run.py` uses. In the
-    # container there is no such variable and there must not be: a secret ARN is named on
-    # the state and the value is read out of Secrets Manager here, at the last moment.
-    token = (
-        store.github_token(state["secretArn"])
-        if state.get("secretArn")
-        else os.environ.get("GITHUB_TOKEN", "")
-    )
+    # container there is no such variable and there must not be: the credential is fetched
+    # from AgentCore Identity's token vault here, at the last moment, keyed on this task's
+    # own `configId`.
+    #
+    # The environment is checked first and that is safe rather than sloppy: `GITHUB_TOKEN` is
+    # never set in a provisioned container -- nothing in `provisioner._fleet_environment` or
+    # `_container_environment` writes it, and `tests/test_env_contract.py` holds that -- so in
+    # the container this falls through to the vault every time. The order buys the local run:
+    # `store.github_token` builds no client when `CONFIG_TABLE` is unset, so a developer's
+    # machine reaches AWS for nothing.
+    token = os.environ.get("GITHUB_TOKEN", "") or store.github_token(state.get("configId", ""))
+    # Raised only in a provisioned container -- `CONFIG_TABLE` is the same switch
+    # `store.github_token` itself gates on. `runs.queue_run` already refuses to dispatch a run
+    # against a repository with no authorisation, so reaching here empty means the
+    # authorisation went away mid-run; saying so beats a `git push` that fails on a blank
+    # password. A local run has no vault and legitimately pushes with whatever credentials the
+    # developer's own git is configured with, so it must not be refused here.
+    if not token and os.environ.get("CONFIG_TABLE"):
+        raise SubmitError(
+            "no GitHub credential for this repository. Authorise it in the console "
+            "(Repository settings -> Authorise GitHub), or install the deployment's GitHub "
+            "App on it if the authorisation is already in place."
+        )
     branch = state["branch"]
     git_ops.push(repo, branch, token=token, repository=state["repository"])
 

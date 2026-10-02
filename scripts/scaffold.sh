@@ -15,7 +15,8 @@
 #
 # Given a GitHub name or URL, it clones into a temporary directory and deletes it afterwards.
 # The push uses your normal git credentials (gh auth login, a credential helper, or SSH), not
-# the token you register with the fleet. --yes skips the confirmation before the push.
+# the fleet's GitHub App, which is not installed on this repository until it exists.
+# --yes skips the confirmation before the push.
 #
 # Needs git, make and python3 on PATH. It never overwrites an existing file, never touches a
 # repository that already has source in it, and never force-pushes.

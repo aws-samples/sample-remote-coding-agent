@@ -162,26 +162,33 @@ def add_agent_network(scope: Construct, *, app_name: str, alert_email: str) -> A
     security_group.add_egress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(443), "443 only")
 
     # The endpoints are what make the in-boundary claim *demonstrable* rather than
-    # asserted: the calls carrying prompts and repository content -- Bedrock, the
-    # GitHub token out of Secrets Manager, the task rows, the log lines, the memory a
+    # asserted: the calls carrying prompts and repository content -- Bedrock, the GitHub
+    # credential out of the AgentCore token vault, the task rows, the log lines, the memory a
     # later task reads back -- resolve to a private address in these subnets and never
     # traverse the internet. Without them the same traffic works fine over the NAT
     # gateway, and the claim becomes a sentence in a document that nothing enforces.
+    #
+    # `SECRETS_MANAGER` used to be in this list and is **gone with the secret**: the
+    # container's GitHub credential now comes from the AgentCore data plane, which the
+    # `AgentCore` endpoint below already covers. AgentCore Identity does keep the GitHub
+    # App's client secret in a Secrets Manager secret of its own, but that is written and
+    # read *service-side* from a control-plane Lambda outside this VPC, so an endpoint here
+    # would be an ENI in every AZ with no client -- the same reasoning the AgentCore comment
+    # below applies to `bedrock-agentcore-control`.
     private_subnets = ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
     for name, service in (
         ("BedrockRuntime", ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME),
-        ("SecretsManager", ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER),
         # Both halves of an image pull: `ECR` is the API that hands out the auth token,
         # `ECR_DOCKER` is the registry that serves the layers. One without the other
         # fails the pull, which presents as a runtime that never reaches `READY`.
         ("Ecr", ec2.InterfaceVpcEndpointAwsService.ECR),
         ("EcrDocker", ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER),
         ("CloudWatchLogs", ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS),
-        # `agentcore_memory.py`'s `create_event` and `retrieve_memory_records` were the one
-        # content-carrying call still going out over the NAT gateway: a task's own transcript,
-        # leaving the VPC to reach a service in the same account. This makes memory the same
-        # in-boundary claim Bedrock and Secrets Manager above already are, and it needs no
-        # change in the container -- `private_dns_enabled` defaults on, so the regional name
+        # Two content-carrying call groups ride this one endpoint, and both would otherwise
+        # leave the VPC over the NAT gateway to reach a service in the same account:
+        # `agentcore_memory.py`'s `create_event`/`retrieve_memory_records` -- a task's own
+        # transcript -- and `store.github_token`'s two-call credential exchange. It needs no
+        # change in the container: `private_dns_enabled` defaults on, so the regional name
         # `boto3.client("bedrock-agentcore")` already resolves now answers privately.
         #
         # The **data plane** only. The control plane is `bedrock-agentcore-control`, which
@@ -329,7 +336,6 @@ def add_agent_network(scope: Construct, *, app_name: str, alert_email: str) -> A
 
 def execution_role_boundary_statements(
     *,
-    app_name: str,
     account: str,
     region: str,
     asset_repository_arn: str,
@@ -347,11 +353,16 @@ def execution_role_boundary_statements(
     reading the classification in `tests/execution_boundary.py` for the second.
 
     The *resource* dimension is deliberately wider in four statements -- `MayTouchOwnRows`,
-    `MayReadOneSecret`, `MayWriteRuntimeLogs` and `MayUseOwnMemory`, each for the reason its
-    own comment below gives -- and each of the four is declared in
+    `MayUseGitHubCredential`, `MayWriteRuntimeLogs` and `MayUseOwnMemory`, each for the reason
+    its own comment below gives -- and each of the four is declared in
     `execution_boundary.WIDER_RESOURCES`, so widening a fifth costs a line in that table with
     a reason rather than passing as a silent change. Same idiom as
     `provisioner._execution_role_policy`'s docstring pointing back at this ceiling.
+
+    `app_name` used to be a parameter and is gone: the only statement that needed it was
+    `MayReadOneSecret`, naming the `rca/github/*` secret prefix, and there is no secret any
+    more. A boundary parameter that no statement reads is a signature a reader has to check
+    against the body.
 
     `asset_repository_arn` is the one parameter that is not a name: the union above cannot
     be written without naming the repository the agent image lives in, and this function is
@@ -407,14 +418,28 @@ def execution_role_boundary_statements(
             resources=[f"arn:aws:dynamodb:{region}:{account}:table/*"],
         ),
         iam.PolicyStatement(
-            sid="MayReadOneSecret",
+            sid="MayUseGitHubCredential",
             effect=iam.Effect.ALLOW,
-            actions=["secretsmanager:GetSecretValue"],
-            # The prefix `configurations.create` writes under (`rca/github/<configId>`).
-            # The trailing `*` is doing two jobs: it spans configurations, and it absorbs
-            # the six-character suffix Secrets Manager appends to every secret ARN -- an
-            # ARN ending at the name matches nothing at all.
-            resources=[f"arn:aws:secretsmanager:{region}:{account}:secret:{app_name}/github/*"],
+            # The ceiling over `provisioner._execution_role_policy`'s `UseGitHubCredential`:
+            # the two calls that exchange this configuration's id for the GitHub token
+            # AgentCore Identity holds. There is no `secretsmanager:GetSecretValue` in this
+            # boundary any more, because there is no secret -- the container's whole
+            # credential path is these two actions.
+            actions=[
+                "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+                "bedrock-agentcore:GetResourceOauth2Token",
+            ],
+            # Declared in `execution_boundary.WIDER_RESOURCES`, and the widest entry in this
+            # list by some distance. It is not a choice: measured against a throwaway role,
+            # `GetWorkloadAccessTokenForUserId` is denied on an individual
+            # `workload-identity/<name>` ARN and allowed only on
+            # `workload-identity-directory/*`, and `GetResourceOauth2Token` is denied on the
+            # credential provider's own ARN, on `token-vault/default/*` and on
+            # `token-vault/*`, and allowed only on `*`. No condition key exists for the user
+            # id either. So neither this ceiling nor the grant under it can name one
+            # repository's credential, and `CLAUDE.md`'s "What remains exposed" states the
+            # consequence rather than letting the shape of this list imply a fence.
+            resources=["*"],
         ),
         iam.PolicyStatement(
             sid="MayWriteRuntimeLogs",
@@ -537,6 +562,33 @@ def execution_role_boundary_statements(
                 "bedrock-agentcore:DeleteEvent",
                 "bedrock-agentcore:DeleteMemoryRecord",
                 "bedrock-agentcore:BatchDeleteMemoryRecords",
+                # The Identity control plane, denied by name for exactly the reason the seven
+                # memory actions above are. `MayUseGitHubCredential` has to allow
+                # `GetResourceOauth2Token` on `*`, so a container is one widening away from
+                # reconfiguring the credential provider every repository in the deployment
+                # shares -- which would let it point the provider at an attacker's OAuth app,
+                # or delete it and take the whole fleet's access with it. `SetTokenVaultCMK`
+                # is here for the same reason: re-keying the vault is a denial of service on
+                # every stored authorisation. Still no wildcard: `Get*` would shadow
+                # `GetResourceOauth2Token` and `GetWorkloadAccessTokenForUserId` and break
+                # every task.
+                "bedrock-agentcore:CreateOauth2CredentialProvider",
+                "bedrock-agentcore:UpdateOauth2CredentialProvider",
+                "bedrock-agentcore:DeleteOauth2CredentialProvider",
+                "bedrock-agentcore:ListOauth2CredentialProviders",
+                "bedrock-agentcore:CreateApiKeyCredentialProvider",
+                "bedrock-agentcore:UpdateApiKeyCredentialProvider",
+                "bedrock-agentcore:DeleteApiKeyCredentialProvider",
+                "bedrock-agentcore:GetResourceApiKey",
+                "bedrock-agentcore:CreateWorkloadIdentity",
+                "bedrock-agentcore:UpdateWorkloadIdentity",
+                "bedrock-agentcore:DeleteWorkloadIdentity",
+                "bedrock-agentcore:ListWorkloadIdentities",
+                "bedrock-agentcore:CreateTokenVault",
+                "bedrock-agentcore:SetTokenVaultCMK",
+                # The container must never reach Secrets Manager at all now: nothing it does
+                # needs it, so the whole service is denied rather than one prefix allowed.
+                "secretsmanager:*",
                 "s3:*",
                 "sqs:*",
             ],
@@ -635,7 +687,6 @@ class AgentStack(cdk.Stack):
                 "(invariant 17)"
             ),
             statements=execution_role_boundary_statements(
-                app_name=app_name,
                 account=self.account,
                 region=self.region,
                 # The asset's own repository, as a token that resolves to a real ARN.
