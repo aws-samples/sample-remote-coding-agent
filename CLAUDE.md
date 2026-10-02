@@ -770,6 +770,19 @@ the code it governs and a regression test.
     writes `MAX_CONFIG_NUDGES + 1`, which is what takes the item out of the filter. Written
     with `<`, the resolve branch was unreachable and the cap silently meant "stop looking" —
     caught by its own test, not by review.
+39b. **The provisioner opts out of Lambda's recursive loop detection, and nothing else does** —
+    the CHECK chain is a Lambda re-triggering itself through the queue it consumes, which is
+    exactly what the detector exists to stop. At the default `RecursiveLoop.TERMINATE` it
+    drops the 17th hop: measured twice, CREATE, a CREATE retry and CHECK 0–13 ran, CHECK 14
+    appeared in `RecursiveInvocationsDropped`, was handed back to the queue three times with
+    no invocation and dead-lettered. That is ~7.5 minutes of polling against a runtime that
+    takes 8–12, so **every** registration sat at `CREATING` with a `READY` runtime until
+    invariant 39's sweep nudged it 45 minutes later — and the symptom, a message received
+    three times that no log line mentions, points nowhere near Lambda. The chain's own bound
+    (`MAX_CHECK_ATTEMPTS`, then `FAILED`) is what replaces the detector.
+    `api_stack.SELF_CHAINING_ENTRY_POINTS` is the opt-out, and
+    `tests/test_grant_contract.py` derives it from the grant table, so a new consumer that may
+    send to its own queue fails a test until someone decides this for it.
 40. **No route takes a GitHub credential, and the one that could is a refusal** — there
     is no secret, no `secretArn`, no rotation route and no `githubToken` field anywhere.
     `configurations.create` refuses a body carrying one with `400 TokenNotAccepted`
