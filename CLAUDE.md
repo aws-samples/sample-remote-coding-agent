@@ -93,6 +93,8 @@ one is the failure mode:
   path. `api/src/handlers/cards.py::create_claimed` is the other half: it is the one way a
   card comes into being from `POST /tasks`, so both entry points produce a card as well as
   a run, and neither of them writes a card item of its own (invariant 38).
+- `runs.screen_prompt` is the one caller of the prompt guardrail, and `runs.queue_run`
+  queues nothing it has not passed (invariant 43).
 - `nodes/submit.py` is the sole publisher: nothing else writes to a git remote or the
   GitHub API.
 - `nodes/review.py` is the only place `verifyResult` is composed (invariant 6).
@@ -792,6 +794,73 @@ the code it governs and a regression test.
     would get wrong is the one that matters: an operator who revoked the app on GitHub
     would keep seeing a green panel. The same rule is why `derived_view` projects a
     card's column off the run's status (invariant 38) rather than storing it.
+43. **Every prompt is screened by the guardrail before a run is queued, and an outage
+    refuses the run** — `runs.screen_prompt` is the only caller of `ApplyGuardrail`, and
+    `runs.queue_run` queues only a prompt it has passed: a `str` is screened on the way in,
+    and the only other thing it accepts is the `ScreenedPrompt` that `screen_prompt` alone
+    constructs (`tests/test_api_prompt_guardrail.py` holds that). Both doors — `POST /tasks`
+    and a card dragged into Planning — therefore go through it. A refusal is `422
+    PromptBlockedByGuardrail` naming the policy types that tripped and **never the matched
+    text**, because the sensitive-information policy exists to catch a pasted secret and a
+    refusal that echoed it would put the secret in the response, the console and the log.
+    The types are in `message` as well as `findings`, because the MCP client renders `error`
+    and `message` and drops the rest. `tasks.create` screens **before** it creates the
+    card, the one place invariant 38's release-to-`BACKLOG` repair is wrong: a refused
+    prompt has to leave nothing behind. A dragged card already exists, so it gets the
+    ordinary repair. A guardrail that cannot answer is `503 GuardrailUnavailable`, never a
+    pass — a check that waves prompts through while the service is slow is one an attacker
+    only has to wait out — and the client's timeouts are pinned under the Lambda's 30
+    seconds so that 503 is what the operator sees rather than a bare timeout. The 503 names
+    the service's error code, because it covers a throttle that a retry clears and a broken
+    deploy that it never will: a mistyped or deleted version answers `ValidationException`,
+    measured, and a missing grant `AccessDeniedException`.
+
+    The guardrail is `ApiStack`'s, built by `prompt_guardrail.add_prompt_guardrail` —
+    `prompt_guardrail.guardrail_properties` is the one statement of its policies — and it
+    must stay in the stack that consumes it. It was first put in `DataStack` and that was
+    measured to break on the second deploy: a policy change publishes a new version, the
+    version was an export `ApiStack` imported, and CloudFormation rolled the producer back
+    with "Cannot delete export … as it is in use by" the consumer. A function rather than a
+    method because `ApiStack` cannot be synthesized in a test, so the tests apply it to a bare
+    stack. It is **Standard-tier**, the tier whose classifiers read code, which requires a
+    cross-region guardrail profile; `prompt_guardrail.GUARDRAIL_PROFILES` is the source-region
+    table from the
+    Bedrock user guide, a table because the region prefix is wrong exactly where it matters
+    (`eu-west-2` is `uk.`, `ap-southeast-2` is `au.`). Input-only `PROMPT_ATTACK` and
+    `MISCONDUCT`, both at **`LOW`**, the two AWS key PII types and three secret regexes;
+    everything else is off, because on code it is false positives.
+
+    **`LOW` was measured, not chosen for leniency.** Against the live Standard tier in
+    `us-west-2`, `LOW` refused every attack in the probe set — two injections, a keylogger,
+    ransomware, a credential stealer — and none of ten ordinary tasks. One step up refused
+    legitimate work: `PROMPT_ATTACK` at `MEDIUM` refused "Ignore all previous lint warnings in
+    legacy/ …", and `MISCONDUCT` at `MEDIUM` refused "kill the child process with SIGKILL",
+    "fix the SQL injection", "escape HTML to prevent XSS" and "add a fuzz test … hostile
+    inputs" — a coding agent's security tasks are exactly what a stricter setting refuses.
+    The sensitive-information policy passed commit SHAs, SHA-256 digests, UUIDs, base64 and
+    ARNs, and refused only strings shaped like an AWS secret key. Two sets of fourteen prompts
+    are evidence, not a benchmark; a false positive in the field is a `422` naming the filter,
+    and lowering it further means turning it off.
+
+    **The grant needs the guardrail profile in every region, and that was measured too.** A
+    role holding `ApplyGuardrail` on the guardrail ARN alone was denied 15 calls of 15, the
+    error naming `guardrail-profile/us.guardrail.v1:0` in `us-east-1` for a caller in
+    `us-west-2`; with `arn:aws:bedrock:*:<account>:guardrail-profile/<id>` added, 15 of 15
+    succeeded. A region-scoped profile ARN is therefore not a tightening, it is an outage.
+
+    The handlers pin a published `CfnGuardrailVersion` whose
+    construct id carries a digest of the policies, so a policy change publishes a new version
+    rather than leaving the old one pinned. `-c guardrailEnabled=false` turns it off and
+    reaches the handlers as an empty `GUARDRAIL_ID` — always sent, so "screens nothing" is a
+    value in the template — and `-c guardrailProfile=` names a profile the table lacks.
+
+    **What it does not cover**, and this is the whole of its scope: it screens the
+    operator's prompt. It never sees repository content read mid-run, which is where prompt
+    injection actually arrives, nor the model's output, nor the diff. Operator prompts come
+    only from authenticated callers, so this bounds an operator's mistake or a hijacked
+    session, not a malicious repository. A pushed secret is GitHub push protection's to
+    stop. Cards are not screened when written, only when dragged — a backlog card is the
+    operator's own note until it is about to become a run.
 
 ## AgentCore Memory — one per registered repository
 
@@ -1460,9 +1529,10 @@ than one that does not. Five things are still true after everything above.
   and would not round-trip, which is why `checkpoint._load` rebuilds key by key instead of
   assigning.
 - **There is no roadmap.** This list is the finished posture, not a staging post.
-  Phase-separated execution roles, an SCP backstop on `iam:CreateRole`, Bedrock Guardrails and
-  a TLS-inspecting egress allowlist were all considered and are **not being built** — so the
-  exposures above are permanent for this system rather than pending. Read them as the terms of
+  Phase-separated execution roles, an SCP backstop on `iam:CreateRole`, a guardrail on the
+  agent's model calls and a TLS-inspecting egress allowlist were all considered and are **not
+  being built** — so the exposures above are permanent for this system rather than pending.
+  Read them as the terms of
   use: a dedicated account, a GitHub App installed only where the agent is meant to work, and
   branch protection are what bound them, and nothing further is coming to help.
 
@@ -1473,6 +1543,14 @@ than one that does not. Five things are still true after everything above.
   user token cannot. That narrower variant needs the app's private key to mint a JWT, which
   means storing a credential this design deliberately has nowhere to put, and it remains
   declined for that reason.
+
+  Bedrock Guardrails were on that list too, and are now built in the narrower of their two
+  shapes: invariant 43 screens the **operator's prompt** once, before a run is queued. On the
+  agent's own model calls a guardrail would re-evaluate the whole context on every call —
+  priced per character with no prompt-cache discount — and its prompt-attack filter would read
+  the CLI's own system prompt as an attack, so that shape stays declined. It changes none of
+  the exposures above: prompt injection arrives through repository content mid-run, which the
+  prompt guardrail never sees.
 
 ### Static analysis suppressions
 

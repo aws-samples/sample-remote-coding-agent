@@ -40,6 +40,7 @@ from aws_cdk import aws_logs as logs
 from constructs import Construct
 from stacks.agent_stack import AgentStack
 from stacks.data_stack import DataStack
+from stacks.prompt_guardrail import PromptGuardrail, add_prompt_guardrail
 
 # The CloudFormation output id the MCP plugin looks up, so that nobody ever types the
 # API URL. This is a contract with an already-merged card, not a free choice:
@@ -135,6 +136,9 @@ _CAPABILITIES: frozenset[str] = frozenset(
         # have, and separate from `agentcore:control` because that one is about runtimes and
         # is held by the provisioner, which has no business reconfiguring the credential.
         "github:provider-admin",
+        # `bedrock:ApplyGuardrail` on the deployment's one prompt guardrail, held by exactly
+        # the two entry points that reach `runs.queue_run` (invariant 43).
+        "guardrail:apply",
         "iam:mint-execution-roles",
     }
 )
@@ -182,6 +186,8 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
     # `github:credential` on both of the two routes that reach `runs.queue_run`: it refuses
     # a run against a repository with no GitHub authorisation, which costs one AgentCore call
     # on the dispatch path and saves a whole task that would otherwise die at `submit`.
+    # `guardrail:apply` on the same two, for the same reason: `queue_run` screens every
+    # prompt before it is queued (invariant 43).
     ("cards", "move"): (
         "cards:read",
         "cards:write",
@@ -190,6 +196,7 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
         "tasks:write",
         "tasks-queue:send",
         "github:credential",
+        "guardrail:apply",
     ),
     # `cards:write` and not `cards:read`: every run has a card (invariant 38), so
     # `tasks.create` calls `cards.create_claimed` -- a `put_item` and an `update_item`,
@@ -201,6 +208,7 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
         "tasks-queue:send",
         "cards:write",
         "github:credential",
+        "guardrail:apply",
     ),
     ("tasks", "list_"): ("tasks:read",),
     ("tasks", "get"): ("tasks:read", "config:read"),
@@ -416,16 +424,22 @@ def provisioner_role_statements(
     ]
 
 
-def _common_environment(data: DataStack) -> dict[str, str]:
-    """The five names `api/src/handlers/_common.py` binds at import, plus the log level
+def _common_environment(data: DataStack, guardrail: PromptGuardrail | None) -> dict[str, str]:
+    """The seven names `api/src/handlers/_common.py` binds at import, plus the log level
     it reads. Every one of the 23 functions gets these: `_common` is imported by all of
-    them and an unset table name reads there as a missing grant."""
+    them and an unset table name reads there as a missing grant.
+
+    The guardrail pair is always sent, empty when the deploy turned the guardrail off, so
+    "screens nothing" is a value in the template rather than an absent key (invariant 43).
+    Only the two `guardrail:apply` entry points can use it; the rest hold no grant."""
     return {
         "CONFIG_TABLE": data.configurations.table_name,
         "TASKS_TABLE": data.tasks.table_name,
         "CARDS_TABLE": data.cards.table_name,
         "TASK_QUEUE_URL": data.task_queue.queue_url,
         "PROVISION_QUEUE_URL": data.provision_queue.queue_url,
+        "GUARDRAIL_ID": guardrail.arn if guardrail is not None else "",
+        "GUARDRAIL_VERSION": guardrail.version if guardrail is not None else "",
         "LOG_LEVEL": "INFO",
     }
 
@@ -460,12 +474,21 @@ class ApiStack(cdk.Stack):
         # default argument, so there is exactly one place that says what it is.
         git_author_name: str,
         git_author_email: str,
+        # The prompt guardrail's cross-region profile, or `None` for no guardrail
+        # (`-c guardrailEnabled=false`). Built in this stack and not `DataStack`: see
+        # `stacks/prompt_guardrail.py` for the export that made that a broken deploy.
+        guardrail_profile_id: str | None,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
         self._app_name = app_name
         self._data = data
         self._agent = agent
+        self._guardrail = (
+            add_prompt_guardrail(self, app_name=app_name, profile_id=guardrail_profile_id)
+            if guardrail_profile_id
+            else None
+        )
 
         # One asset, built once and reused by all 23 functions.
         #
@@ -488,7 +511,7 @@ class ApiStack(cdk.Stack):
             ),
         )
         self._code = code
-        common = _common_environment(data)
+        common = _common_environment(data, self._guardrail)
 
         provisioner_environment = {
             **common,
@@ -947,6 +970,32 @@ class ApiStack(cdk.Stack):
                         ],
                     )
                 )
+            elif capability == "guardrail:apply":
+                # Invariant 43. Nothing is granted when the deploy turned the guardrail off,
+                # because there is nothing to name -- and the handler then calls nothing.
+                guardrail = self._guardrail
+                if guardrail is not None:
+                    fn.add_to_role_policy(
+                        iam.PolicyStatement(
+                            sid="ScreenPrompts",
+                            # `ApplyGuardrail` only. No `InvokeModel`: no handler calls a
+                            # model, and the test that pins this route's calls says so.
+                            actions=["bedrock:ApplyGuardrail"],
+                            resources=[
+                                guardrail.arn,
+                                # A Standard-tier guardrail runs through a cross-region
+                                # guardrail profile, and the caller needs the action on the
+                                # profile in every destination region it may route to. The
+                                # profile id pins the geography, so `*` for the region adds
+                                # no reach beyond the regions that profile already lists. And
+                                # the `*` is required, not convenient: measured, a caller in
+                                # us-west-2 was denied on the us-east-1 profile ARN 15 calls
+                                # of 15 without it.
+                                f"arn:aws:bedrock:*:{self.account}"
+                                f":guardrail-profile/{guardrail.profile_id}",
+                            ],
+                        )
+                    )
             else:  # "iam:mint-execution-roles"
                 for statement in provisioner_role_statements(
                     app_name=self._app_name,

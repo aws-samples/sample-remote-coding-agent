@@ -76,6 +76,14 @@ def load_handlers(*names: str) -> tuple[ModuleType, ...]:
     # It defaults to **authorised**, because the alternative default -- every repository
     # unauthorised -- would make the ordinary path the one nobody tests.
     common.agentcore_data = lambda: FakeAgentCore("bedrock-agentcore")  # type: ignore[assignment]
+    # The same argument for the prompt guardrail: `runs.queue_run` screens every prompt, and
+    # moto has no `ApplyGuardrail`. A configured guardrail that **passes** is the default, so
+    # every card-move and task-create test exercises the screening path rather than the
+    # disabled one; a test about a refusal installs its own `FakeGuardrail`.
+    common.bedrock_runtime.cache_clear()
+    common.GUARDRAIL_ID = FakeGuardrail.ARN
+    common.GUARDRAIL_VERSION = "1"
+    common.bedrock_runtime = lambda: FakeGuardrail()  # type: ignore[assignment]
     stale = [
         name for name in _HANDLER_MODULES[1:] if name in names or f"handlers.{name}" in sys.modules
     ]
@@ -415,20 +423,51 @@ class FakeAgentCore:
         return {}
 
 
+class FakeGuardrail(FakeAgentCore):
+    """`bedrock-runtime`'s `ApplyGuardrail`, validated against the real service model like
+    every AgentCore call. `blocked` is the assessment list a refusal carries; `None` passes."""
+
+    ARN = "arn:aws:bedrock:ap-southeast-1:123456789012:guardrail/abcd1234efgh"
+
+    def __init__(
+        self,
+        *,
+        blocked: list[dict[str, Any]] | None = None,
+        errors: dict[str, Iterable[BaseException]] | None = None,
+    ) -> None:
+        super().__init__("bedrock-runtime", errors=errors)
+        self.blocked = blocked
+
+    def _default(self, operation: str, _kwargs: dict[str, Any]) -> dict[str, Any]:
+        if operation != "ApplyGuardrail":
+            raise AssertionError(f"no handler calls bedrock-runtime {operation}")
+        if self.blocked is None:
+            return {"action": "NONE", "outputs": [], "assessments": []}
+        return {"action": "GUARDRAIL_INTERVENED", "outputs": [], "assessments": self.blocked}
+
+
+def blocked_by(policy: str, entries: str, **entry: str) -> list[dict[str, Any]]:
+    """One `ApplyGuardrail` assessment, in the real response's shape, that blocked."""
+    return [{policy: {entries: [{"action": "BLOCKED", "detected": True, **entry}]}}]
+
+
 def install(
     monkeypatch: pytest.MonkeyPatch,
     common: ModuleType,
     *,
     control: FakeAgentCore | None = None,
     data: FakeAgentCore | None = None,
+    guardrail: FakeGuardrail | None = None,
 ) -> None:
-    """Point `_common.agentcore_control`/`agentcore_data` at fakes. Wholesale
-    replacement of the accessor, not of its cache, so nothing reaches moto's
+    """Point `_common.agentcore_control`/`agentcore_data`/`bedrock_runtime` at fakes.
+    Wholesale replacement of the accessor, not of its cache, so nothing reaches moto's
     low-fidelity AgentCore backend."""
     if control is not None:
         monkeypatch.setattr(common, "agentcore_control", lambda: control)
     if data is not None:
         monkeypatch.setattr(common, "agentcore_data", lambda: data)
+    if guardrail is not None:
+        monkeypatch.setattr(common, "bedrock_runtime", lambda: guardrail)
 
 
 def test_the_fake_rejects_a_call_the_real_service_model_rejects() -> None:

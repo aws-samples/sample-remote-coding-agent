@@ -190,9 +190,13 @@ def create(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
     body = _common.parse_body(event)
     config_id, prompt = _common.require(body, "configId", "prompt")
     config = _config(config_id)
+    # Screened before the card exists (invariant 43): a refused prompt has to leave nothing
+    # behind, and the repair below would otherwise keep it on the board as a `BACKLOG` card --
+    # a pasted secret included. `queue_run` takes the result rather than screening twice.
+    screened = runs.screen_prompt(prompt)
     card = cards.create_claimed(config_id, description=prompt)
     try:
-        task = runs.queue_run(config, prompt=prompt, card=card, source="api")
+        task = runs.queue_run(config, prompt=screened, card=card, source="api")
     except Exception:
         # The repair `cards._dispatch` performs for the identical situation: a claim that
         # is spent on a run that never queued is handed back rather than deleted.

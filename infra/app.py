@@ -14,7 +14,9 @@ which is `AccountStack`:
 * `AgentStack` holds what has to be standing before a runtime can be created -- the
   ARM64 image, the VPC, the permissions boundary -- and creates no runtimes at all,
   because a runtime is created per API call by `provisioner._create`.
-* `ApiStack` is the control plane, redeployed whenever a handler changes.
+* `ApiStack` is the control plane, redeployed whenever a handler changes. It also owns the
+  prompt guardrail its handlers apply, so no guardrail value crosses a stack boundary
+  (`stacks/prompt_guardrail.py` says why that matters).
 * `WebStack` is the console, and depends on `ApiStack` through **ARN strings** only.
 * `AccountStack` is split off by **region**, not by lifecycle: a CloudFront-scoped WAF web
   ACL is only creatable in `us-east-1` and AWS Budgets is global, so neither can live in
@@ -42,6 +44,7 @@ from stacks.account_stack import AccountStack
 from stacks.agent_stack import AgentStack, select_agent_zones
 from stacks.api_stack import ApiStack
 from stacks.data_stack import DataStack
+from stacks.prompt_guardrail import guardrail_profile_for
 from stacks.web_stack import WebStack
 
 # The prefix on the physical names and metric names a deployment owns, so one AWS account
@@ -220,6 +223,22 @@ def _agent_zones(app: aws_cdk.App, region: str | None) -> list[str]:
     )
 
 
+def _guardrail_profile(app: aws_cdk.App, region: str | None) -> str | None:
+    """The prompt guardrail's cross-region profile id, or `None` for no guardrail.
+
+    On by default (invariant 43). `-c guardrailEnabled=false` is the off switch, for a region
+    `prompt_guardrail.GUARDRAIL_PROFILES` has no profile for; `-c guardrailProfile=` names one the
+    table does not know yet. No region means an environment-agnostic synth, which
+    `AccountStack` refuses to deploy anyway, so there is no region to look a profile up for.
+    """
+    if not _flag_context(app, "guardrailEnabled", default=True):
+        return None
+    override = _context(app, "guardrailProfile", "")
+    if not region and not override:
+        return None
+    return guardrail_profile_for(region, override)
+
+
 def main() -> None:
     app = aws_cdk.App()
 
@@ -291,6 +310,7 @@ def main() -> None:
         # what makes clearing the key fall back rather than freeze the old value.
         git_author_name=_context(app, "gitAuthorName", ""),
         git_author_email=_context(app, "gitAuthorEmail", ""),
+        guardrail_profile_id=_guardrail_profile(app, region),
         env=env,
     )
 

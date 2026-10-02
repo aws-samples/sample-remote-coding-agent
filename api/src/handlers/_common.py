@@ -27,6 +27,7 @@ from decimal import Decimal
 from typing import Any, Protocol, cast
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 LOG = logging.getLogger("handlers")
@@ -51,6 +52,12 @@ cards_table = dynamodb.Table(os.environ.get("CARDS_TABLE", ""))
 TASK_QUEUE_URL = os.environ.get("TASK_QUEUE_URL", "")
 PROVISION_QUEUE_URL = os.environ.get("PROVISION_QUEUE_URL", "")
 
+# The prompt guardrail `runs.screen_prompt` applies (invariant 43). Both empty is the one
+# spelling of "this deployment screens nothing", which only `-c guardrailEnabled=false`
+# produces; `infra/stacks/api_stack.py::_common_environment` always sends both keys.
+GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")
+GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "")
+
 
 @functools.lru_cache(maxsize=1)
 def agentcore_control() -> Any:
@@ -69,6 +76,24 @@ def agentcore_data() -> Any:
     """The AgentCore *data* plane: InvokeAgentRuntime and StopRuntimeSession. Lazy for
     the same reason as `agentcore_control`."""
     return _SESSION.client("bedrock-agentcore")
+
+
+@functools.lru_cache(maxsize=1)
+def bedrock_runtime() -> Any:
+    """`ApplyGuardrail`, and nothing else: no handler invokes a model.
+
+    The timeouts are explicit because botocore's defaults are 60 seconds each, and the two
+    routes that screen a prompt have 30: a slow guardrail would otherwise surface as a Lambda
+    timeout -- a bare 500 -- instead of the `503 GuardrailUnavailable` that names it.
+    """
+    return _SESSION.client(
+        "bedrock-runtime",
+        config=Config(
+            connect_timeout=3,
+            read_timeout=8,
+            retries={"mode": "standard", "max_attempts": 2},
+        ),
+    )
 
 
 class ApiError(Exception):
