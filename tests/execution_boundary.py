@@ -139,6 +139,15 @@ SURPLUS_ACTIONS: dict[str, str] = {}
 # name, keyed by `(Sid, pattern)`. This is the dimension where the ceiling really is traded
 # away, and each reason is the one already written into `agent_stack.py` beside the statement.
 WIDER_RESOURCES: dict[tuple[str, str], str] = {
+    (
+        "MayRefreshGitHubCredential",
+        f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:bedrock-agentcore-identity!*",
+    ): (
+        "The boundary is minted once per deploy, before any GitHub App is connected, so it can "
+        "only name AgentCore Identity's service-linked prefix; the grant names the one literal "
+        "client-secret ARN. The trailing `*` also absorbs the random suffix every secret ARN "
+        "carries, so an ARN ending at the name would match nothing."
+    ),
     ("MayTouchOwnRows", f"arn:aws:dynamodb:{REGION}:{ACCOUNT}:table/*"): (
         "`DataStack` owns the table names and is a sibling stack, so naming them here would "
         "couple two deploys for no security. The per-configuration `dynamodb:LeadingKeys` "

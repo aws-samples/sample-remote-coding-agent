@@ -390,6 +390,11 @@ _CONFIG = {
     # `test_the_boundary_permits_no_action_the_inline_policy_does_not_grant` reports the six
     # actions `MayUseOwnMemory` allows as dead surface.
     "memoryId": "rca_mem_cfg_0123456789ab-AbCdEfGhIj",
+    # The GitHub App's client secret, as `_ensure_role` resolves it from
+    # `github_app.provider_secret_arn()` -- a connected deployment. Without it the inline policy
+    # carries no `RefreshGitHubCredential` and the boundary's `MayRefreshGitHubCredential`
+    # reads as dead surface, the same reason `memoryId` is here.
+    "githubSecretArn": "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:bedrock-agentcore-identity!default/oauth2/rca_github-fdf929fb-0JG5Oo",
 }
 
 # What `ApiStack` forwards as `AGENT_IMAGE_URI`: the CDK assets repository, whose name
@@ -587,15 +592,51 @@ def test_configurations_access_is_get_item_only(policy: dict[str, Any]) -> None:
     )
 
 
-def test_no_statement_reaches_secrets_manager_at_all(policy: dict[str, Any]) -> None:
-    """There is no secret, so there is no `secretsmanager:` anywhere in a container's role.
+def test_the_only_secret_a_container_can_read_is_the_apps_client_secret(
+    policy: dict[str, Any], aws: Any
+) -> None:
+    """One action, one literal ARN -- and the statement exists because a refresh needs it.
 
-    This replaced a `ReadOwnSecret` statement naming one literal secret ARN, and the swap is
-    not a tightening -- see `test_the_github_credential_statement_is_as_narrow_as_the_service_permits`
-    below, which states what was given up. What is asserted here is only the half that did
-    improve: the container can no longer reach Secrets Manager under any name.
+    AgentCore Identity refreshes an expired GitHub token by reading the app's client secret
+    **with the caller's permissions**. Measured against an 11-hour-old authorisation: a role
+    holding only the two credential actions answered `AccessDenied ...
+    secretsmanager:GetSecretValue on ...bedrock-agentcore-identity!default/oauth2/rca_github-...`,
+    and the same call from a role with the read refreshed and stored the token. Without this
+    statement a container works for eight hours and then fails at `submit`.
+
+    Three properties, each a way to get it wrong:
+
+    * **`GetSecretValue` only.** No write, rotate or delete: the client secret is what every
+      repository's credential depends on.
+    * **The literal ARN, never the `bedrock-agentcore-identity!*` prefix** the boundary
+      allows. The prefix covers every credential provider's secret in the account.
+    * **Absent when no app is connected**, like `UseOwnMemory` without a `memoryId` -- not an
+      Allow on an empty resource.
     """
-    assert "secretsmanager:" not in json.dumps(policy)
+    secret_statements = [
+        statement
+        for statement in policy["Statement"]
+        if any(action.startswith("secretsmanager:") for action in _actions(statement))
+    ]
+    assert [statement["Sid"] for statement in secret_statements] == ["RefreshGitHubCredential"]
+    (statement,) = secret_statements
+    assert _actions(statement) == ["secretsmanager:GetSecretValue"]
+    resources = _resources(statement)
+    assert resources == [_CONFIG["githubSecretArn"]], (
+        f"the read must name the one client-secret ARN, got {resources}"
+    )
+    assert not any(resource.endswith("*") for resource in resources), (
+        "a wildcard here reaches every credential provider's secret in the account"
+    )
+
+    _common, provisioner = _load("provisioner")
+    without = provisioner._execution_role_policy(
+        {key: value for key, value in _CONFIG.items() if key != "githubSecretArn"}
+    )
+    assert "secretsmanager:" not in json.dumps(without), (
+        "a deployment with no GitHub App connected has no secret to name, so the role must "
+        "carry no Secrets Manager statement at all"
+    )
 
 
 def test_the_github_credential_statement_is_as_narrow_as_the_service_permits(

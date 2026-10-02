@@ -198,6 +198,51 @@ def _provider() -> dict[str, Any]:
         raise
 
 
+def provider_secret_arn() -> str:
+    """The ARN of the Secrets Manager secret AgentCore Identity keeps the app's client secret in.
+
+    **Every execution role is granted `GetSecretValue` on exactly this ARN, and that grant is
+    what lets a container refresh its own token.** Identity performs that read with the
+    *caller's* permissions -- measured: a token older than its eight-hour lifetime, fetched
+    with only the two credential actions, answered `AccessDenied ... secretsmanager:
+    GetSecretValue on ...bedrock-agentcore-identity!default/oauth2/rca_github-...`, while the
+    same call from a role holding the read refreshed the token and stored it. The ARN is the
+    narrowest resource that grant can name. It is the same one for every repository, because
+    every repository shares this deployment's one GitHub App; what is per repository is the
+    token in the vault, which the service gives no way to fence.
+
+    Read off the settings item, where `convert` stores it, so a provision normally costs no
+    AgentCore call. A deployment connected before this existed has no stored ARN; it is read off
+    the live provider once and stored, the same backfill `commit_identity` does. `""` when no
+    app is connected or the provider carries no managed secret -- the caller then omits the
+    statement rather than writing an Allow on an empty resource.
+    """
+    settings = _settings()
+    stored = str(settings.get("clientSecretArn") or "")
+    if stored:
+        return stored
+    if not settings.get("appSlug"):
+        return ""
+    try:
+        provider = _provider()
+    except ClientError as err:
+        # A warning and `""`, never a raise: this runs inside every provision, and failing a
+        # runtime create or update because a *refresh* grant could not be named trades an
+        # eight-hour-later problem for an immediate one. The role then carries no
+        # `RefreshGitHubCredential`, which is the failure the warning names, and the next
+        # provision retries -- nothing empty is stored.
+        LOG.warning(
+            "could not read the credential provider's secret ARN (%s); execution roles will "
+            "not be able to refresh a GitHub token older than eight hours",
+            err.response.get("Error", {}).get("Code"),
+        )
+        return ""
+    arn = str((provider.get("clientSecretArn") or {}).get("secretArn") or "")
+    if arn:
+        _save_settings(clientSecretArn=arn)
+    return arn
+
+
 def _ensure_provider() -> dict[str, Any]:
     """The provider, created with a placeholder secret if it does not exist yet.
 
@@ -614,7 +659,7 @@ def convert(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
             "GitHub created the app but did not return a client id, client secret and slug",
         )
 
-    _common.agentcore_control().update_oauth2_credential_provider(
+    updated = _common.agentcore_control().update_oauth2_credential_provider(
         name=PROVIDER_NAME,
         credentialProviderVendor=PROVIDER_VENDOR,
         # `callbackUrl` is **not** sent and must not be: it is assigned by AgentCore and
@@ -631,6 +676,9 @@ def convert(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
         appOwner=str((decoded.get("owner") or {}).get("login") or ""),
         gitAuthorName=name,
         gitAuthorEmail=email,
+        # Stored so provisioning can name it in every execution role without an AgentCore
+        # call -- see `provider_secret_arn`.
+        clientSecretArn=str((updated.get("clientSecretArn") or {}).get("secretArn") or ""),
     )
     LOG.info("connected the GitHub App %s to this deployment", slug)
     return 200, _public_settings(_settings(), _provider())
