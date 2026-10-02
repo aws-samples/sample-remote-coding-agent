@@ -257,6 +257,37 @@ def test_rca_region_is_the_pin(home: Path, monkeypatch: pytest.MonkeyPatch) -> N
         assert resolve_endpoint() == (_OTHER_URL, "cloudformation", _OTHER_REGION)
 
 
+def test_an_override_is_signed_for_the_region_its_url_names(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An `execute-api` URL names its region, and that outranks the ambient `AWS_REGION`.
+
+    Measured: with Claude Code's `AWS_REGION=us-west-2` and an `api_url` override pointing at
+    a us-east-1 API, every request was signed for us-west-2 and answered a bare 403.
+    `RCA_REGION` still wins, and a host that names no region falls back to the ambient one.
+    """
+    monkeypatch.setenv("AWS_REGION", _REGION)
+    monkeypatch.delenv("RCA_REGION", raising=False)
+    monkeypatch.setenv("RCA_API_URL", f"{_OTHER_URL}/")
+    assert resolve_endpoint() == (_OTHER_URL, "env", _OTHER_REGION)
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"items": [], "nextCursor": None})
+
+    ApiClient(transport=httpx.MockTransport(handler)).get("/configurations")
+    assert f"/{_OTHER_REGION}/execute-api/aws4_request" in seen[0].headers["authorization"]
+
+    monkeypatch.setenv("RCA_REGION", "eu-west-1")
+    assert resolve_endpoint()[2] == "eu-west-1", "the explicit pin still wins"
+
+    monkeypatch.delenv("RCA_REGION")
+    monkeypatch.setenv("RCA_API_URL", "https://api.example.com/prod")
+    assert resolve_endpoint()[2] == _REGION, "a custom domain names no region"
+
+
 def test_an_unreachable_endpoint_names_where_its_url_came_from(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

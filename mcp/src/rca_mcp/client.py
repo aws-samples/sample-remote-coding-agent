@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.parse
 from collections.abc import Mapping
 from datetime import datetime
@@ -223,6 +224,17 @@ def _write_cache(url: str, *, stack_name: str, region: str, stack: Mapping[str, 
         LOG.warning("could not write the endpoint cache at %s (%s); carrying on", path, err)
 
 
+# `https://<api-id>.execute-api.<region>.amazonaws.com[/stage]`, the only shape API Gateway
+# issues. A custom domain names no region, and falls through to the ambient one.
+_EXECUTE_API_HOST = re.compile(r"^[a-z0-9]+\.execute-api\.([a-z0-9-]+)\.amazonaws\.com$")
+
+
+def _region_from_url(url: str) -> str | None:
+    """The region an `execute-api` URL names, or `None` for any other host."""
+    match = _EXECUTE_API_HOST.match(urllib.parse.urlsplit(url).hostname or "")
+    return match.group(1) if match else None
+
+
 def resolve_endpoint(
     *, stack_name: str | None = None, region: str | None = None, refresh: bool = False
 ) -> tuple[str, str, str]:
@@ -247,7 +259,12 @@ def resolve_endpoint(
     if override:
         # No session on this arm: the override exists so a hand-run server needs no
         # `cloudformation:DescribeStacks`, and `""` means "no opinion on the region".
-        signing_region = region or _env("RCA_REGION") or _env("AWS_REGION") or ""
+        # The URL's own region outranks the ambient `AWS_REGION`: an `execute-api` URL
+        # names the region it answers in, and signing for any other is a bare 403 --
+        # measured with Claude Code's `AWS_REGION=us-west-2` against a us-east-1 API.
+        signing_region = (
+            region or _env("RCA_REGION") or _region_from_url(override) or _env("AWS_REGION") or ""
+        )
         return override.rstrip("/"), "env", signing_region
 
     pinned = bool(region or _env("RCA_REGION") or _env("RCA_STACK_NAME"))
