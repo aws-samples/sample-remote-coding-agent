@@ -520,10 +520,26 @@ def create(event: Mapping[str, Any]) -> tuple[int, dict]:
 
     title = body.get("title")
     title = title.strip() if isinstance(title, str) and title.strip() else None
+    _screen_card_text(title, description)
     card = _card_item(config_id, description=description, title=title)
     _common.cards_table.put_item(Item=card, ConditionExpression=Attr("cardId").not_exists())
     LOG.info("created card=%s config=%s", card["cardId"], config_id)
     return 201, _with_column(card, None)
+
+
+def _screen_card_text(*parts: str | None) -> None:
+    """Screen a card's text before it is stored, not only when it is dispatched.
+
+    `move` screens a card's prompt on its way into Planning (invariant 43), but by then the
+    text is already in the Cards table: a card holding a pasted access key was refused at
+    dispatch, returned to the backlog, and kept the key -- in the item, and in the table's
+    point-in-time recovery for as long as that retains it. So a write the guardrail refuses
+    stores nothing, and `move` still screens, because a card written before the guardrail
+    existed, or against an older guardrail version, was never screened by this one.
+    """
+    text = "\n\n".join(part for part in parts if part)
+    if text:
+        runs.screen_prompt(text, refused="the card was not saved")
 
 
 @handler
@@ -600,6 +616,9 @@ def patch(event: Mapping[str, Any]) -> tuple[int, dict]:
         names[f"#f{index}"] = field
         values[f":v{index}"] = value
         sets.append(f"#f{index} = :v{index}")
+    # After validation and before the write: an edit is how a secret gets onto a card that
+    # was screened clean when it was created.
+    _screen_card_text(*(body[field] for field in EDITABLE_FIELDS if field in body))
 
     try:
         updated = _common.cards_table.update_item(

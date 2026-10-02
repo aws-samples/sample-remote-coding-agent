@@ -62,7 +62,11 @@ CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 # The README was sitting at exactly 200 when this was raised -- no headroom at all -- so the
 # alternative was deleting a walkthrough step to make room for a security warning, which is
 # the wrong trade. Raise this again only for something that changes what an operator does.
-_README_MAX_LINES = 250
+#
+# Raised a second time, from 250 to 270, for `### Test the prompt guardrail`: invariant 43
+# refuses prompts, and an operator who has never seen a refusal reads their first one as a
+# broken deploy. The section is 16 lines and the README was again at exactly the ceiling.
+_README_MAX_LINES = 270
 
 # Required navigation, not an exact editorial outline. Keep the entry page short.
 _README_HEADINGS = ["## Quick start", "## Architecture", "## Costs and cleanup"]
@@ -1392,3 +1396,17 @@ def test_a_deployed_tree_does_not_make_a_documented_path_ambiguous(
     monkeypatch.setattr(f"{__name__}._BY_STEM", by_stem)
     test_every_path_a_document_names_exists()
     test_every_symbol_a_document_names_is_in_the_file_it_names()
+
+
+def test_the_guardrail_walkthrough_names_what_the_code_returns() -> None:
+    """`### Test the prompt guardrail` tells an operator which refusal to expect. Every error
+    code and policy type it names has to be one the code can actually produce, or a renamed
+    policy leaves a walkthrough whose expected output never appears."""
+    text = README.read_text()
+    section = text.split("### Test the prompt guardrail", 1)[1].split("\n## ", 1)[0]
+    runs = (REPO_ROOT / "api/src/handlers/runs.py").read_text()
+    policies = (REPO_ROOT / "infra/stacks/prompt_guardrail.py").read_text()
+    for code in ("PromptBlockedByGuardrail", "GuardrailUnavailable"):
+        assert f"`{code}`" in section and f'"{code}"' in runs, code
+    for policy in ("PROMPT_ATTACK", "MISCONDUCT", "AWS_ACCESS_KEY"):
+        assert f"`{policy}`" in section and f'"{policy}"' in policies, policy

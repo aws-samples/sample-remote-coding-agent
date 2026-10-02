@@ -68,6 +68,7 @@ _CLIENTS = frozenset(
         "iam",
         "agentcore_control",
         "agentcore_data",
+        "bedrock_runtime",
     }
 )
 
@@ -120,11 +121,21 @@ _GRANTS: dict[tuple[str, str], set[str]] = {
         "agentcore_data.retrieve_memory_records",
         "agentcore_data.list_memory_records",
     },
-    ("cards", "create"): {"config_table.get_item", "cards_table.put_item"},
+    # Both card writes screen the text before storing it (invariant 43).
+    ("cards", "create"): {
+        "config_table.get_item",
+        "cards_table.put_item",
+        "bedrock_runtime.apply_guardrail",
+    },
     ("cards", "list_"): {"cards_table.query", "tasks_table.get_item", "tasks_table.query"},
     ("cards", "get"): {"cards_table.get_item", "tasks_table.get_item"},
     # `patch` re-renders the derived view, which reads the linked run.
-    ("cards", "patch"): {"cards_table.get_item", "cards_table.update_item", "tasks_table.get_item"},
+    ("cards", "patch"): {
+        "cards_table.get_item",
+        "cards_table.update_item",
+        "tasks_table.get_item",
+        "bedrock_runtime.apply_guardrail",
+    },
     ("cards", "delete"): {
         "cards_table.get_item",
         "tasks_table.get_item",
@@ -137,6 +148,8 @@ _GRANTS: dict[tuple[str, str], set[str]] = {
         "tasks_table.get_item",
         "tasks_table.put_item",
         "sqs.send_message",
+        # `runs.screen_prompt`, granted by `guardrail:apply` (invariant 43).
+        "bedrock_runtime.apply_guardrail",
     },
     # Every run has a card: `create_claimed` puts it, `store_task_id`/`release` update it.
     ("tasks", "create"): {
@@ -145,6 +158,7 @@ _GRANTS: dict[tuple[str, str], set[str]] = {
         "sqs.send_message",
         "cards_table.put_item",
         "cards_table.update_item",
+        "bedrock_runtime.apply_guardrail",
     },
     ("tasks", "list_"): {"tasks_table.query"},
     ("tasks", "get"): {"tasks_table.get_item", "config_table.get_item"},
@@ -361,6 +375,27 @@ def test_the_memory_route_reaches_two_read_only_agentcore_operations_and_nothing
         assert not any(
             reached.endswith(f".{forbidden}") for reached in _reachable(_MEMORY_ROUTE)
         ), f"configurations.memory reaches {forbidden}"
+
+
+def test_the_guardrail_is_reached_by_the_routes_that_queue_or_store_a_prompt() -> None:
+    """Invariant 43's grant half. `guardrail:apply` is on exactly the two entry points that
+    reach `runs.queue_run` and the two that store a card's text, and the one operation they
+    reach is `ApplyGuardrail`: no handler invokes a model, so a `bedrock_runtime` call of
+    any other name is a widening."""
+    reaching = {
+        entry
+        for entry in _GRANTS
+        if any(call.startswith("bedrock_runtime.") for call in _reachable(entry))
+    }
+    assert reaching == {
+        ("tasks", "create"),
+        ("cards", "move"),
+        ("cards", "create"),
+        ("cards", "patch"),
+    }
+    for entry in reaching:
+        calls = {c for c in _reachable(entry) if c.startswith("bedrock_runtime.")}
+        assert calls == {"bedrock_runtime.apply_guardrail"}, entry
 
 
 def test_observability_imports_no_boto3() -> None:

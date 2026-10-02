@@ -3,6 +3,10 @@
 `tasks.create` and `cards.move` both call `queue_run` and nothing else, so the two
 entry points cannot drift about what a run is -- which item attributes exist, what a
 dispatch message looks like, or whether a configuration was allowed to run at all.
+
+`screen_prompt` is the one caller of the prompt guardrail (invariant 43), and `queue_run`
+will not queue a prompt it has not passed: a `str` is screened on the way in, and the only
+other thing it accepts is the `ScreenedPrompt` that `screen_prompt` alone constructs.
 """
 
 from __future__ import annotations
@@ -10,10 +14,12 @@ from __future__ import annotations
 import json
 import secrets as secrets_module
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from boto3.dynamodb.conditions import Attr
+from botocore.exceptions import BotoCoreError, ClientError
 
 from . import _common, github_app, observability
 from ._common import LOG, ApiError
@@ -63,6 +69,99 @@ def is_terminal(status: str | None) -> bool:
     return status in TERMINAL_STATUSES
 
 
+@dataclass(frozen=True)
+class ScreenedPrompt:
+    """A prompt the guardrail has passed. Constructed by `screen_prompt` and nowhere else
+    (`tests/test_api_runs.py` holds that), so holding one is the proof it was screened."""
+
+    text: str
+
+
+# The assessment members that can block, and the key that names *what* tripped in each.
+# `match` is deliberately never read: it is the prompt's own text, and a refusal that echoed
+# it would put a pasted secret into the response, the console and the log.
+_ASSESSMENT_FINDINGS: tuple[tuple[str, str, str, str], ...] = (
+    ("contentPolicy", "filters", "content", "type"),
+    ("topicPolicy", "topics", "topic", "name"),
+    ("wordPolicy", "managedWordLists", "word", "type"),
+    ("sensitiveInformationPolicy", "piiEntities", "sensitiveInformation", "type"),
+    ("sensitiveInformationPolicy", "regexes", "sensitiveInformation", "name"),
+)
+
+
+def _blocking_findings(assessments: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    """What the guardrail blocked on, as `{policy, type}` pairs -- never the matched text."""
+    found: list[dict[str, str]] = []
+    for assessment in assessments:
+        for member, entries, policy, label in _ASSESSMENT_FINDINGS:
+            for entry in (assessment.get(member) or {}).get(entries) or []:
+                if entry.get("action") in ("BLOCKED", "ANONYMIZED"):
+                    finding = {"policy": policy, "type": str(entry.get(label, ""))}
+                    if finding not in found:
+                        found.append(finding)
+    return found
+
+
+def screen_prompt(prompt: str, *, refused: str = "no run was queued") -> ScreenedPrompt:
+    """Pass `prompt` through the deployment's guardrail, or refuse it (invariant 43).
+
+    `refused` is what the refusal says did not happen. A run is the default; a card write
+    passes "the card was not saved", because `cards.create` and `cards.patch` screen too --
+    a secret refused at dispatch but already stored on a card was still a stored secret.
+
+    **Fails closed.** A guardrail that cannot be reached is a `503`, not a pass: this is the
+    one check between an operator's text and a model with unrestricted `Bash`, and a check
+    that waves prompts through whenever the service is slow is one an attacker only has to
+    wait out. The refusal names the policies that tripped and never the text that tripped
+    them, because the sensitive-information policy exists to catch a pasted secret.
+    """
+    if not _common.GUARDRAIL_ID:
+        # `-c guardrailEnabled=false`: a deploy-time decision, recorded in the template,
+        # rather than something a missing variable decides at run time.
+        return ScreenedPrompt(prompt)
+    try:
+        answer = _common.bedrock_runtime().apply_guardrail(
+            guardrailIdentifier=_common.GUARDRAIL_ID,
+            guardrailVersion=_common.GUARDRAIL_VERSION,
+            source="INPUT",
+            content=[{"text": {"text": prompt}}],
+            outputScope="INTERVENTIONS",
+        )
+    except (ClientError, BotoCoreError) as err:
+        # The service's own code goes into the message, because the 503 covers two very
+        # different things: `ThrottlingException` clears on a retry, while
+        # `AccessDeniedException` or `ValidationException` (a deleted or mistyped version,
+        # measured) is a broken deploy that no retry fixes.
+        reason = (
+            err.response.get("Error", {}).get("Code", "ClientError")
+            if isinstance(err, ClientError)
+            else type(err).__name__
+        )
+        LOG.error("guardrail unavailable, refusing to queue: %s", reason)
+        raise ApiError(
+            503,
+            "GuardrailUnavailable",
+            f"the prompt guardrail did not answer ({reason}), so the prompt was not screened "
+            f"and {refused}. A throttle clears on a retry; an access or validation "
+            "error means the deployment's guardrail settings need fixing.",
+            reason=reason,
+        ) from err
+    if answer.get("action") != "GUARDRAIL_INTERVENED":
+        return ScreenedPrompt(prompt)
+    findings = _blocking_findings(answer.get("assessments") or [])
+    LOG.warning("prompt refused by the guardrail: %s", findings)
+    # The types are spelled into the message as well as `findings`, because the MCP client
+    # renders `error` and `message` only: from Claude Code, the message is all there is.
+    tripped = ", ".join(finding["type"] for finding in findings) or "unspecified"
+    raise ApiError(
+        422,
+        "PromptBlockedByGuardrail",
+        f"the prompt guardrail refused this prompt ({tripped}), so {refused}. "
+        "Rephrase the task, and never paste a credential into one.",
+        findings=findings,
+    )
+
+
 def new_task_id() -> str:
     """`tsk_<epoch-ms>_<6 hex>`: time-sortable, so a `query` with
     `ScanIndexForward=False` is newest-first with no GSI at all (PLAN's `### Data`
@@ -73,11 +172,15 @@ def new_task_id() -> str:
 def queue_run(
     config: Mapping[str, Any],
     *,
-    prompt: str,
+    prompt: str | ScreenedPrompt,
     card: Mapping[str, Any] | None = None,
     source: str,
 ) -> dict[str, Any]:
-    """Write the task item and enqueue its dispatch. Returns the stored item."""
+    """Write the task item and enqueue its dispatch. Returns the stored item.
+
+    A `str` prompt is screened here; a `ScreenedPrompt` already was. `tasks.create` screens
+    before it creates the card, so a refused prompt never lands on the board, and this stays
+    both the one place a run is queued and the one place an unscreened prompt is refused."""
     status = config.get("status")
     if status != "READY":
         # A run queued against a `CREATING` configuration dies in the dispatcher with a
@@ -107,12 +210,16 @@ def queue_run(
             repository=config.get("repository"),
         )
 
+    # Third, after the two refusals that cost nothing to compute and before anything is
+    # written, so a refused prompt leaves no task item and no dispatch message.
+    screened = prompt if isinstance(prompt, ScreenedPrompt) else screen_prompt(prompt)
+
     task_id = new_task_id()
     stamp = _common.now_iso()
     task: dict[str, Any] = {
         "configId": config["configId"],
         "taskId": task_id,
-        "prompt": prompt,
+        "prompt": screened.text,
         "status": QUEUED,
         "sessionId": observability.session_id(task_id),
         # Copied rather than resolved at dispatch time, so a `DELETE` of the
