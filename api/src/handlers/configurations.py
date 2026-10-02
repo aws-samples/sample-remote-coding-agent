@@ -365,7 +365,12 @@ def create(event: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
         raise ApiError(
             409,
             "RepositoryAlreadyRegistered",
-            f"{repository} is already registered; patch or delete that configuration instead",
+            # The id and the next step go in the *message*, not only beside it: the MCP
+            # client renders just the message, and "patch or delete" named two actions its
+            # tools cannot take, with no id to take them on.
+            f"{repository} is already registered as {existing.get('configId')} "
+            f"({existing.get('status')}); use that configuration -- its commands can be "
+            "changed, or it can be deregistered, on its settings page in the console",
             configId=existing.get("configId"),
             repository=repository,
         )

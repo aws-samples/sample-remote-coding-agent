@@ -73,6 +73,23 @@ def _required(arguments: Mapping[str, Any], name: str) -> str:
     return value.strip()
 
 
+def _config_id(arguments: Mapping[str, Any]) -> str:
+    """The `configId` argument, refused locally when it is a repository name.
+
+    `lazydragon/rca-test` is the natural thing for a model to pass, and sent as a path
+    segment it came back as a bare `404 HttpError: Not Found` -- a dead end that named
+    neither the mistake nor the fix. A configuration id never contains a slash, so a value
+    that does is a repository and the answer is the lookup that maps one to the other.
+    """
+    config_id = _required(arguments, "configId")
+    if "/" in config_id or ":" in config_id:
+        raise ValueError(
+            f"configId must be a configuration id such as cfg_1a2b3c, not a repository name "
+            f"or URL; call list_repositories to find the configId registered for {config_id}"
+        )
+    return config_id
+
+
 def list_repositories(client: ApiClient, arguments: Mapping[str, Any]) -> str:
     # `arguments.get` rather than an unused parameter: ruff's ARG001 is on for `mcp/src`.
     return fmt.repositories(client.get("/configurations", limit=arguments.get("limit")))
@@ -96,13 +113,13 @@ def register_repository(client: ApiClient, arguments: Mapping[str, Any]) -> str:
 
 
 def get_repository(client: ApiClient, arguments: Mapping[str, Any]) -> str:
-    config_id = _required(arguments, "configId")
+    config_id = _config_id(arguments)
     return fmt.repository(client.get(f"/configurations/{config_id}"))
 
 
 def start_task(client: ApiClient, arguments: Mapping[str, Any]) -> str:
     body = {
-        "configId": _required(arguments, "configId"),
+        "configId": _config_id(arguments),
         "prompt": _required(arguments, "prompt"),
     }
     return fmt.task(client.post("/tasks", body))
@@ -113,14 +130,14 @@ def get_task(client: ApiClient, arguments: Mapping[str, Any]) -> str:
     # `configId` is required, not a convenience: Tasks is keyed configId + taskId with no
     # GSI (`api/src/handlers/tasks.py::_required_config_id`), so a task genuinely cannot
     # be found by id alone and the route answers 400 without it.
-    return fmt.task(client.get(f"/tasks/{task_id}", configId=_required(arguments, "configId")))
+    return fmt.task(client.get(f"/tasks/{task_id}", configId=_config_id(arguments)))
 
 
 def list_tasks(client: ApiClient, arguments: Mapping[str, Any]) -> str:
     return fmt.tasks(
         client.get(
             "/tasks",
-            configId=_required(arguments, "configId"),
+            configId=_config_id(arguments),
             status=arguments.get("status"),
             limit=arguments.get("limit"),
         )
@@ -158,9 +175,10 @@ TOOLS: tuple[ToolSpec, ...] = (
             "It takes NO credential -- the deployment authenticates through one GitHub App "
             "held in AgentCore Identity, so never ask the operator for a token and never "
             "accept one. Registering is only half the setup: the operator then has to "
-            "authorise the repository in the console, which is a browser step no tool here "
-            "can take for them, and a task started before that is refused with 409 "
-            "GitHubNotAuthorized. The new configuration starts at PENDING. " + _PROVISIONING_NOTE
+            "authorise the repository, a browser step no tool here can take for them: opening "
+            "the repository's page in the console starts it, and a task started before it "
+            "is done is refused with 409 GitHubNotAuthorized. The new configuration starts "
+            "at PENDING. " + _PROVISIONING_NOTE
         ),
         input_schema={
             "type": "object",
@@ -330,7 +348,7 @@ def call_tool(client: ApiClient, name: str, arguments: Mapping[str, Any] | None)
 
     `RcaError` and the `ValueError`s from argument and URL validation come back as text
     rather than as exceptions, because the most important message in this package --
-    "the control plane is not deployed; run /rca:setup" -- is only useful if the *model*
+    "the control plane is not deployed; run `make deploy`" -- is only useful if the *model*
     sees it. As a raised exception it becomes a transport-level failure Claude Code
     reports as a broken server. Anything else propagates: a bug should be loud.
 
@@ -338,7 +356,7 @@ def call_tool(client: ApiClient, name: str, arguments: Mapping[str, Any] | None)
     carry it and a seventh gets it for free. It is appended on the error path too: a 404
     NotFound for a configId that exists in the *other* deployment is precisely the
     confusion this line exists to end. Before anything is resolved it is empty and nothing
-    is appended, which is what keeps the "/rca:setup" answer a bare `Error: ...`.
+    is appended, which is what keeps the "not deployed" answer a bare `Error: ...`.
     """
     spec = TOOLS_BY_NAME.get(name)
     if spec is None:

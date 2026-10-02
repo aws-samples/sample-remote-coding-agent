@@ -325,6 +325,29 @@ def test_the_digest_moves_for_an_in_place_edit(tmp_path: Path) -> None:
     assert isinstance(git_ops.source_diff_digest(fresh), str)
 
 
+def test_build_artifacts_are_never_committed(tmp_path: Path) -> None:
+    """A repository with no `.gitignore` shipped its bytecode in an agent pull request,
+    because `commit` stages with `git add -A`. The exclude is local to the clone, so the
+    repository's own files are untouched, and a re-run (a resume) adds nothing twice."""
+    repo = make_git_repo(tmp_path / "repo", files={"src/app.py": "x = 1\n"})
+    git_ops.exclude_build_artifacts(repo)
+    git_ops.exclude_build_artifacts(repo)
+    exclude = (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    for pattern in git_ops.BUILD_ARTIFACT_PATTERNS:
+        assert exclude.splitlines().count(pattern) == 1, pattern
+
+    write(repo / "src" / "app.py", "x = 2\n")
+    write(repo / "src" / "__pycache__" / "app.cpython-313.pyc", "bytecode")
+    write(repo / ".pytest_cache" / "v" / "cache" / "nodeids", "[]")
+    write(repo / "node_modules" / "left-pad" / "index.js", "module.exports = 1\n")
+    assert git_ops.changed_paths(repo) == ["src/app.py"]
+
+    git_ops.commit(repo, "the change")
+    _, tracked, _ = git_ops._git(["ls-files"], cwd=repo)
+    assert tracked.split() == ["src/app.py"]
+    assert not (repo / ".gitignore").exists(), "the repository's own files are not edited"
+
+
 # --------------------------------------------------------------------------------------
 # the token
 # --------------------------------------------------------------------------------------

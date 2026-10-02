@@ -189,6 +189,7 @@ async def checkout(state: TaskState) -> dict[str, Any]:
     base_branch = state.get("baseBranch") or git_ops.default_branch(repo_dir)
     branch = state.get("branch") or f"agent/{task_id}"
     git_ops.create_branch(repo_dir, branch)
+    git_ops.exclude_build_artifacts(repo_dir)
 
     _quarantine_repo_agent_dir(repo_dir, resumed=bool(state.get("resumed", False)))
     memory.ensure_dirs(repo_dir)

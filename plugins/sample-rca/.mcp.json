@@ -9,7 +9,7 @@
       ],
       "env": {
         "RCA_API_URL": "${user_config.api_url}",
-        "AWS_REGION": "${user_config.aws_region}",
+        "RCA_REGION": "${user_config.aws_region}",
         "RCA_STACK_NAME": "${user_config.stack_name}"
       }
     }

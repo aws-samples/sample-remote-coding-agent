@@ -314,7 +314,7 @@ def test_an_unresolved_endpoint_renders_no_line() -> None:
     """Nothing settled means nothing to report, and a region alone is not a report.
 
     A tool that failed *during* discovery reports `("", "", "")`, and `call_tool` appends
-    nothing -- which is what keeps the "/sample-rca:setup" answer a bare `Error: ...`. A
+    nothing -- which is what keeps the "not deployed" answer a bare `Error: ...`. A
     region with no URL comes from `AWS_REGION` rather than from any resolution, and
     printing it would be an empty field dressed as a fact.
     """

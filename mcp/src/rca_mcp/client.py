@@ -16,8 +16,16 @@ the plugin, paste it in. Reading the output *from the stack* removes that step
 entirely, which is why `plugins/sample-rca/.claude-plugin/plugin.json` needs no required
 `userConfig` at all. Resolution is lazy -- on the first tool call, not at import -- so
 the server still starts against an account that has never been deployed to, and the
-"run /sample-rca:setup" message arrives as tool output a model can act on rather than as a
+"run `make deploy`" message arrives as tool output a model can act on rather than as a
 startup crash Claude Code reports as "server failed".
+
+**The region pin is `RCA_REGION`, never `AWS_REGION`.** `AWS_REGION` is ambient: Claude
+Code on Bedrock sets it in its own `settings.json` `env` for the *model's* region, and every
+MCP server it starts inherits it. Read as a pin, it sent a project-scoped server to that
+region and reported "not deployed" while `~/.rca/endpoint.json` named the right one; and the
+plugin exporting its `aws_region` field *as* `AWS_REGION` blanked the shell's own value. So
+the one variable that means "I chose this region" is this package's own, and `AWS_REGION`
+is left to boto3 as the ambient default it is.
 
 No request body is ever logged. `register_repository`'s body carries the operator's
 GitHub token; method, path and status are the whole of what is interesting anyway.
@@ -61,9 +69,10 @@ class RcaError(RuntimeError):
 class SetupRequired(RcaError):  # noqa: N818 -- the name is the instruction, not an "Error"
     """The control plane is not deployed (or carries no API URL yet).
 
-    The message always contains the literal `/sample-rca:setup`, because the failure this
-    class exists for is a plugin installed *before* the deploy: a bare connection error
-    there tells the operator nothing, and the next step is a named command.
+    The message always names `make deploy`, because the failure this class exists for is a
+    plugin installed *before* the deploy: a bare connection error there tells the operator
+    nothing, and the next step is a named command. It is not a skill: `/sample-rca:setup`
+    was removed in plugin 0.3.0, and the deploy targets exist only in a checkout.
     """
 
 
@@ -101,7 +110,7 @@ def cache_path() -> Path:
 
     `Path.home()` rather than an invented `RCA_HOME`: tests redirect it with
     `monkeypatch.setenv("HOME", str(tmp_path))`, and it keeps this the same path
-    `/sample-rca:setup` writes.
+    `make deploy` writes.
     """
     return Path.home() / ".rca" / "endpoint.json"
 
@@ -224,9 +233,10 @@ def resolve_endpoint(
     deployment), then the cache, then the stack's `ApiUrl` output. `refresh=True` skips
     the cache and is how the 403 recovery path re-reads a redeployed endpoint.
 
-    The region is *pinned* when the caller passed one, or set `AWS_REGION` or
-    `RCA_STACK_NAME` -- an operator who named a stack is steering discovery by hand and
-    must not have it redirected by a stale file. Pinned, this behaves as it always has.
+    The region is *pinned* when the caller passed one, or set `RCA_REGION` or
+    `RCA_STACK_NAME` -- never by `AWS_REGION`, which is ambient (see the module docstring).
+    An operator who named a region or a stack is steering discovery by hand and must not
+    have it redirected by a stale file. Pinned, this behaves as it always has.
     Unpinned, the cache's own region beats this machine's ambient default: that is how a
     `make deploy` into another region is picked up with no restart, instead of being
     reported as "not deployed". `RCA_STACK_NAME` counting as a *region* pin is
@@ -237,14 +247,15 @@ def resolve_endpoint(
     if override:
         # No session on this arm: the override exists so a hand-run server needs no
         # `cloudformation:DescribeStacks`, and `""` means "no opinion on the region".
-        return override.rstrip("/"), "env", region or _env("AWS_REGION") or ""
+        signing_region = region or _env("RCA_REGION") or _env("AWS_REGION") or ""
+        return override.rstrip("/"), "env", signing_region
 
-    pinned = bool(region or _env("AWS_REGION") or _env("RCA_STACK_NAME"))
+    pinned = bool(region or _env("RCA_REGION") or _env("RCA_STACK_NAME"))
     stack_name = stack_name or _env("RCA_STACK_NAME") or DEFAULT_STACK_NAME
     # The session resolves the region the same way every other AWS call on this machine
     # does, so the cache is keyed on the region actually in force rather than on
     # whatever was passed in.
-    session = boto3.session.Session(region_name=region or _env("AWS_REGION"))
+    session = boto3.session.Session(region_name=region or _env("RCA_REGION"))
     resolved_region = session.region_name or ""
 
     if not pinned:
@@ -278,7 +289,7 @@ def _from_cloudformation(session: Any, stack_name: str, region: str) -> str:
 
     Every failure arm below is a *message*, because the reader is a model relaying it to
     an operator: a missing stack and a missing credential need different fixes, so they
-    get different wording, and only the first names `/sample-rca:setup`.
+    get different wording, and only the first names `make deploy`.
     """
     try:
         cloudformation = session.client("cloudformation")
@@ -287,7 +298,7 @@ def _from_cloudformation(session: Any, stack_name: str, region: str) -> str:
         raise RcaError(
             f"cannot look up the control plane's endpoint: {err}. This is a credential or "
             "region problem on this machine, not a missing deployment -- set AWS_PROFILE (or "
-            "AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY) and AWS_REGION, then try again."
+            "AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY) and RCA_REGION, then try again."
         ) from err
     except ClientError as err:
         error = err.response.get("Error", {})
@@ -295,9 +306,9 @@ def _from_cloudformation(session: Any, stack_name: str, region: str) -> str:
             raise SetupRequired(
                 f"there is no CloudFormation stack named {stack_name} in "
                 f"{region or 'the default region'}, so the remote coding agent is not deployed "
-                "in this account and region yet. Run /sample-rca:setup to deploy it. If it "
-                "is deployed somewhere else, set AWS_REGION or RCA_STACK_NAME (or "
-                "RCA_API_URL) instead."
+                "in this account and region yet. Deploy it with `make deploy EMAIL=...` from a "
+                "checkout of the repository. If it is deployed somewhere else, set RCA_REGION "
+                "or RCA_STACK_NAME (or RCA_API_URL) instead."
             ) from err
         raise
 
@@ -314,7 +325,7 @@ def _from_cloudformation(session: Any, stack_name: str, region: str) -> str:
     raise SetupRequired(
         f"the stack {stack_name} exists in {region or 'the default region'} but carries no "
         f"{API_URL_OUTPUT_KEY} output, so its HTTP API is not deployed. That is a half-finished "
-        "deployment: re-run /sample-rca:setup, or set RCA_API_URL if you know the URL."
+        "deployment: re-run `make deploy EMAIL=...`, or set RCA_API_URL if you know the URL."
     )
 
 
@@ -345,7 +356,7 @@ class ApiClient:
         # *cached* endpoint may be invalidated on a 403.
         self._endpoint_source = "explicit" if endpoint else ""
         self._stack_name = stack_name or _env("RCA_STACK_NAME") or DEFAULT_STACK_NAME
-        self._region = region or _env("AWS_REGION")
+        self._region = region or _env("RCA_REGION")
         # For tests only: `httpx.MockTransport` stands in for the network, because
         # `moto.mock_aws` patches botocore and never sees an httpx call.
         self._transport = transport
@@ -364,7 +375,7 @@ class ApiClient:
         """The API's base URL, resolved once and memoised.
 
         Lazy so `main()` starts fine against an account with no deployment, and the
-        `/sample-rca:setup` message is delivered as tool output instead of a startup crash.
+        `make deploy` message is delivered as tool output instead of a startup crash.
         """
         if not self._endpoint:
             self._adopt(*resolve_endpoint(stack_name=self._stack_name, region=self._region))
@@ -395,7 +406,7 @@ class ApiClient:
         for an endpoint handed to the constructor. Before anything is resolved -- which
         includes a tool that failed *during* discovery -- this is `("", "", "")` and the
         caller renders nothing. Gated on `_endpoint` rather than on `_endpoint_source`:
-        `_region` can be set from `AWS_REGION` while no endpoint has been settled at
+        `_region` can be set from `RCA_REGION` while no endpoint has been settled at
         all, and a region with no URL is a worse answer than no line.
         """
         if not self._endpoint:
@@ -483,10 +494,40 @@ class ApiClient:
         # carries the operator's GitHub token, and a debug log is the easiest place in
         # the system to leak it from.
         LOG.debug("%s %s", method, path)
-        with httpx.Client(transport=self._transport, timeout=self._timeout) as http:
-            response = http.request(method, url, content=content, headers=dict(signed.headers))
+        try:
+            with httpx.Client(transport=self._transport, timeout=self._timeout) as http:
+                response = http.request(method, url, content=content, headers=dict(signed.headers))
+        except httpx.TransportError as err:
+            raise RcaError(self._unreachable(err)) from err
         LOG.debug("%s %s -> %s", method, path, response.status_code)
         return response
+
+    def _unreachable(self, err: httpx.TransportError) -> str:
+        """What a host that does not answer means, named by where the URL came from.
+
+        A bare `[Errno 8] nodename nor servname provided` was what an operator actually saw
+        when a deleted deployment's URL was still configured: true, and no help, because the
+        fix depends entirely on *which* of the four sources supplied the dead URL.
+        """
+        host = urllib.parse.urlsplit(self._endpoint).netloc or self._endpoint
+        fix = {
+            "env": (
+                "It came from RCA_API_URL -- the plugin's `api_url` setting, if this is the "
+                "plugin -- which outranks discovery. Clear it (or point it at the live "
+                "deployment) and restart Claude Code."
+            ),
+            "cache": (
+                f"It came from {cache_path()}, which the last `make deploy` on this machine "
+                "wrote. That deployment is probably gone: delete the file and the next call "
+                "re-discovers the endpoint from CloudFormation."
+            ),
+            "cloudformation": (
+                f"It came from the {self._stack_name} stack's {API_URL_OUTPUT_KEY} output, so "
+                "the stack exists but its API does not answer; check the deployment."
+            ),
+            "explicit": "It was passed in directly; check the URL.",
+        }.get(self._endpoint_source, "")
+        return f"the control plane at {host} could not be reached ({err}). {fix}".strip()
 
     @staticmethod
     def _decode(response: httpx.Response) -> Any:

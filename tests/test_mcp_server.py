@@ -209,7 +209,7 @@ def test_the_endpoint_is_discovered_when_nothing_is_configured(home: Path) -> No
     Nothing is configured and nothing is pasted: the endpoint comes from the stack's
     `ApiUrl` output. And when the stack is not there -- a plugin installed before the
     deploy, which is the ordering this design exists to fix -- the failure names
-    `/sample-rca:setup` and reaches the *model* as tool output, not Claude Code as a dead
+    `make deploy` and reaches the *model* as tool output, not Claude Code as a dead
     server.
     """
     with mock_aws():
@@ -224,7 +224,7 @@ def test_the_endpoint_is_discovered_when_nothing_is_configured(home: Path) -> No
         # Same account, same region, no stack.
         with pytest.raises(SetupRequired) as raised:
             resolve_endpoint()
-        assert "/sample-rca:setup" in str(raised.value), (
+        assert "make deploy" in str(raised.value), (
             "a plugin installed before the deploy must be told what to run next; a bare "
             f"connection error there tells the operator nothing. Got {raised.value}"
         )
@@ -234,7 +234,7 @@ def test_the_endpoint_is_discovered_when_nothing_is_configured(home: Path) -> No
             ApiClient(transport=httpx.MockTransport(_refuse)), "list_repositories", {}
         )
         assert answer.startswith("Error: ")
-        assert "/sample-rca:setup" in answer, (
+        assert "make deploy" in answer, (
             "resolution is lazy and the message comes back as tool text, so the model can "
             f"act on it; raised through the transport it would be a broken server. Got {answer}"
         )
@@ -242,6 +242,21 @@ def test_the_endpoint_is_discovered_when_nothing_is_configured(home: Path) -> No
             "nothing was resolved, so there is no endpoint to report and the accessor "
             "must not have gone looking for one — resolution is lazy on purpose"
         )
+
+
+@pytest.mark.parametrize("name", ["get_repository", "start_task", "get_task", "list_tasks"])
+def test_a_repository_name_passed_as_a_config_id_is_refused_with_the_fix(name: str) -> None:
+    """`lazydragon/rca-test` as a `configId` reached the wire as a path segment and came back
+    as a bare `404 HttpError: Not Found`. A configuration id never contains a slash, so the
+    refusal is local and names the lookup that answers it."""
+    arguments = {"configId": "lazydragon/rca-test", "taskId": "tsk_1", "prompt": "do it"}
+    answer = call_tool(
+        ApiClient(endpoint="https://abc.example.com", transport=httpx.MockTransport(_refuse)),
+        name,
+        arguments,
+    )
+    assert answer.startswith("Error: configId must be a configuration id"), answer
+    assert "list_repositories" in answer
 
 
 def test_no_tool_can_delete_anything() -> None:

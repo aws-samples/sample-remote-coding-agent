@@ -696,6 +696,10 @@ def test_registering_the_same_repository_twice_is_a_conflict(aws: Any) -> None:
     body = _body(response)
     assert body["error"] == "RepositoryAlreadyRegistered"
     assert body["configId"] == first["configId"]
+    # The MCP client shows only the message, so the id has to be in it, and the next step
+    # has to be one an operator can take -- not "patch or delete", which no tool can send.
+    assert first["configId"] in body["message"]
+    assert "console" in body["message"] and "patch or delete" not in body["message"]
     # The second attempt wrote nothing at all: the sentinel item plus the one configuration.
     assert len(common.config_table.scan()["Items"]) == 2
 

@@ -471,6 +471,27 @@ def test_the_project_server_runs_the_in_tree_package() -> None:
     )
 
 
+def test_no_server_config_overwrites_the_ambient_aws_region() -> None:
+    """Neither `.mcp.json` may set `AWS_REGION`.
+
+    The plugin used to export its `aws_region` field as `AWS_REGION`, so an unset field
+    arrived as `""` and blanked the region the operator's shell had exported, and a set one
+    overwrote it for every boto3 call the server made. The pin is `RCA_REGION`
+    (`mcp/src/rca_mcp/client.py`); `AWS_REGION` is the shell's and Claude Code's to set.
+    """
+    for path in (REPO_ROOT / ".mcp.json", REPO_ROOT / f"plugins/{_PLUGIN_NAME}/.mcp.json"):
+        for name, server in json.loads(path.read_text())["mcpServers"].items():
+            env = server.get("env") or {}
+            assert "AWS_REGION" not in env, (
+                f"{path.relative_to(REPO_ROOT)} server {name!r} sets AWS_REGION; export "
+                "the region pin as RCA_REGION and leave AWS_REGION ambient"
+            )
+    plugin_env = json.loads((REPO_ROOT / f"plugins/{_PLUGIN_NAME}/.mcp.json").read_text())[
+        "mcpServers"
+    ][SERVER_NAME]["env"]
+    assert plugin_env.get("RCA_REGION") == "${user_config.aws_region}"
+
+
 def test_the_marketplace_lists_the_plugin_it_ships() -> None:
     """The repository is its own marketplace, which is what makes `sample-rca@…` guessable."""
     marketplace = json.loads(_MARKETPLACE.read_text(encoding="utf-8"))
@@ -1244,9 +1265,9 @@ def test_the_deploy_target_does_what_the_skill_promises() -> None:
     # The closing paragraph used to be unconditionally reassuring, and it is wrong for
     # anyone who set a plugin override. `plugins/sample-rca/.claude-plugin/plugin.json`
     # declares `api_url`, `aws_region` and `stack_name`; `plugins/sample-rca/.mcp.json`
-    # passes them as `RCA_API_URL`, `AWS_REGION` and `RCA_STACK_NAME`; and
+    # passes them as `RCA_API_URL`, `RCA_REGION` and `RCA_STACK_NAME`; and
     # `mcp/src/rca_mcp/client.py::resolve_endpoint` returns an `RCA_API_URL` override
-    # without ever reading the cache, while `AWS_REGION`/`RCA_STACK_NAME` pin the region so
+    # without ever reading the cache, while `RCA_REGION`/`RCA_STACK_NAME` pin the region so
     # the cached document's own region is not honoured. So a plugin configured with one
     # silently keeps registering into the older deployment while the freshly deployed fleet
     # lists zero configurations -- which is exactly what happened in a real walkthrough.
