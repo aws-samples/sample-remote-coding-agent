@@ -614,6 +614,21 @@ the code it governs and a regression test.
     now carries a VPC config. Getting that wrong silently returns a runtime to
     public egress, which is invisible until something exfiltrates. Classify it as
     *fleet policy* and **converge** it instead, beside `lifecycleConfiguration`.
+30b. **The agent VPC's AZs are chosen by ID, not by name** — AgentCore accepts a VPC-mode
+    runtime's subnets only in the AZ IDs listed per region in its developer guide
+    (`agent_stack.AGENTCORE_VPC_ZONE_IDS`; `use1-az1/az2/az4` in `us-east-1`), and AZ
+    *names* map to IDs differently in every account. `max_azs=2` took the first two names,
+    so the same template provisioned in one account and failed every `POST /configurations`
+    in the next, at `CreateAgentRuntime`, after a clean deploy. `infra/app.py::_agent_zones`
+    asks `ec2:DescribeAvailabilityZones` at synth and `select_agent_zones` keeps the first
+    two supported names **in name order** — the order `max_azs` used, so a fleet already in
+    supported AZs gets the same subnets back. `-c agentAvailabilityZones=a,b` overrides the
+    lookup. A region missing from the table, or an account with no supported AZ there, fails
+    the synth (and so `make preflight`'s check 10) with the reason. `AgentStack` overrides
+    `availability_zones` because CDK's subset check otherwise compares against the
+    `dummy1a` placeholders of its own first-pass lookup. A fleet deployed *before* this
+    into an unsupported AZ has its subnets replaced, and a same-CIDR replacement should collide
+    with the subnet it replaces (unmeasured): if it does, deregister, destroy and redeploy.
 31. **The container writes no configuration item and reads only its own** —
     `dynamodb:LeadingKeys` on both table statements, `GetItem` only on
     Configurations. Otherwise a compromised container edits another repository's

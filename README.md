@@ -3,7 +3,7 @@
 **Turn a coding task into a pull request. Keep your laptop free.**
 
 [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue)](LICENSE)
-[![Tested with Python 3.12](https://img.shields.io/badge/Python-tested_3.12-blue)](#before-you-start)
+[![Tested with Python 3.12](https://img.shields.io/badge/Python-tested_3.12-blue)](#prerequisites)
 [![Status: AWS sample](https://img.shields.io/badge/Status-AWS_sample-orange)](#who-is-this-for)
 
 Submit from Claude Code or the web UI, follow the remote agent's progress, and get a PR with verification evidence powered by Amazon Bedrock AgentCore Runtime.
@@ -32,15 +32,19 @@ it does not make untrusted code safe. A runtime or publishing failure may produc
 
 ## Quick start
 
-### Before you start
+### Prerequisites
 
 - A dedicated AWS account, with credentials for your intended profile and region.
 - Docker running, Python ≥ 3.11 (tested with 3.12), `uv`, Node ≥ 20, and the AWS CLI.
-- A trusted, disposable repository and a GitHub account you can create an app under. No token
-  to paste — step 3 creates a **GitHub App**; see [GitHub access](#github-access-read-this).
+- A trusted, disposable GitHub repository with **a default branch that already builds and passes its tests**. The agent never guesses how to build a repository. It reads a root `Makefile` with a `setup:` (or `bootstrap:`) target and a `test:` target, or a root `package.json` with `scripts.setup` and `scripts.test`. **An empty repository does not work.** With no default branch, the run fails at the very end when it opens the pull request (`422 Validation Failed`, `"field": "base"`). With no test entry point, every PR comes back as an unverified draft. If your repository is empty, set it up with one of the options below **before you register it**.
+- A GitHub account you can create an app under. No token to paste — step 3 creates a **GitHub App**; see [GitHub access](#github-access-read-this).
 
-Preflight checks AgentCore/model availability and prints any required CDK bootstrap command.
-The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI works without it.
+Preflight checks AgentCore/model availability and prints any required CDK bootstrap command. The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI works without it.
+
+#### Setting up an empty repository
+
+- **Web UI:** from this checkout, run `scripts/scaffold.sh <owner>/<repo>` (a GitHub URL or a local clone's path also works). It needs `git`, `make`, `python3` and git credentials that can push, for example `gh auth login`, and pushes with those rather than through the GitHub App. It clones into a temporary directory, writes a minimal Python project (a `Makefile` with `setup` and `test` targets, one function in `src/`, and its pytest tests), runs `make setup` and `make test`, and when both pass asks before pushing it as `main`.
+- **Claude Code:** install the plugin ([Option B](#option-b-claude-code), step 4), clone the repository, and run `/sample-rca:scaffold` from the clone. It writes a Python project, or TypeScript if you ask for it by name, runs its setup and tests, pushes it as `main` after you confirm, and offers to register the repository.
 
 ### Deploy it
 
@@ -54,8 +58,7 @@ The ~1.3 GB ARM64 image builds locally. Claude Code is optional; the web UI work
    make deploy EMAIL=you@example.com
    ```
 
-   **Read the account and region from `make preflight` before deploying.** Preflight is read-only;
-   deploy starts spending without confirmation. Allow **15–25 min**, mostly the local image build.
+   **Read the account and region from `make preflight` before deploying.** Preflight is read-only; deploy starts spending without confirmation. Allow **15–25 min**, mostly the local image build.
    On completion it prints the console URL, API URL, and region. Check known issues if it stalls.
 
 2. **Sign in at the console URL.** Cognito emails a temporary password to `EMAIL`; check spam and change it on first sign-in.
@@ -121,13 +124,9 @@ both at once. Watch **Planning → Coding → Verifying → Done** and click the
    Check the `endpoint used:` line. Restarting loads the plugin's MCP tools.
 
 ```text
-# Optional: scaffold an empty repo locally, then push it before dispatch.
-/sample-rca:scaffold
 # Example: build a 2048 game in your registered disposable repository.
-/sample-rca:remote Build a 2048 game as a Vue 3 single-page app. Keep the board and merge
-logic in a plain module with Vitest tests covering spawn, merge, win and game over. Add
-scripts.setup, scripts.test and scripts.dev to package.json, and a README whose first
-section is the exact commands to install it, run it in a browser, and test it.
+/sample-rca:remote Build a 2048 game as a Vue 3 single-page app. Keep the board and merge logic in a plain module with Vitest tests covering spawn, merge, win and game over.
+Add scripts.setup, scripts.test and scripts.dev to package.json, and a README whose first section is the exact commands to install it, run it in a browser, and test it.
 # Check progress here or in the web UI; the task appears in both.
 /sample-rca:remote status
 ```
@@ -187,6 +186,7 @@ before deleting them; some are the only history of your runs.
 - **Temporary password expired.** Redeployment does not resend it; see [operator recovery notes](CLAUDE.md#what-the-walkthrough-touches-and-where-it-lives).
 - **Tools succeed but the board is empty.** Check `endpoint used:` and stale API overrides for another deployment.
 - **Another `/remote` command answers.** Use `/sample-rca:remote`; other plugin namespaces are unrelated.
+- **The run fails at submit with `could not open a pull request ... (HTTP 422)` and `"field": "base", "code": "invalid"`.** The repository had no default branch when the task started. The agent assumed `main`, and GitHub rejected it as the PR base. The agent's branch is now the repository's only branch, and probably its default, so `scripts/scaffold.sh` and `/sample-rca:scaffold` will refuse the repository because it is no longer empty. Either push a `main` that builds and passes its tests yourself and set it as the default branch, or create a new empty repository, scaffold that, and register it instead. Then run the task again.
 
 Setup notes worth reading before you deploy: [VPC quota](https://github.com/aws-samples/sample-remote-coding-agent/issues/2), [Cognito domain](https://github.com/aws-samples/sample-remote-coding-agent/issues/3),
 [deployment](https://github.com/aws-samples/sample-remote-coding-agent/issues/5), [wrong-account handling](https://github.com/aws-samples/sample-remote-coding-agent/issues/7), [account selection](https://github.com/aws-samples/sample-remote-coding-agent/issues/8).

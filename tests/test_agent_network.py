@@ -18,6 +18,7 @@ alarm.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -264,3 +265,74 @@ def test_the_alarm_has_somewhere_to_go_and_says_so_when_it_does_not(tmp_path: Pa
     Annotations.from_stack(without).has_warning(
         "*", Match.string_like_regexp("no alert address was given")
     )
+
+
+# A shuffled account, the shape that broke provisioning: its first two names are `a` and `b`,
+# and `a` maps to an ID AgentCore refuses. `max_azs=2` placed a subnet there.
+_SHUFFLED_ZONES = (
+    ("us-east-1a", "use1-az6"),
+    ("us-east-1b", "use1-az1"),
+    ("us-east-1c", "use1-az2"),
+    ("us-east-1d", "use1-az4"),
+    ("us-east-1e", "use1-az3"),
+)
+
+
+def test_the_agent_zones_skip_every_id_agentcore_refuses() -> None:
+    assert agent_stack.select_agent_zones("us-east-1", _SHUFFLED_ZONES) == [
+        "us-east-1b",
+        "us-east-1c",
+    ]
+
+
+def test_a_fleet_already_in_supported_zones_keeps_them() -> None:
+    """Name order is what `max_azs=2` took from, so where the first two names were already
+    supported the answer is the same two -- and no subnet of a working fleet moves."""
+    zones = (("eu-west-1a", "euw1-az3"), ("eu-west-1b", "euw1-az1"), ("eu-west-1c", "euw1-az2"))
+    assert agent_stack.select_agent_zones("eu-west-1", reversed(zones)) == [
+        "eu-west-1a",
+        "eu-west-1b",
+    ]
+
+
+def test_no_supported_zone_is_a_synth_failure_not_an_empty_list() -> None:
+    """An empty answer would hand placement back to `max_azs`, which is the bug."""
+    with pytest.raises(ValueError, match="none of this account's Availability Zones"):
+        agent_stack.select_agent_zones("us-east-1", (("us-east-1a", "use1-az6"),))
+    with pytest.raises(ValueError, match="does not list VPC-mode Availability Zones"):
+        agent_stack.select_agent_zones("mars-north-1", (("mars-north-1a", "marn1-az1"),))
+
+
+def test_every_region_this_fleet_deploys_to_has_a_zone_table() -> None:
+    """README names the regions AgentCore Runtime V2 limits a deploy to. One missing from the
+    table fails every synth there with "does not list", which is right only if it is true."""
+    readme = Path(__file__).resolve().parents[1].joinpath("README.md").read_text("utf-8")
+    (line,) = [chunk for chunk in readme.split("\n\n") if "AgentCore Runtime V2 only" in chunk]
+    regions = re.findall(r"`([a-z]{2}-[a-z]+-\d)`", line)
+    assert regions, "README's V2 region list moved; this test reads it"
+    assert set(regions) <= set(agent_stack.AGENTCORE_VPC_ZONE_IDS)
+
+
+def test_named_zones_are_the_ones_every_agent_subnet_lands_in(tmp_path: Path) -> None:
+    app = aws_cdk.App(
+        outdir=str(tmp_path),
+        # What CDK's own AZ lookup would have cached, so the bare stack knows the account's
+        # names; `AgentStack` overrides `availability_zones` instead, for the reason its
+        # docstring gives.
+        context={
+            "availability-zones:account=123456789012:region=us-east-1": [
+                name for name, _ in _SHUFFLED_ZONES
+            ]
+        },
+    )
+    stack = aws_cdk.Stack(
+        app, "Net", env=aws_cdk.Environment(account="123456789012", region="us-east-1")
+    )
+    zones = agent_stack.select_agent_zones("us-east-1", _SHUFFLED_ZONES)
+    agent_stack.add_agent_network(
+        stack, app_name=_APP_NAME, alert_email=_ALERT_EMAIL, availability_zones=zones
+    )
+    subnets = _properties(Template.from_stack(stack), "AWS::EC2::Subnet")
+    # Public and agent subnets alike: the NAT gateway's public subnet has to share an AZ with
+    # the private one it routes, and `Vpc` lays both tiers over the same list.
+    assert sorted(subnet["AvailabilityZone"] for subnet in subnets) == sorted(zones * 2)

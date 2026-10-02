@@ -41,6 +41,7 @@ be `us-east-1` to be CloudFront-scoped at all, so they live in
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,83 @@ from constructs import Construct
 # cover it denies every log line the runtime writes -- which surfaces as a runtime with no
 # logs, i.e. as the one symptom that makes the cause unfindable.
 RUNTIME_LOG_GROUP_PREFIX = "/aws/bedrock-agentcore/runtimes"
+
+# The Availability Zone **IDs** AgentCore accepts a VPC-mode runtime's subnets in, per region,
+# from the "Supported Availability Zones" table of the AgentCore developer guide
+# (`agentcore-vpc.html`). A subnet anywhere else is refused at `CreateAgentRuntime`, which is
+# the expensive place to find out: the deploy succeeds, and then every `POST /configurations`
+# fails ten minutes later, at provisioning, against a VPC nothing in the repository can move.
+#
+# IDs and not names, and that is the whole bug this table fixes. `max_azs=2` takes the
+# account's first two AZ *names*, and the name -> ID mapping is shuffled per account -- so
+# `us-east-1a` is `use1-az4` in one account and `use1-az6` (unsupported) in the next, and the
+# same template provisions in one and fails in the other. `select_agent_zones` maps back.
+#
+# A region missing here is one AgentCore does not support VPC mode in, so the synth stops
+# there rather than guessing. When the guide gains a region or a zone, add it here.
+AGENTCORE_VPC_ZONE_IDS: dict[str, frozenset[str]] = {
+    region: frozenset(ids.split())
+    for region, ids in {
+        "us-east-1": "use1-az1 use1-az2 use1-az4",
+        "us-east-2": "use2-az1 use2-az2 use2-az3",
+        "us-west-1": "usw1-az1 usw1-az3",
+        "us-west-2": "usw2-az1 usw2-az2 usw2-az3",
+        "ap-southeast-5": "apse5-az1 apse5-az2 apse5-az3",
+        "ap-south-1": "aps1-az1 aps1-az2 aps1-az3",
+        "ap-south-2": "aps2-az1 aps2-az2 aps2-az3",
+        "ap-northeast-2": "apne2-az1 apne2-az2 apne2-az3",
+        "ap-southeast-1": "apse1-az1 apse1-az2 apse1-az3",
+        "ap-southeast-2": "apse2-az1 apse2-az2 apse2-az3",
+        "ap-southeast-7": "apse7-az1 apse7-az2 apse7-az3",
+        "ap-northeast-1": "apne1-az1 apne1-az2 apne1-az4",
+        "ca-central-1": "cac1-az1 cac1-az2 cac1-az4",
+        "eu-central-1": "euc1-az1 euc1-az2 euc1-az3",
+        "eu-west-1": "euw1-az1 euw1-az2 euw1-az3",
+        "eu-west-2": "euw2-az1 euw2-az2 euw2-az3",
+        "eu-south-1": "eus1-az1 eus1-az2 eus1-az3",
+        "eu-west-3": "euw3-az1 euw3-az2 euw3-az3",
+        "eu-south-2": "eus2-az1 eus2-az2 eus2-az3",
+        "eu-north-1": "eun1-az1 eun1-az2 eun1-az3",
+        "sa-east-1": "sae1-az1 sae1-az2 sae1-az3",
+        "us-gov-west-1": "usgw1-az1 usgw1-az2 usgw1-az3",
+    }.items()
+}
+
+# Two, as `max_azs=2` was: enough that one AZ's outage costs a retry, and every interface
+# endpoint is an ENI per AZ, so a third would be paid for eight times over.
+AGENT_ZONE_COUNT = 2
+
+
+def select_agent_zones(
+    region: str, zones: Iterable[tuple[str, str]], count: int = AGENT_ZONE_COUNT
+) -> list[str]:
+    """The AZ names the agent VPC goes in: the first `count` whose ID AgentCore supports.
+
+    `zones` is `(ZoneName, ZoneId)` pairs, as `ec2:DescribeAvailabilityZones` answers for this
+    account. **Name order is load-bearing**: it is the order `max_azs=2` took from, so a fleet
+    whose first two names already mapped to supported IDs gets exactly the AZs it has and no
+    subnet moves on its next deploy. Only a fleet that could never provision anyway changes.
+
+    Raises `ValueError` rather than returning fewer zones silently: an empty list would hand
+    the VPC back to `max_azs`, which is the bug, and the message is what an operator reads in
+    the synth output.
+    """
+    supported = AGENTCORE_VPC_ZONE_IDS.get(region)
+    if supported is None:
+        raise ValueError(
+            f"AgentCore does not list VPC-mode Availability Zones for {region}, so a runtime "
+            "here cannot be placed in this deployment's VPC. Deploy in a region from "
+            "agent_stack.AGENTCORE_VPC_ZONE_IDS."
+        )
+    chosen = sorted(name for name, zone_id in zones if zone_id in supported)[:count]
+    if not chosen:
+        raise ValueError(
+            f"none of this account's Availability Zones in {region} is one AgentCore supports "
+            f"for VPC mode ({', '.join(sorted(supported))}), so a runtime cannot be placed "
+            "here. Deploy in another region."
+        )
+    return chosen
+
 
 # The names this design claims it never contacts, turned into something the network
 # enforces. Every entry is silent when it is wrong in either direction: one missing is a
@@ -115,8 +193,17 @@ class AgentNetwork:
     dns_query_log_group: logs.LogGroup
 
 
-def add_agent_network(scope: Construct, *, app_name: str, alert_email: str) -> AgentNetwork:
+def add_agent_network(
+    scope: Construct,
+    *,
+    app_name: str,
+    alert_email: str,
+    availability_zones: Sequence[str] = (),
+) -> AgentNetwork:
     """The VPC, its endpoints, the 443-only security group, and the DNS Firewall (Tier 2 #16).
+
+    `availability_zones` is `select_agent_zones`' answer. Empty falls back to `max_azs`, which
+    is only right where no runtime will ever be created -- an environment-agnostic synth.
 
     A module-level function taking the scope it builds on, rather than a `Construct`
     subclass or a method: `AgentStack` cannot be synthesized by any test here (the image
@@ -129,7 +216,14 @@ def add_agent_network(scope: Construct, *, app_name: str, alert_email: str) -> A
         scope,
         "AgentVpc",
         ip_addresses=ec2.IpAddresses.cidr("10.42.0.0/16"),
-        max_azs=2,
+        # Named zones when there are any, because the runtime's ENIs land in these subnets
+        # and AgentCore refuses most AZ IDs (`AGENTCORE_VPC_ZONE_IDS`). The two are mutually
+        # exclusive in CDK, hence one or the other and never both.
+        **(
+            {"availability_zones": list(availability_zones)}
+            if availability_zones
+            else {"max_azs": AGENT_ZONE_COUNT}
+        ),
         # One NAT gateway, not one per AZ: the runtime's egress is `git clone`, PyPI and
         # npm, and an hour of downtime in one AZ costs a retry rather than an incident.
         nat_gateways=1,
@@ -600,6 +694,19 @@ def execution_role_boundary_statements(
 class AgentStack(cdk.Stack):
     """The agent runtime's prerequisites: the ARM64 image, the VPC, and the boundary."""
 
+    @property
+    def availability_zones(self) -> list[str]:
+        """The zones `ec2.Vpc` checks `availability_zones=` against, overridden when named.
+
+        Without this, CDK checks the named zones against its own `availability-zones`
+        context lookup, and on a first synth that lookup answers placeholders
+        (`dummy1a`...) -- so a correct zone list fails as "not in this stack" before the
+        CLI ever gets to resolve the lookup. The zones were already resolved against this
+        account by `app.py`, so they are the stack's zones.
+        """
+        zones = getattr(self, "_agent_zones", None)
+        return list(zones) if zones else list(super().availability_zones)
+
     def __init__(
         self,
         scope: Construct,
@@ -610,8 +717,13 @@ class AgentStack(cdk.Stack):
         # means the DNS alarm is created with no action and `add_agent_network` annotates
         # the synth to say so.
         alert_email: str = "",
+        # `select_agent_zones`' answer, resolved by `app.py` against this account. Empty
+        # keeps the old `max_azs` placement, which only an environment-agnostic synth wants.
+        availability_zones: Sequence[str] = (),
         **kwargs: Any,
     ) -> None:
+        # Set before `super().__init__`, because the property below is read during it.
+        self._agent_zones = list(availability_zones)
         super().__init__(scope, construct_id, **kwargs)
 
         # -- the image ------------------------------------------------------------
@@ -651,7 +763,12 @@ class AgentStack(cdk.Stack):
         #
         # Built on `self`, so every logical id is what it would be if the body of
         # `add_agent_network` were still written out here.
-        network = add_agent_network(self, app_name=app_name, alert_email=alert_email)
+        network = add_agent_network(
+            self,
+            app_name=app_name,
+            alert_email=alert_email,
+            availability_zones=self._agent_zones,
+        )
         self.vpc = network.vpc
         self.security_group = network.security_group
 
