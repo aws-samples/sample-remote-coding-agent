@@ -860,6 +860,13 @@ class ApiStack(cdk.Stack):
                             # `UseOwnMemory`), not to this Lambda.
                             "bedrock-agentcore:CreateMemory",
                             "bedrock-agentcore:DeleteMemory",
+                            # Read-only, and only to learn one ARN: the provider's client
+                            # secret, which every execution role is granted `GetSecretValue` on
+                            # so a container can refresh its own token. `convert` stores it on
+                            # the settings item; this is the backfill for a deployment connected
+                            # before that existed (`github_app.provider_secret_arn`). Without it
+                            # that backfill is an AccessDenied inside every provision.
+                            "bedrock-agentcore:GetOauth2CredentialProvider",
                         ]
                         + [
                             f"bedrock-agentcore:{verb}AgentRuntimeEndpoint"

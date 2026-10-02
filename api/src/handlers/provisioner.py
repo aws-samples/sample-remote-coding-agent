@@ -501,6 +501,33 @@ def _execution_role_policy(config: Mapping[str, Any]) -> dict[str, Any]:
         if memory_id
         else []
     )
+    # **Refreshing the GitHub token reads the app's client secret as this role.** AgentCore
+    # Identity does that Secrets Manager read with the caller's permissions, so a container
+    # without it can use a token for its first eight hours and then cannot: measured against a
+    # role holding only `UseGitHubCredential`, an 11-hour-old authorisation answered
+    # `AccessDenied ... secretsmanager:GetSecretValue on ...bedrock-agentcore-identity!
+    # default/oauth2/rca_github-...`. Until this statement existed, the API Lambda's
+    # pre-dispatch check was refreshing tokens on the container's behalf, which hid the gap for
+    # new runs and left watchdog resumes and long runs to fail at `submit`.
+    #
+    # One literal ARN, `github_app.provider_secret_arn()`, and never the
+    # `bedrock-agentcore-identity!*` prefix the boundary allows: the prefix covers every
+    # credential provider's secret in the account. The ARN is the same for every repository,
+    # because every repository shares one GitHub App -- there is no per-repository secret to
+    # name. Omitted, like `UseOwnMemory`, when there is nothing to name yet.
+    github_secret_arn = str(config.get("githubSecretArn") or "")
+    refresh_credential: list[dict[str, Any]] = (
+        [
+            {
+                "Sid": "RefreshGitHubCredential",
+                "Effect": "Allow",
+                "Action": ["secretsmanager:GetSecretValue"],
+                "Resource": github_secret_arn,
+            }
+        ]
+        if github_secret_arn
+        else []
+    )
     configurations_arn = f"arn:aws:dynamodb:{region}:{account}:table/{_common.config_table.name}"
     tasks_arn = f"arn:aws:dynamodb:{region}:{account}:table/{_common.tasks_table.name}"
     # Invariant 31 / Tier 1 #7 and #8: both table statements are fenced to this
@@ -553,8 +580,10 @@ def _execution_role_policy(config: Mapping[str, Any]) -> dict[str, Any]:
                 # The two calls `agent/src/coding_agent/store.github_token` makes, and the
                 # whole of this container's credential path: mint a workload access token
                 # for this configuration's id as the 3LO `userId`, then exchange it for the
-                # GitHub token AgentCore Identity holds in its vault. No
-                # `secretsmanager:GetSecretValue` anywhere, because there is no secret.
+                # GitHub token AgentCore Identity holds in its vault. The Secrets Manager
+                # read that a *refresh* needs is the separate `RefreshGitHubCredential`
+                # statement below, because it can name one literal resource and this one
+                # cannot.
                 "Action": [
                     "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
                     "bedrock-agentcore:GetResourceOauth2Token",
@@ -579,6 +608,7 @@ def _execution_role_policy(config: Mapping[str, Any]) -> dict[str, Any]:
                     "*",
                 ],
             },
+            *refresh_credential,
             {
                 "Sid": "WriteRuntimeLogs",
                 "Effect": "Allow",
@@ -712,10 +742,15 @@ def _ensure_role(config_id: str, config: Mapping[str, Any]) -> str:
         # Derived rather than fetched: see `_account_and_region` on why no `iam:GetRole`
         # grant is added for a string this code can already spell.
         LOG.info("execution role %s already exists; reusing %s", role_name, role_arn)
+    # Resolved here rather than stored on the configuration item: the secret belongs to the
+    # deployment's one provider, so it is the same for every repository and changes only if the
+    # GitHub App is reconnected -- at which point the next UPDATE rewrites every role with the
+    # new ARN, because `_update` calls this before its intent check.
+    policy = _execution_role_policy({**config, "githubSecretArn": github_app.provider_secret_arn()})
     _common.iam.put_role_policy(
         RoleName=role_name,
         PolicyName=_POLICY_NAME,
-        PolicyDocument=json.dumps(_execution_role_policy(config)),
+        PolicyDocument=json.dumps(policy),
     )
     return role_arn
 

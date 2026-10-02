@@ -1203,21 +1203,33 @@ store. Two grants follow, both on AgentCore's own service-linked prefix
   Lambda role. This is the same property that disqualified the API-key credential provider
   earlier, met again on the OAuth path.
 
-**Whether the container needs that read too is unmeasured, and it is the one open question
-in this design.** Retrieving an *already stored* token needed zero Secrets Manager
-permissions -- measured against a throwaway role -- so the grant is deliberately **not** on
-the execution role. But a refresh has to call GitHub's token endpoint with the client secret,
-and no run here has lived past the 8-hour expiry to find out whether the vault does that with
-the caller's permissions as well. If it does, the symptom is a task failing at `submit` after
-about eight hours with an `AccessDenied` naming
-`bedrock-agentcore-identity!default/oauth2/rca_github`. Granting it pre-emptively is the
-wrong trade: it would let any container read every provider's client secret in the account,
-which is wider than anything else on that role. So the failure is left loud and this paragraph
-is the note that explains it.
+**The container needs that read too, and that is measured.** A *fresh* token needs no Secrets
+Manager permission, but a token past its eight-hour lifetime is refreshed during the
+container's own `GetResourceOauth2Token`, and the refresh reads the client secret as the
+caller. Against an 11-hour-old authorisation, a role holding only the two credential actions
+answered `AccessDenied ... secretsmanager:GetSecretValue on
+...bedrock-agentcore-identity!default/oauth2/rca_github-...`; the same call from a role with the
+read refreshed the token **and stored it**. So each execution role carries
+`RefreshGitHubCredential`: `GetSecretValue` on the **one literal ARN**
+`github_app.provider_secret_arn()` returns, never the `bedrock-agentcore-identity!*` prefix,
+which would reach every credential provider's secret in the account. The ARN is the same for
+every repository -- one GitHub App, one client secret; what is per repository is the vault
+token, which cannot be fenced -- and `convert` stores it on the settings item so provisioning
+needs no AgentCore call, with a once-only backfill from the live provider for a deployment
+connected before that.
+
+The gap this closed was hidden for a while, and how is worth knowing. `runs.queue_run` checks
+the vault from the API Lambda before every dispatch, and that Lambda holds the read, so it was
+**refreshing tokens on the container's behalf**: new runs worked, while a watchdog resume or a
+run past eight hours failed at `submit`. The pre-dispatch check is kept as a fail-fast gate --
+it refuses an unauthorised repository with `409 GitHubNotAuthorized` before a run spends
+anything -- but it is no longer load-bearing for the credential.
 
 **What a container must never reach is denied by name.** `MayNotEscalate` in
-`infra/stacks/agent_stack.py` denies the fourteen Identity control-plane actions and
-`secretsmanager:*` outright: `GetResourceOauth2Token` has to be allowed on `*`, so a
+`infra/stacks/agent_stack.py` denies the fourteen Identity control-plane actions and every
+Secrets Manager write, rotate, delete and enumerate action **by literal name** -- not
+`secretsmanager:*`, which would also kill the `GetSecretValue` a refresh needs, with nothing
+naming the cause. `GetResourceOauth2Token` has to be allowed on `*`, so a
 container is one careless widening away from repointing the provider every repository shares
 at an OAuth app of its own, or deleting it and taking the whole fleet's access with it. Still
 no wildcard in that group — `Get*` would shadow `GetResourceOauth2Token` and break every
@@ -1372,10 +1384,12 @@ Three destinations, and they are the honest answer to "never leaves your account
 All three are unavoidable given what the agent is for. The seven VPC endpoints — Bedrock,
 AgentCore, DynamoDB, both halves of ECR, S3 and CloudWatch Logs — are in
 `infra/stacks/agent_stack.py`, so those calls do not traverse the internet at all. There is no
-Secrets Manager endpoint any more and that is not an omission: the container reaches no secret,
-and AgentCore Identity's own Secrets Manager write happens service-side from a control-plane
-Lambda outside this VPC, so an endpoint for it would be an ENI in every AZ with no client. The
-GitHub credential rides the AgentCore endpoint beside the memory calls. And the
+Secrets Manager endpoint any more and that is not an omission: the container never *calls*
+Secrets Manager. When a token refresh needs the client secret, AgentCore Identity reads it
+service-side -- with the container's permissions, which is why the execution role carries
+`RefreshGitHubCredential`, but over AgentCore's own path rather than from inside this VPC -- so
+an endpoint for it would be an ENI in every AZ with no client. The GitHub credential rides the
+AgentCore endpoint beside the memory calls. And the
 vendor destinations this design says it never contacts are **refused** there rather than
 merely unused: the same file carries a Route 53 Resolver **DNS Firewall** deny list —
 `BLOCKED_VENDOR_DOMAINS`, seven enumerated names (`api.anthropic.com`,
@@ -1416,7 +1430,8 @@ than one that does not. Five things are still true after everything above.
   for both runners, the verify command and the setup command. It defeats the
   environment-variable credential path. It does **not** defeat an attacker who hardcodes
   the container credentials endpoint. Within the permissions boundary, stolen credentials
-  reach exactly **four** things: this one configuration's task items, this one repository's
+  reach exactly **four** things beside the GitHub credential (next bullet): this one
+  configuration's task items, this one repository's
   memory, Bedrock, and a read-only pull of the agent image from one ECR repository — the
   runtime cannot be created at all without that last one, which is why it is granted. The
   `dynamodb:LeadingKeys` fences on both table statements and the literal memory ARN are what
@@ -1433,7 +1448,10 @@ than one that does not. Five things are still true after everything above.
   `GetResourceOauth2Token` on `*`, because the service accepts nothing narrower and offers no
   condition key for the user id. So stolen container credentials can request any OAuth token
   any operator has authorised in that account, and the GitHub App's installation list is what
-  bounds what those tokens can write. It is listed separately from the four above rather than
+  bounds what those tokens can write. They can also read the **app's client secret** --
+  `GetSecretValue` on its one literal ARN, which a token refresh needs -- and that adds little
+  beyond the tokens themselves: the secret lets a holder act as the app in an OAuth exchange,
+  but every token it could lead to is one the container can already ask the vault for. It is listed separately from the four above rather than
   folded into them because it is the one exposure this design *added*; see "The blast radius
   is the app's installation list" for the measurements and for what was bought in exchange.
 - **Prompt injection.** The controls are the `.agent/` quarantine — the clone's own

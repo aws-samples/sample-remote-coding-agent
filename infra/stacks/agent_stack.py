@@ -516,9 +516,8 @@ def execution_role_boundary_statements(
             effect=iam.Effect.ALLOW,
             # The ceiling over `provisioner._execution_role_policy`'s `UseGitHubCredential`:
             # the two calls that exchange this configuration's id for the GitHub token
-            # AgentCore Identity holds. There is no `secretsmanager:GetSecretValue` in this
-            # boundary any more, because there is no secret -- the container's whole
-            # credential path is these two actions.
+            # AgentCore Identity holds. The Secrets Manager read a refresh needs is
+            # `MayRefreshGitHubCredential` below.
             actions=[
                 "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
                 "bedrock-agentcore:GetResourceOauth2Token",
@@ -534,6 +533,24 @@ def execution_role_boundary_statements(
             # repository's credential, and `CLAUDE.md`'s "What remains exposed" states the
             # consequence rather than letting the shape of this list imply a fence.
             resources=["*"],
+        ),
+        iam.PolicyStatement(
+            sid="MayRefreshGitHubCredential",
+            effect=iam.Effect.ALLOW,
+            # The ceiling over `provisioner._execution_role_policy`'s `RefreshGitHubCredential`.
+            # AgentCore Identity reads the GitHub App's client secret **with the caller's
+            # permissions** whenever it refreshes a token, so a container that cannot read it
+            # can use a token for eight hours and then cannot -- measured against an
+            # 11-hour-old authorisation.
+            #
+            # `GetSecretValue` only, and declared in `execution_boundary.WIDER_RESOURCES`: the
+            # boundary is minted once per deploy, before any GitHub App is connected, so it can
+            # only name Identity's own service-linked prefix. The grant names the one literal
+            # ARN. The trailing `*` also absorbs the random suffix every secret ARN carries.
+            actions=["secretsmanager:GetSecretValue"],
+            resources=[
+                f"arn:aws:secretsmanager:{region}:{account}:secret:bedrock-agentcore-identity!*"
+            ],
         ),
         iam.PolicyStatement(
             sid="MayWriteRuntimeLogs",
@@ -680,9 +697,22 @@ def execution_role_boundary_statements(
                 "bedrock-agentcore:ListWorkloadIdentities",
                 "bedrock-agentcore:CreateTokenVault",
                 "bedrock-agentcore:SetTokenVaultCMK",
-                # The container must never reach Secrets Manager at all now: nothing it does
-                # needs it, so the whole service is denied rather than one prefix allowed.
-                "secretsmanager:*",
+                # Secrets Manager by **literal** action, not `secretsmanager:*`. A wildcard Deny
+                # beats every Allow, so it would also kill `MayRefreshGitHubCredential`'s
+                # `GetSecretValue` and put the eight-hour failure back with nothing in either
+                # document naming the cause -- the same trap the memory actions record. These
+                # are the actions a careless widening would add: writing, rotating or deleting
+                # the client secret every repository's credential depends on, and enumerating
+                # secrets the container was not given.
+                "secretsmanager:CreateSecret",
+                "secretsmanager:PutSecretValue",
+                "secretsmanager:UpdateSecret",
+                "secretsmanager:DeleteSecret",
+                "secretsmanager:RotateSecret",
+                "secretsmanager:RestoreSecret",
+                "secretsmanager:PutResourcePolicy",
+                "secretsmanager:ListSecrets",
+                "secretsmanager:BatchGetSecretValue",
                 "s3:*",
                 "sqs:*",
             ],

@@ -126,8 +126,16 @@ def _connect(common: Any, *, slug: str = "rca-coding-agent-abc123") -> None:
     something else, every registration test in this file fails at once rather than one
     carefully-written test failing alone.
     """
+    # `clientSecretArn` too, because `convert` stores it: provisioning names it in every
+    # execution role, and a settings item without it sends `provider_secret_arn` to the live
+    # provider -- which moto does not implement.
     common.config_table.put_item(
-        Item={"configId": "rca:settings", "appSlug": slug, "appId": "5143354"}
+        Item={
+            "configId": "rca:settings",
+            "appSlug": slug,
+            "appId": "5143354",
+            "clientSecretArn": "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:bedrock-agentcore-identity!default/oauth2/rca_github-fdf929fb-0JG5Oo",
+        }
     )
 
 
@@ -395,6 +403,41 @@ def test_a_failed_bot_lookup_is_not_cached_as_an_empty_identity(
     stored = common.config_table.get_item(Key={"configId": "rca:settings"})["Item"]
     assert "gitAuthorName" not in stored
     assert "gitAuthorEmail" not in stored
+
+
+def test_the_secret_arn_is_backfilled_once_and_a_failed_read_does_not_block_provisioning(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deployment connected before the ARN was stored learns it from the live provider, once.
+
+    That backfill runs inside every provision, so its failure mode matters more than its
+    success: a raise would fail runtime creates and updates over a grant that only matters
+    eight hours later. So a failed read is `""` and stores nothing, and the next provision
+    tries again.
+    """
+    common, _provisioner = _load("provisioner")
+    from handlers import github_app
+
+    common.config_table.put_item(Item={"configId": "rca:settings", "appSlug": "rca-app"})
+    control = FakeAgentCore("bedrock-agentcore-control")
+    control.providers[github_app.PROVIDER_NAME] = {
+        "name": github_app.PROVIDER_NAME,
+        "clientSecretArn": {"secretArn": "arn:aws:secretsmanager:ap-southeast-1:1:secret:x-Ab"},
+    }
+    install(monkeypatch, common, control=control)
+
+    assert github_app.provider_secret_arn() == "arn:aws:secretsmanager:ap-southeast-1:1:secret:x-Ab"
+    assert github_app.provider_secret_arn() == "arn:aws:secretsmanager:ap-southeast-1:1:secret:x-Ab"
+    assert len(control.calls_to("GetOauth2CredentialProvider")) == 1, "backfilled once, then read"
+
+    # A provider read that fails must not raise into the provision that called it.
+    common.config_table.put_item(Item={"configId": "rca:settings", "appSlug": "rca-app"})
+    control.errors["GetOauth2CredentialProvider"] = [
+        client_error("AccessDeniedException", "no", operation="GetOauth2CredentialProvider")
+    ]
+    assert github_app.provider_secret_arn() == ""
+    stored = common.config_table.get_item(Key={"configId": "rca:settings"})["Item"]
+    assert "clientSecretArn" not in stored, "a failure stores nothing, so the next one retries"
 
 
 def test_registering_without_a_github_app_is_refused_before_anything_is_written(
