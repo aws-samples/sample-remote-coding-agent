@@ -102,8 +102,12 @@ def _blocking_findings(assessments: Sequence[Mapping[str, Any]]) -> list[dict[st
     return found
 
 
-def screen_prompt(prompt: str) -> ScreenedPrompt:
+def screen_prompt(prompt: str, *, refused: str = "no run was queued") -> ScreenedPrompt:
     """Pass `prompt` through the deployment's guardrail, or refuse it (invariant 43).
+
+    `refused` is what the refusal says did not happen. A run is the default; a card write
+    passes "the card was not saved", because `cards.create` and `cards.patch` screen too --
+    a secret refused at dispatch but already stored on a card was still a stored secret.
 
     **Fails closed.** A guardrail that cannot be reached is a `503`, not a pass: this is the
     one check between an operator's text and a model with unrestricted `Bash`, and a check
@@ -138,7 +142,7 @@ def screen_prompt(prompt: str) -> ScreenedPrompt:
             503,
             "GuardrailUnavailable",
             f"the prompt guardrail did not answer ({reason}), so the prompt was not screened "
-            "and no run was queued. A throttle clears on a retry; an access or validation "
+            f"and {refused}. A throttle clears on a retry; an access or validation "
             "error means the deployment's guardrail settings need fixing.",
             reason=reason,
         ) from err
@@ -152,7 +156,7 @@ def screen_prompt(prompt: str) -> ScreenedPrompt:
     raise ApiError(
         422,
         "PromptBlockedByGuardrail",
-        f"the prompt guardrail refused this prompt ({tripped}), so no run was queued. "
+        f"the prompt guardrail refused this prompt ({tripped}), so {refused}. "
         "Rephrase the task, and never paste a credential into one.",
         findings=findings,
     )

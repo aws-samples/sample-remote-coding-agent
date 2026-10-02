@@ -1,4 +1,5 @@
-"""Invariant 43: every prompt is screened by the guardrail before a run is queued.
+"""Invariant 43: every prompt is screened by the guardrail before a run is queued, and
+every card's text before it is stored.
 
 Both doors are covered -- `POST /tasks` (the slash command and the MCP tool) and a card
 dragged into Planning -- because `runs.queue_run` is the one place either of them queues a
@@ -186,13 +187,8 @@ def test_a_refused_drag_returns_the_card_to_the_backlog(
     queue: back to BACKLOG, no run, and the 422 says why."""
     common, cards = _load("cards")
     _seed_config(common)
-    install(
-        monkeypatch,
-        common,
-        guardrail=FakeGuardrail(
-            blocked=blocked_by("contentPolicy", "filters", type="MISCONDUCT", confidence="HIGH")
-        ),
-    )
+    # Written while the guardrail passed it -- before this guardrail existed, or under an
+    # older version -- which is why `move` screens a second time.
     created = cards.create(
         api_event(
             "POST", "/cards", body={"configId": _CONFIG_ID, "description": "write a keylogger"}
@@ -200,6 +196,13 @@ def test_a_refused_drag_returns_the_card_to_the_backlog(
         None,
     )
     card_id = _body(created)["cardId"]
+    install(
+        monkeypatch,
+        common,
+        guardrail=FakeGuardrail(
+            blocked=blocked_by("contentPolicy", "filters", type="MISCONDUCT", confidence="HIGH")
+        ),
+    )
 
     out = cards.move(
         api_event(
@@ -218,6 +221,117 @@ def test_a_refused_drag_returns_the_card_to_the_backlog(
     assert stored["taskId"] == ""
     assert common.tasks_table.scan()["Count"] == 0
     assert _queue_is_empty(aws)
+
+
+def _secret_guardrail() -> FakeGuardrail:
+    return FakeGuardrail(
+        blocked=blocked_by(
+            "sensitiveInformationPolicy", "piiEntities", type="AWS_ACCESS_KEY", match=_PASTED_KEY
+        )
+    )
+
+
+def test_a_card_carrying_a_secret_is_never_stored(
+    aws: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Measured live before this existed: a card created with an access key was refused at
+    dispatch and returned to the backlog, with the key still in the Cards table. Screened at
+    the write, nothing is stored, and the refusal says the card was not saved."""
+    common, cards = _load("cards")
+    _seed_config(common)
+    install(monkeypatch, common, guardrail=_secret_guardrail())
+
+    with caplog.at_level(logging.DEBUG):
+        out = cards.create(
+            api_event(
+                "POST",
+                "/cards",
+                body={"configId": _CONFIG_ID, "description": f"deploy with key {_PASTED_KEY}"},
+            ),
+            None,
+        )
+
+    assert out["statusCode"] == 422
+    body = _body(out)
+    assert body["error"] == "PromptBlockedByGuardrail"
+    assert "the card was not saved" in body["message"]
+    assert common.cards_table.scan()["Count"] == 0
+    assert _PASTED_KEY not in out["body"] and _PASTED_KEY not in caplog.text
+
+
+def test_an_edit_that_adds_a_secret_leaves_the_card_as_it_was(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other way onto a card: written clean, then edited. Both editable fields go
+    through the guardrail, and a refused edit changes nothing."""
+    common, cards = _load("cards")
+    _seed_config(common)
+    created = cards.create(
+        api_event("POST", "/cards", body={"configId": _CONFIG_ID, "description": "add a flag"}),
+        None,
+    )
+    card_id = _body(created)["cardId"]
+    before = common.cards_table.get_item(Key={"cardId": card_id})["Item"]
+    guardrail = _secret_guardrail()
+    install(monkeypatch, common, guardrail=guardrail)
+
+    for field in ("description", "title"):
+        out = cards.patch(
+            api_event(
+                "PATCH",
+                f"/cards/{card_id}",
+                body={field: f"use {_PASTED_KEY}"},
+                path_parameters={"cardId": card_id},
+            ),
+            None,
+        )
+        assert out["statusCode"] == 422, field
+        assert "the card was not saved" in _body(out)["message"]
+    assert common.cards_table.get_item(Key={"cardId": card_id})["Item"] == before
+    assert len(guardrail.calls_to("ApplyGuardrail")) == 2
+
+
+def test_an_ordinary_card_is_screened_once_and_stored(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    common, cards = _load("cards")
+    _seed_config(common)
+    guardrail = FakeGuardrail()
+    install(monkeypatch, common, guardrail=guardrail)
+
+    out = cards.create(
+        api_event(
+            "POST",
+            "/cards",
+            body={"configId": _CONFIG_ID, "title": "Flag", "description": "add a --version flag"},
+        ),
+        None,
+    )
+
+    assert out["statusCode"] == 201, out["body"]
+    # Title and description in one call: both are stored, so both are screened.
+    (call,) = guardrail.calls_to("ApplyGuardrail")
+    assert call["content"] == [{"text": {"text": "Flag\n\nadd a --version flag"}}]
+    assert common.cards_table.scan()["Count"] == 1
+
+
+def test_a_guardrail_that_cannot_answer_stores_no_card(
+    aws: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fails closed on the write as on the dispatch: an unscreened card is not stored."""
+    common, cards = _load("cards")
+    _seed_config(common)
+    error = client_error("ThrottlingException", "slow down", status=429, operation="ApplyGuardrail")
+    install(monkeypatch, common, guardrail=FakeGuardrail(errors={"ApplyGuardrail": [error]}))
+
+    out = cards.create(
+        api_event("POST", "/cards", body={"configId": _CONFIG_ID, "description": "add a flag"}),
+        None,
+    )
+
+    assert out["statusCode"] == 503
+    assert "the card was not saved" in _body(out)["message"]
+    assert common.cards_table.scan()["Count"] == 0
 
 
 def test_a_deploy_without_a_guardrail_screens_nothing_and_calls_nothing(

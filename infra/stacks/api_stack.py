@@ -178,10 +178,12 @@ _ENTRY_POINT_GRANTS: dict[tuple[str, str], tuple[str, ...]] = {
     # but the `memoryId` the console already prints. `tests/test_api_grant_contract.py`'s
     # memory guard is what bounds it, as an equality over the calls the handler reaches.
     ("configurations", "memory"): ("config:read", "memory:read"),
-    ("cards", "create"): ("config:read", "cards:write"),
+    # `guardrail:apply` on both card writes: a card's text is screened before it is stored,
+    # so a refused secret never reaches the Cards table (invariant 43).
+    ("cards", "create"): ("config:read", "cards:write", "guardrail:apply"),
     ("cards", "list_"): ("cards:read", "tasks:read"),
     ("cards", "get"): ("cards:read", "tasks:read"),
-    ("cards", "patch"): ("cards:read", "cards:write", "tasks:read"),
+    ("cards", "patch"): ("cards:read", "cards:write", "tasks:read", "guardrail:apply"),
     ("cards", "delete"): ("cards:read", "cards:write", "tasks:read"),
     # `github:credential` on both of the two routes that reach `runs.queue_run`: it refuses
     # a run against a repository with no GitHub authorisation, which costs one AgentCore call

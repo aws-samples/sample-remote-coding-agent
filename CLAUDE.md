@@ -815,6 +815,15 @@ the code it governs and a regression test.
     deploy that it never will: a mistyped or deleted version answers `ValidationException`,
     measured, and a missing grant `AccessDeniedException`.
 
+    **A card's text is screened when it is stored, too** — `cards.create` and `cards.patch`
+    call `screen_prompt` before the write, and a refusal stores nothing ("the card was not
+    saved"). Screening only at dispatch was measured to be wrong: a card created with a pasted
+    access key was refused when dragged, went back to the backlog, and the key stayed in the
+    Cards table — and in its point-in-time recovery after any delete. `move` still screens,
+    because a card written before the guardrail existed, or under an older version, was never
+    screened by this one. Same guardrail on both, so a card that can be stored is a card that
+    can be dispatched. `guardrail:apply` is therefore on four routes, not two.
+
     The guardrail is `ApiStack`'s, built by `prompt_guardrail.add_prompt_guardrail` —
     `prompt_guardrail.guardrail_properties` is the one statement of its policies — and it
     must stay in the stack that consumes it. It was first put in `DataStack` and that was
