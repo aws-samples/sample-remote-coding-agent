@@ -145,6 +145,21 @@ _CAPABILITIES: frozenset[str] = frozenset(
 # gains a permission to look something up live), and a test can then assert coverage and
 # vocabulary without synthesizing anything.
 #
+# The entry points that re-trigger themselves through the queue they consume, and so the
+# ones Lambda's recursive loop detection must be told to leave alone. `provisioner._check`
+# polls a runtime by queueing the next `CHECK` on the provision queue it is reading from,
+# and Lambda's default (`RecursiveLoop.TERMINATE`) drops the event after about 16 hops of
+# one chain -- measured: CREATE, a CREATE retry and CHECK 0-13 ran, CHECK 14 showed up in
+# `RecursiveInvocationsDropped`, was returned to the queue three times and dead-lettered.
+# That is ~7.5 minutes of polling against a runtime that takes 8-12 to reach READY, so with
+# detection on every registration sat at CREATING until the watchdog's 45-minute nudge.
+# The chain's own bound is what replaces the detector: `MAX_CHECK_ATTEMPTS` checks, then
+# FAILED, and a create retry that ends with its 90-second budget. Nothing else is here,
+# so a loop nobody meant to write keeps the default.
+SELF_CHAINING_ENTRY_POINTS: frozenset[tuple[str, str]] = frozenset(
+    {("provisioner", "lambda_handler")}
+)
+
 # `provision-queue:send` vs `tasks-queue:send` is not cosmetic: `provisioner.enqueue`
 # writes to the provision queue and `runs.queue_run`/`runs.enqueue_dispatch` to the task
 # queue, so an entry point granted the wrong one fails at run time with an AccessDenied
@@ -651,6 +666,9 @@ class ApiStack(cdk.Stack):
             timeout=timeout,
             memory_size=memory,
             environment=environment,
+            recursive_loop=lambda_.RecursiveLoop.ALLOW
+            if (module, function) in SELF_CHAINING_ENTRY_POINTS
+            else lambda_.RecursiveLoop.TERMINATE,
             # `log_retention=` is deprecated in aws-cdk-lib 2.266 (it provisions a
             # custom resource per function and emits a warning); an explicit log group is
             # one line in one helper and leaves no Lambda-backed resource behind.

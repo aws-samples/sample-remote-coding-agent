@@ -569,6 +569,40 @@ def test_the_boundary_declaration_tables_carry_a_reason() -> None:
             )
 
 
+# Which queue each SQS-consuming entry point reads, as `api_stack` wires them. Spelled here
+# because `ApiStack` cannot be synthesized in a test (see the module docstring).
+_QUEUE_CONSUMED = {
+    ("provisioner", "lambda_handler"): "provision-queue",
+    ("dispatcher", "lambda_handler"): "tasks-queue",
+    ("dispatcher", "dlq_handler"): "tasks-dlq",
+}
+
+
+def test_exactly_the_self_chaining_consumers_opt_out_of_recursive_loop_detection() -> None:
+    """A consumer that may send to the queue it reads is a loop to Lambda, and the default
+    `TERMINATE` drops its 17th hop. The provisioner's CHECK chain was cut there on every
+    registration, a couple of checks before the runtime reached READY, and the item sat at
+    CREATING until the watchdog nudged it 45 minutes later. The set is derived from the grant
+    table so a new self-sender cannot be added without deciding this, and nothing that cannot
+    loop is allowed to."""
+    self_senders = {
+        entry
+        for entry, queue in _QUEUE_CONSUMED.items()
+        if f"{queue}:send" in api_stack._ENTRY_POINT_GRANTS[entry]
+    }
+    assert self_senders == {("provisioner", "lambda_handler")}
+    assert self_senders == api_stack.SELF_CHAINING_ENTRY_POINTS
+
+
+def test_the_function_factory_applies_the_recursive_loop_setting() -> None:
+    """The constant above is inert unless `_function` reads it, and the stack cannot be
+    synthesized here to check the property on the resource."""
+    source = inspect.getsource(api_stack.ApiStack._function)
+    assert "recursive_loop=" in source
+    assert "SELF_CHAINING_ENTRY_POINTS" in source
+    assert "RecursiveLoop.ALLOW" in source
+
+
 def test_the_api_stack_name_and_output_key_are_the_ones_the_mcp_client_looks_up() -> None:
     """The plugin's whole "nobody types the API URL" story is a `describe_stacks` against
     that name for that output, so both halves are a contract between two directories."""
