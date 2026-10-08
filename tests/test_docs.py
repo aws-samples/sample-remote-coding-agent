@@ -77,7 +77,6 @@ _ENDPOINT_SERVICE_CLASSES = frozenset(
 _ENDPOINT_DIAGRAM_WORDS = {
     "BEDROCK_RUNTIME": "Bedrock",
     "BEDROCK_AGENTCORE": "AgentCore",
-    "SECRETS_MANAGER": "Secrets",
     "ECR": "ECR",
     "ECR_DOCKER": "ECR",
     "CLOUDWATCH_LOGS": "Logs",
@@ -653,7 +652,7 @@ def test_the_readme_diagram_names_every_vpc_endpoint() -> None:
         "the endpoint to `README.md`'s diagram AND its member to `_ENDPOINT_DIAGRAM_WORDS`."
     )
     diagram = ET.parse(REPO_ROOT / "assets/architecture.drawio")
-    endpoint_ids = {"bedrock", "memory", "secrets", "dynamodb", "ecr", "s3", "logs"}
+    endpoint_ids = {"bedrock", "memory", "dynamodb", "ecr", "s3", "logs"}
     cells = {cell.get("id"): cell for cell in diagram.findall(".//mxCell")}
     for name in endpoint_ids:
         assert cells[name].get("parent") == "endpoints"

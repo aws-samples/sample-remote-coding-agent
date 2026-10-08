@@ -50,9 +50,12 @@ Before calling this an end-to-end demo, use an approved disposable AWS account a
 ## Architecture
 
 `architecture.drawio` is the editable source. `architecture.png` is its white-background
-export, suitable for GitHub light and dark themes. Service dependencies share one compact
-endpoint group; connectors describe the main request path, not every IAM or lifecycle operation.
-Lambda is outside the runtime's VPC connectivity boundary. GitHub is outside the AWS account.
+export, suitable for GitHub light and dark themes. The VPC spans two Availability Zones: the
+runtime sits in the private subnets behind a security group that allows only outbound HTTPS,
+reaches the services in the **AWS services** group (container id `endpoints`) through the VPC
+endpoints box, and reaches GitHub through the public subnet's NAT gateway and the internet
+gateway. Connectors describe the main request path, not every IAM or lifecycle operation.
+Lambda is outside the runtime's VPC. GitHub is outside the AWS account.
 All connectors are straight. The account uses the native AWS Account group border;
 the Claude Code artwork's black background is removed for transparent placement.
 

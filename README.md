@@ -156,7 +156,7 @@ nothing ran; its reason says whether to retry. It screens prompts only, not agen
 
 ## Architecture
 
-![AWS architecture: Claude Code or the console submits through API Gateway and Lambda; SQS dispatches AgentCore Runtime, which uses private AWS endpoints and GitHub over HTTPS.](assets/architecture.png)
+![AWS architecture: Claude Code or the console submits through API Gateway; a Lambda function screens each prompt with Amazon Bedrock Guardrails and queues it in SQS; a dispatcher starts a per-repository AgentCore Runtime in private VPC subnets, which reaches AWS services through VPC endpoints and GitHub through a NAT gateway, using a GitHub App token from AgentCore Identity.](assets/architecture.png)
 
 [Editable draw.io source](assets/architecture.drawio) · [Asset sources](assets/README.md#architecture)
 
